@@ -1,3 +1,7 @@
+# Fortran module files
+*.mod
+*.smod
+
 # Prerequisites
 *.d
 
@@ -11,31 +15,71 @@
 *.gch
 *.pch
 
-# Linker files
+# Linker/Debugger/Library files
 *.ilk
-
-# Debugger Files
 *.pdb
-
-# Compiled Dynamic libraries
 *.so
 *.dylib
 *.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
 *.lai
 *.la
 *.a
 *.lib
+*.dwo
 
 # Executables
 *.exe
 *.out
 *.app
 
-# debug information files
-*.dwo
+# -- // --
+
+# Generated
+# ODB (Object-Relational Mapping) generated source files
+*[:upper:]-odb.cxx
+*[:upper:]-odb.hxx
+*[:upper:]-odb.ixx
+*.odb
+Code/odb/*
+
+# Build Systems (CMake) build directory
+[Bb]uild/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+#CMakeUserPresets.json
+
+# -- // --
+
+# IDEs - Integrated Development Environments
+# Visual Studio Code/Codium
+.vscode/*
+# !.vscode/settings.json
+# !.vscode/tasks.json
+!.vscode/launch.json
+# !.vscode/extensions.json
+*.code-workspace
+
+# Visual Studio
+.vs/
+*.user
+*.userosscache
+*.sln.docstates
+*.suo
+
+# CLion / JetBrains
+.idea/
+cmake-build-*/
+
+# -- // --
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
+
+# -- // --
+
+# -- // --
