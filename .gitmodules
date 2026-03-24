@@ -1,0 +1,6 @@
+[submodule "extern/sqlgen"]
+	path = extern/sqlgen
+	url = https://github.com/getml/sqlgen.git
+[submodule "extern/googletest"]
+	path = extern/googletest
+	url = https://github.com/google/googletest.git
