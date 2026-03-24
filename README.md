@@ -45,7 +45,7 @@ git submodule add https://github.com/google/googletest.git extern/googletest
 
 Your project CMakeLists.txt
 
-```bash
+```cmake
 cmake_minimum_required(VERSION 3.23)
 project(SqlGenIsolationTest LANGUAGES CXX)
 
