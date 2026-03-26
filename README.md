@@ -10,7 +10,8 @@ my_isolated_test/
 ├── CMakeLists.txt        
 ├── extern/
 │   ├── googletest/
-│   └── sqlgen/
+│   ├── sqlgen/
+│   └── reflect-cpp/
 ├── src/
 │   ├── database_logic.hpp
 │   └── database_logic.cpp
@@ -40,6 +41,10 @@ cmake --build build
 # add Google Test
 cd ../..
 git submodule add https://github.com/google/googletest.git extern/googletest
+
+# add reflect-cpp
+git submodule add https://github.com/getml/reflect-cpp.git extern/reflect-cpp
+git submodule update --init --recursive
 ```
 
 

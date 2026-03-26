@@ -44,13 +44,17 @@ Code/odb/*
 
 # Build Systems (CMake) build directory
 [Bb]uild/
+[Bb]uild-[Dd]ebug/
+[Bb]uild-[Rr]elease/
 CMakeCache.txt
 CMakeFiles/
 CMakeScripts/
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
-#CMakeUserPresets.json
+CMakeUserPresets.json
+# launch.json
+.vscode/
 
 # -- // --
 
