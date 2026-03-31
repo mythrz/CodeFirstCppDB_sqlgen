@@ -1,28 +1,32 @@
+/// sample 1 from their docs. Working
 #include <gtest/gtest.h>
+#include <sqlgen/sqlite.hpp>
+#include <vector>
 #include <string>
 
-class SqliteTest : public ::testing::Test 
-{
-protected:
-    void SetUp() override {
-        message = "Build and Debug Success";
-    }
-
-    void TearDown() override {
-        message.clear();
-    }
-
-    std::string message;
+struct User {
+    std::string name;
+    int age;
 };
 
-TEST_F(SqliteTest, CheckMessageContent) 
-{
-    EXPECT_EQ(message, "Build and Debug Success");
-    EXPECT_STREQ(message.c_str(), "Build and Debug Success");
-}
 
-int main(int argc, char **argv) 
-{
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+TEST(SqlgenSqlite, WriteAndReadUser) {
+    // const auto conn = sqlgen::sqlite::connect(":memory:");
+    const auto conn = sqlgen::sqlite::connect("test.db");
+    ASSERT_TRUE(static_cast<bool>(conn)) << "Failed to open sqlite connection";
+
+    auto create_res = conn.and_then(sqlgen::create_table<User> | sqlgen::if_not_exists);
+    ASSERT_TRUE(create_res) << "Failed to create User table";
+
+    const auto user = User{.name = "John", .age = 18};
+    auto write_res = conn.and_then(sqlgen::write(user));
+    ASSERT_TRUE(write_res) << "Failed to write user";
+
+    auto read_res = sqlgen::read<std::vector<User>>(conn);
+    ASSERT_TRUE(read_res) << "Read operation failed";
+    const auto users = read_res.value();
+
+    ASSERT_EQ(users.size(), 1u);
+    EXPECT_EQ(users[0].name, "John");
+    EXPECT_EQ(users[0].age, 30);
 }

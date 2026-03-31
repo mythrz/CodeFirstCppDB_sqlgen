@@ -2,7 +2,11 @@
 
 Code-First Database tests with sqlgen, C++20, ArchLinux EOS
 
-Folder hierarchy of the project. The extern folder will hold the submodules sqlgen and googletest. The source code will go into src folder. No main file, the tests folder will have the generator of the database.
+Folder hierarchy of the project. The extern folder will hold the submodules sqlgen and googletest. 
+
+Your source code will go into src folder. 
+
+No main file, the tests folder/files will have the generator of the database.
 
 ```
 my_isolated_test/
@@ -13,13 +17,12 @@ my_isolated_test/
 │   ├── sqlgen/
 │   └── reflect-cpp/
 ├── src/
-│   ├── database_logic.hpp
-│   └── database_logic.cpp
+│   └── TODO
 └── tests/
     └── test_main.cpp  
 ```
 
-Requirements
+Steps to reproduce this repository
 
 ```bash
 sudo pacman -S --needed base-devel cmake ninja autoconf bison flex postgresql-libs postgresql mariadb-libs mariadb duckdb sqlite
@@ -106,8 +109,6 @@ TEST(DatabaseTest, CanConnectAndWrite)
 Configure, build, run (your project root)
 
 ```bash
-# cmake -S . -B build -DCMAKE_CXX_STANDARD=20 -G Ninja -DCMAKE_BUILD_TYPE=Release
-# cmake -S . -B build -DCMAKE_CXX_STANDARD=20 -DCMAKE_BUILD_TYPE=Release
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build
@@ -116,46 +117,18 @@ cmake --build build
 ```
 
 ---
-
-### Their suggestion
-
-The build is working for the sqlgen in isolation. The issue comes when you try to call sqlgen from your project
-
-```bash
-sudo pacman -Syu
-
-sudo pacman -S base-devel cmake git bison flex
-
-git clone https://github.com/getml/sqlgen.git
-cd sqlgen/
-
-git submodule update --init
-
-cmake -S . -B build -DCMAKE_CXX_STANDARD=20 -DCMAKE_BUILD_TYPE=Release
-
-cmake --build build 
-```
-
 ---
 
-### Current problem
+### How to clone and run this repo
 
-- [ ] sqlgen configures and builds correctly. The issue is when you reference sqlgen in your own project.
+After cloning, navigate to the root of the project
 
 ```bash
+# update the extern submodules
+git submodule update --init --recursive
+
+# Configure, build, run
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-CMake Error at extern/sqlgen/CMakeLists.txt:136 (find_package):
-  Could not find a package configuration file provided by
-  "unofficial-sqlite3" with any of the following names:
-
-    unofficial-sqlite3Config.cmake
-    unofficial-sqlite3-config.cmake
-
-  Add the installation prefix of "unofficial-sqlite3" to CMAKE_PREFIX_PATH or
-  set "unofficial-sqlite3_DIR" to a directory containing one of the above
-  files.  If "unofficial-sqlite3" provides a separate development package or
-  SDK, be sure it has been installed.
-
-
--- Configuring incomplete, errors occurred!
+cmake --build build
+./build/unit_tests
 ```
