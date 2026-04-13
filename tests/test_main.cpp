@@ -1,32 +1,52 @@
-/// sample 1 from their docs. Working
-#include <gtest/gtest.h>
-#include <sqlgen/sqlite.hpp>
-#include <vector>
-#include <string>
 
-struct User {
-    std::string name;
-    int age;
+#include "sqlgen/if_not_exists.hpp"
+#include <gtest/gtest.h>
+#include <sqlgen/sqlite/connect.hpp>
+#include <filesystem>
+#include <sqlgen.hpp>
+#include <vector>
+
+namespace fs = std::filesystem;
+
+struct Person {
+    sqlgen::PrimaryKey<uint32_t> id;
+    std::string first_name;
+    std::string last_name;
 };
 
+struct Relationship {
+    sqlgen::ForeignKey<uint32_t, Person, "id"> parent_id;
+    uint32_t child_id;
+};
 
-TEST(SqlgenSqlite, WriteAndReadUser) {
-    // const auto conn = sqlgen::sqlite::connect(":memory:");
-    const auto conn = sqlgen::sqlite::connect("test.db");
-    ASSERT_TRUE(static_cast<bool>(conn)) << "Failed to open sqlite connection";
+class SqlgenExampleTest: public::testing::Test{
+protected:
+    std::string dbPath = "relationalDB.db";
 
-    auto create_res = conn.and_then(sqlgen::create_table<User> | sqlgen::if_not_exists);
-    ASSERT_TRUE(create_res) << "Failed to create User table";
+    void SetUp() override 
+    {
+        if (fs::exists(dbPath))
+        {
+            fs::remove(dbPath);
+        }
+    }
+};
 
-    const auto user = User{.name = "John", .age = 18};
-    auto write_res = conn.and_then(sqlgen::write(user));
-    ASSERT_TRUE(write_res) << "Failed to write user";
+TEST_F(SqlgenExampleTest, Test1)
+{
+    auto conn = sqlgen::sqlite::connect(dbPath);
+    auto people = std::vector<Person>
+    {
+        Person{.id = 1, .first_name = "test1", .last_name = "test11"}, Person{.id = 2, .first_name = "test2", .last_name= "test22"}
+    };
 
-    auto read_res = sqlgen::read<std::vector<User>>(conn);
-    ASSERT_TRUE(read_res) << "Read operation failed";
-    const auto users = read_res.value();
+    auto relationships = std::vector<Relationship>
+    {
+        Relationship{.parent_id = 1, .child_id = 3}, Relationship{.parent_id = 2, .child_id = 4}
+    };
 
-    ASSERT_EQ(users.size(), 1u);
-    EXPECT_EQ(users[0].name, "John");
-    EXPECT_EQ(users[0].age, 30);
+    conn.and_then(sqlgen::create_table<Person> | sqlgen::if_not_exists)
+        .and_then(sqlgen::create_table<Relationship> | sqlgen::if_not_exists)
+        .and_then(sqlgen::insert(std::ref(people)))
+        .and_then(sqlgen::insert(std::ref(relationships)));
 }
