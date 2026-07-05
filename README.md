@@ -47,6 +47,8 @@ cmake --build build
 ./build/unit_tests
 ```
 
+CMakePresets.json, launch.json and tasks.json are presented too if you do not want to use the command line and vscode/codium instead.
+
 ---
 ---
 ---

@@ -52,19 +52,16 @@ CMakeScripts/
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
-# CMakeUserPresets.json
-# launch.json
-.vscode/
 *.db
 
 # -- // --
 
-# IDEs - Integrated Development Environments
+# IDEs
 # Visual Studio Code/Codium
-.vscode/*
+# .vscode/*
 # !.vscode/settings.json
 # !.vscode/tasks.json
-!.vscode/launch.json
+# !.vscode/launch.json
 # !.vscode/extensions.json
 *.code-workspace
 

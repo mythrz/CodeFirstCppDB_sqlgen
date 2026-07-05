@@ -1,0 +1,87 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "clang-debug",
+      "displayName": "clang-debug",
+      "description": "Debug build using Clang (Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux/arch/clang/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "/usr/bin/clang",
+        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "clang-release",
+      "displayName": "clang-release",
+      "description": "Release build using Clang (Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux/arch/clang/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "/usr/bin/clang",
+        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "gcc-debug",
+      "displayName": "gcc-debug",
+      "description": "Debug build using GCC (Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux/arch/gcc/debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "/usr/bin/gcc",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "gcc-release",
+      "displayName": "gcc-release",
+      "description": "Release build using GCC (Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux/arch/gcc/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "/usr/bin/gcc",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-clang-debug",
+      "configurePreset": "clang-debug",
+      "displayName": "Build Clang Debug",
+      "description": "Configure (if needed) and build Clang Debug",
+      "jobs": 0
+    },
+    {
+      "name": "build-clang-release",
+      "configurePreset": "clang-release",
+      "displayName": "Build Clang Release",
+      "description": "Configure (if needed) and build Clang Release",
+      "jobs": 0
+    },
+    {
+      "name": "build-gcc-debug",
+      "configurePreset": "gcc-debug",
+      "displayName": "Build GCC Debug",
+      "description": "Configure (if needed) and build GCC Debug",
+      "jobs": 0
+    },
+    {
+      "name": "build-gcc-release",
+      "configurePreset": "gcc-release",
+      "displayName": "Build GCC Release",
+      "description": "Configure (if needed) and build GCC Release",
+      "jobs": 0
+    }
+  ]
+}
