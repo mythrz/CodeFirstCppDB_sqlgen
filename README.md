@@ -1,4 +1,4 @@
-### Context
+### A. Context
 
 Code-First Database tests with sqlgen, C++20, ArchLinux EOS
 
@@ -6,10 +6,10 @@ Folder hierarchy of the project. The extern folder will hold the submodules sqlg
 
 Your source code will go into src folder. 
 
-No main file, the tests folder/files will have the generator of the database.
+No main file, the tests will have the generator of the database.
 
 ```
-my_isolated_test/
+CodeFirstCppDB_sqlgen/
 ├── .gitignore
 ├── CMakeLists.txt        
 ├── extern/
@@ -22,11 +22,35 @@ my_isolated_test/
     └── test_main.cpp  
 ```
 
-Steps to reproduce this repository
+These are the required libs. You can probably get away with fewer than the current list, depending on your needs.
 
 ```bash
 sudo pacman -S --needed base-devel cmake ninja autoconf bison flex postgresql-libs postgresql mariadb-libs mariadb duckdb sqlite
 ```
+
+---
+---
+---
+
+### B. Clone and test this repo
+
+If you just want to test this repo on your machine. Just clone this repo, navigate to the root of the project, update the submodules, config + build + run tests.
+
+```bash
+# update the extern submodules
+git submodule update --init --recursive
+
+# Configure, build, run
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/unit_tests
+```
+
+---
+---
+---
+
+### C. Steps to reproduce this repository
 
 Setup the modules. Open a terminal in the root of your personal project.
 
@@ -118,17 +142,4 @@ cmake --build build
 
 ---
 ---
-
-### How to clone and run this repo
-
-After cloning, navigate to the root of the project
-
-```bash
-# update the extern submodules
-git submodule update --init --recursive
-
-# Configure, build, run
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-./build/unit_tests
-```
+---
