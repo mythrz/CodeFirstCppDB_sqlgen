@@ -37,10 +37,11 @@ sudo pacman -S --needed base-devel cmake ninja autoconf bison flex postgresql-li
 If you just want to test this repo on your machine. Just clone this repo, navigate to the root of the project, update the submodules, config + build + run tests.
 
 ```bash
-# update the extern submodules
-git submodule update --init --recursive
+## update extern submodules (commit or latest. Choose one)
+# git submodule update --init --recursive
+# git submodule update --init --recursive --remote
 
-# Configure, build, run
+## Configure, build, run
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/unit_tests

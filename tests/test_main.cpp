@@ -21,32 +21,55 @@ struct Relationship {
 
 class SqlgenExampleTest: public::testing::Test{
 protected:
-    std::string dbPath = "relationalDB.db";
+    static std::string dbPath;
 
-    void SetUp() override 
+    static void SetUpTestSuite()
     {
         if (fs::exists(dbPath))
         {
             fs::remove(dbPath);
         }
+
+        SqlgenExampleTest::CreateMock_DB();
     }
+
+    static void CreateMock_DB()
+    {
+        auto conn = sqlgen::sqlite::connect(dbPath);
+        auto people = std::vector<Person>
+        {
+            Person{.id = 1, .first_name = "test1", .last_name = "test11"}, Person{.id = 2, .first_name = "test2", .last_name= "test22"}
+        };
+
+        auto relationships = std::vector<Relationship>
+        {
+            Relationship{.parent_id = 1, .child_id = 3}, Relationship{.parent_id = 2, .child_id = 4}
+        };
+
+        conn.and_then(sqlgen::create_table<Person> | sqlgen::if_not_exists)
+            .and_then(sqlgen::create_table<Relationship> | sqlgen::if_not_exists)
+            .and_then(sqlgen::insert(std::ref(people)))
+            .and_then(sqlgen::insert(std::ref(relationships)));
+    }
+
+    // void SetUp() override { // run before every UT}
 };
 
-TEST_F(SqlgenExampleTest, Test1)
+std::string SqlgenExampleTest::dbPath = "relationalDB.db";
+
+/// connect and query teh database
+TEST_F(SqlgenExampleTest, QueryTest001)
 {
-    auto conn = sqlgen::sqlite::connect(dbPath);
-    auto people = std::vector<Person>
+    const auto conn = sqlgen::sqlite::connect(dbPath);
+    
+    const auto people = sqlgen::read<std::vector<Person>>(conn).value();
+    
+    for (const auto& u : people)
     {
-        Person{.id = 1, .first_name = "test1", .last_name = "test11"}, Person{.id = 2, .first_name = "test2", .last_name= "test22"}
-    };
+        std::cout << "result: " << u.last_name << ", " << u.first_name << " ! \n";
+    }
 
-    auto relationships = std::vector<Relationship>
-    {
-        Relationship{.parent_id = 1, .child_id = 3}, Relationship{.parent_id = 2, .child_id = 4}
-    };
-
-    conn.and_then(sqlgen::create_table<Person> | sqlgen::if_not_exists)
-        .and_then(sqlgen::create_table<Relationship> | sqlgen::if_not_exists)
-        .and_then(sqlgen::insert(std::ref(people)))
-        .and_then(sqlgen::insert(std::ref(relationships)));
+    ASSERT_FALSE(people.empty()) << "No users returned from query";
+    ASSERT_FALSE(people[0].first_name.empty()) << "First person's first_name is empty";
+    ASSERT_FALSE(people[0].last_name.empty()) << "First person's last_name is empty";
 }
