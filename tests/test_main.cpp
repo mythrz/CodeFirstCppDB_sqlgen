@@ -1,5 +1,6 @@
 
 #include "sqlgen/if_not_exists.hpp"
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <sqlgen/sqlite/connect.hpp>
 #include <filesystem>
@@ -8,15 +9,24 @@
 
 namespace fs = std::filesystem;
 
-struct Person {
-    sqlgen::PrimaryKey<uint32_t> id;
-    std::string first_name;
-    std::string last_name;
+struct Person 
+{
+    sqlgen::PrimaryKey<uint32_t> Id;
+    std::string FirstName;
+    std::string LastName;
 };
 
-struct Relationship {
-    sqlgen::ForeignKey<uint32_t, Person, "id"> parent_id;
-    uint32_t child_id;
+struct Something 
+{
+    sqlgen::PrimaryKey<uint32_t> Id;
+    std::string Name;
+};
+
+struct Person_Something
+{
+    sqlgen::ForeignKey<uint32_t, Person, "Id"> PersonId;
+    sqlgen::ForeignKey<uint32_t, Something, "Id"> SomethingId;
+    uint32_t Quantity;
 };
 
 class SqlgenExampleTest: public::testing::Test{
@@ -38,18 +48,31 @@ protected:
         auto conn = sqlgen::sqlite::connect(dbPath);
         auto people = std::vector<Person>
         {
-            Person{.id = 1, .first_name = "test1", .last_name = "test11"}, Person{.id = 2, .first_name = "test2", .last_name= "test22"}
+            Person{.Id = 1, .FirstName = "test1", .LastName = "test11"}, 
+            Person{.Id = 2, .FirstName = "test2", .LastName= "test22"}
         };
 
-        auto relationships = std::vector<Relationship>
+        auto something = std::vector<Something>
         {
-            Relationship{.parent_id = 1, .child_id = 3}, Relationship{.parent_id = 2, .child_id = 4}
+            Something{.Id = 1, .Name = "Item1"}, 
+            Something{.Id = 2, .Name = "Item2"}
+        };
+
+        auto personthings = std::vector<Person_Something>
+        {
+            Person_Something{.PersonId = 1, .SomethingId = 1}, 
+            Person_Something{.PersonId = 2, .SomethingId = 2}
         };
 
         conn.and_then(sqlgen::create_table<Person> | sqlgen::if_not_exists)
-            .and_then(sqlgen::create_table<Relationship> | sqlgen::if_not_exists)
+            // .and_then(sqlgen::create_table<Relationship> | sqlgen::if_not_exists)
+            .and_then(sqlgen::create_table<Something> | sqlgen::if_not_exists)
+            .and_then(sqlgen::create_table<Person_Something> | sqlgen::if_not_exists)
             .and_then(sqlgen::insert(std::ref(people)))
-            .and_then(sqlgen::insert(std::ref(relationships)));
+            // .and_then(sqlgen::insert(std::ref(relationships)))
+            .and_then(sqlgen::insert(std::ref(something)))
+            .and_then(sqlgen::insert(std::ref(personthings)))
+        ;
     }
 
     // void SetUp() override { // run before every UT}
@@ -66,10 +89,10 @@ TEST_F(SqlgenExampleTest, QueryTest001)
     
     for (const auto& u : people)
     {
-        std::cout << "result: " << u.last_name << ", " << u.first_name << " ! \n";
+        std::cout << "result: " << u.LastName << ", " << u.FirstName << " ! \n";
     }
 
     ASSERT_FALSE(people.empty()) << "No users returned from query";
-    ASSERT_FALSE(people[0].first_name.empty()) << "First person's first_name is empty";
-    ASSERT_FALSE(people[0].last_name.empty()) << "First person's last_name is empty";
+    ASSERT_FALSE(people[0].FirstName.empty()) << "First person's first_name is empty";
+    ASSERT_FALSE(people[0].LastName.empty()) << "First person's last_name is empty";
 }

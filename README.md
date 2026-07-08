@@ -140,7 +140,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
 cmake --build build
 
-./build/unit_tests
+./build/linux/arch/clang/debug/unit_tests
 ```
 
 ---
