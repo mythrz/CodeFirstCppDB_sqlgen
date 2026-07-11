@@ -1,33 +1,16 @@
 
 #include "sqlgen/if_not_exists.hpp"
-#include <cstdint>
 #include <gtest/gtest.h>
 #include <sqlgen/sqlite/connect.hpp>
 #include <filesystem>
 #include <sqlgen.hpp>
 #include <vector>
+#include "entities/Person_Something.hpp"
 
 namespace fs = std::filesystem;
 
-struct Person 
-{
-    sqlgen::PrimaryKey<uint32_t> Id;
-    std::string FirstName;
-    std::string LastName;
-};
-
-struct Something 
-{
-    sqlgen::PrimaryKey<uint32_t> Id;
-    std::string Name;
-};
-
-struct Person_Something
-{
-    sqlgen::ForeignKey<uint32_t, Person, "Id"> PersonId;
-    sqlgen::ForeignKey<uint32_t, Something, "Id"> SomethingId;
-    uint32_t Quantity;
-};
+using namespace sqlgen;
+using namespace sqlgen::literals;
 
 class SqlgenExampleTest: public::testing::Test{
 protected:
@@ -95,4 +78,21 @@ TEST_F(SqlgenExampleTest, QueryTest001)
     ASSERT_FALSE(people.empty()) << "No users returned from query";
     ASSERT_FALSE(people[0].FirstName.empty()) << "First person's first_name is empty";
     ASSERT_FALSE(people[0].LastName.empty()) << "First person's last_name is empty";
+}
+
+TEST_F(SqlgenExampleTest, SelectFrom002)
+{
+    const auto conn = sqlgen::sqlite::connect(dbPath);
+
+    const auto query = select_from<Person>("FirstName"_c, "LastName"_c, "Id"_c)
+    | where("Id"_c == 1);
+
+    const auto person1 = conn
+        // .and_then(query | to<std::vector<Person>>)
+        .and_then(query | to<Person>)
+        .value();
+
+    ASSERT_EQ(person1.Id.value(), 1);
+    ASSERT_EQ(person1.FirstName, "test1");
+    ASSERT_EQ(person1.LastName, "test11");
 }

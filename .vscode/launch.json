@@ -3,51 +3,40 @@
   "configurations": [
     {
       "name": "Debug unit_tests (clang debug)",
-      "type": "cppdbg",
+      "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/build/linux/arch/clang/debug/unit_tests",
       "args": [],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "miDebuggerPath": "/usr/bin/gdb"
+      "terminal": "integrated"
     },
     {
       "name": "Debug unit_tests (clang release)",
-      "type": "cppdbg",
+      "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/build/linux/arch/clang/release/unit_tests",
       "args": [],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "miDebuggerPath": "/usr/bin/gdb"
+      "terminal": "integrated"
     },
     {
       "name": "Debug unit_tests (gcc debug)",
-      "type": "cppdbg",
+      "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/build/linux/arch/gcc/debug/unit_tests",
       "args": [],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "miDebuggerPath": "/usr/bin/gdb"
+      "terminal": "integrated"
     },
     {
       "name": "Debug unit_tests (gcc release)",
-      "type": "cppdbg",
+      "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/build/linux/arch/gcc/release/unit_tests",
       "args": [],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "miDebuggerPath": "/usr/bin/gdb"
+      "terminal": "integrated"
     }
   ]
 }
+
