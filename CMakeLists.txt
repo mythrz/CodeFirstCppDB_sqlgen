@@ -1,7 +1,8 @@
-cmake_minimum_required(VERSION 3.23)
+cmake_minimum_required(VERSION 3.24)
 project(SqlGenIsolationTest LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+# set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # NOT using vcpkg
@@ -30,19 +31,7 @@ add_subdirectory(extern/sqlgen)
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 add_subdirectory(extern/googletest)
 
-# code & tests
-add_executable(unit_tests 
-    tests/test_main.cpp
-)
-
-target_include_directories(unit_tests 
-    PRIVATE 
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/extern/sqlgen/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/extern/reflect-cpp/include
-)
-target_link_libraries(unit_tests 
-    PRIVATE 
-        sqlgen::sqlgen 
-        GTest::gtest_main
-)
+# projects
+# add_subdirectory(Core)
+add_subdirectory(DAL)
+# add_subdirectory(Startup)

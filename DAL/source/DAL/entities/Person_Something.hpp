@@ -1,6 +1,4 @@
-// #include "sqlgen/PrimaryKey.hpp"
 #include "sqlgen/ForeignKey.hpp"
-// #include "string"
 #include <cstdint>
 #include "Person.hpp"
 #include "Something.hpp"
