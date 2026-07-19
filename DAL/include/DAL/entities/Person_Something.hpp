@@ -1,3 +1,5 @@
+#pragma once
+
 #include "sqlgen/ForeignKey.hpp"
 #include <cstdint>
 #include "Person.hpp"

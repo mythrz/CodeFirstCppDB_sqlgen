@@ -5,6 +5,8 @@
 #include <sqlgen.hpp>
 #include <vector>
 #include "entities/Person_Something.hpp"
+#include "repositories/generic/RepoGen001.hpp"
+#include "repositories/PersonRepo.hpp"
 
 namespace fs = std::filesystem;
 
@@ -62,93 +64,6 @@ protected:
 
 std::string SqlgenExampleTest::dbPath = "relationalDB.db";
 
-template <typename T>
-class Repository {
-public:
-    using Conn = decltype(sqlgen::sqlite::connect(std::declval<std::string>()));
-
-    explicit Repository(const Conn& conn)
-        : conn_(conn) {}
-
-    std::vector<T> get_all() const {
-        return sqlgen::read<std::vector<T>>(conn_).value();
-    }
-
-    std::optional<T> get_by_id(int id) const 
-    {
-        auto query = select_from<T>("Id"_c, "FirstName"_c, "LastName"_c)
-                   | where("Id"_c == id);
-
-        auto result = conn_.and_then(query | to<T>);
-        if (!result) 
-        {
-            return std::nullopt;
-        }
-        return result.value();
-    }
-
-    auto insert_one(const T& item) const 
-    {
-        return sqlgen::write(conn_, item);
-    }
-
-    auto insert_many(const std::vector<T>& items) const 
-    {
-        return sqlgen::write(conn_, items);
-    }
-
-    auto update_one(const T& item) const 
-    {
-        return sqlgen::write(conn_, item);
-    }
-
-    auto delete_by_id(int id) const
-    {
-         const auto query = delete_from<Person> | where("Id"_c == id);
-         query(conn_).value();
-    }
-
-    bool exists_by_id(int id) const 
-    {
-        return get_by_id(id).has_value();
-    }
-
-    std::size_t count() const 
-    {
-        return get_all().size();
-    }
-
-protected:
-    Conn conn_;
-};
-
-class PersonRepository : public Repository<Person> {
-public:
-    using Repository<Person>::Repository;
-
-    std::optional<Person> find_by_id(int id) const {
-        auto query = select_from<Person>("Id"_c, "FirstName"_c, "LastName"_c)
-                   | where("Id"_c == id);
-
-        auto result = conn_.and_then(query | to<Person>);
-        if (!result) {
-            return std::nullopt;
-        }
-        return result.value();
-    }
-
-    std::vector<Person> find_by_last_name(const std::string& lastName) const {
-        auto query = select_from<Person>("Id"_c, "FirstName"_c, "LastName"_c)
-                   | where("LastName"_c == lastName);
-
-        auto result = conn_.and_then(query | to<std::vector<Person>>);
-        if (!result) {
-            return {};
-        }
-        return result.value();
-    }
-};
-
 /// connect and query teh database
 TEST_F(SqlgenExampleTest, QueryTest001)
 {
@@ -186,7 +101,7 @@ TEST_F(SqlgenExampleTest, SelectFrom002)
 TEST_F(SqlgenExampleTest, GenericRepositoryGetAll) 
 {
     auto conn = sqlgen::sqlite::connect(dbPath);
-    Repository<Person> repo(conn);
+    RepoGen001<Person> repo(conn);
 
     const auto people = repo.get_all();
 
@@ -197,7 +112,7 @@ TEST_F(SqlgenExampleTest, GenericRepositoryGetAll)
 TEST_F(SqlgenExampleTest, CustomRepositoryFindById) 
 {
     auto conn = sqlgen::sqlite::connect(dbPath);
-    PersonRepository repo(conn);
+    PersonRepo repo(conn);
 
     const auto person = repo.find_by_id(1);
 
@@ -209,7 +124,7 @@ TEST_F(SqlgenExampleTest, CustomRepositoryFindById)
 TEST_F(SqlgenExampleTest, CustomRepositoryFindByLastName) 
 {
     auto conn = sqlgen::sqlite::connect(dbPath);
-    PersonRepository repo(conn);
+    PersonRepo repo(conn);
 
     const auto people = repo.find_by_last_name("test22");
 
@@ -220,7 +135,7 @@ TEST_F(SqlgenExampleTest, CustomRepositoryFindByLastName)
 TEST_F(SqlgenExampleTest, InsertOne_ShouldPersistPerson)
 {
     auto conn = sqlgen::sqlite::connect(dbPath);
-    PersonRepository repo(conn);
+    PersonRepo repo(conn);
 
     Person p{.Id = 3, .FirstName = "test3", .LastName = "test33"};
 
@@ -238,7 +153,7 @@ TEST_F(SqlgenExampleTest, InsertOne_ShouldPersistPerson)
 TEST_F(SqlgenExampleTest, InsertThenDelete_PersistPersonToThenDelete)
 {
     auto conn = sqlgen::sqlite::connect(dbPath);
-    PersonRepository repo(conn);
+    PersonRepo repo(conn);
 
     Person p{.Id = 4, .FirstName = "test4", .LastName = "test44"};
 

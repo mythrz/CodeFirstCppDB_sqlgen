@@ -1,10 +1,11 @@
+#pragma once
+
 #include "sqlgen/PrimaryKey.hpp"
-#include "string"
+#include <string>
 #include <cstdint>
 
-struct Person 
+struct Something 
 {
     sqlgen::PrimaryKey<uint32_t> Id;
-    std::string FirstName;
-    std::string LastName;
+    std::string Name;
 };

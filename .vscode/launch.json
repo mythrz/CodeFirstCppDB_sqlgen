@@ -7,7 +7,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/build/linux/arch/clang/debug/DAL/DAL_unit_tests",
       "args": [],
-      "cwd": "${workspaceFolder}/DAL",
+      "cwd": "${workspaceFolder}",
       "terminal": "integrated"
     },
     {
@@ -16,7 +16,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/build/linux/arch/clang/release/DAL/DAL_unit_tests",
       "args": [],
-      "cwd": "${workspaceFolder}/DAL",
+      "cwd": "${workspaceFolder}",
       "terminal": "integrated"
     },
     {
@@ -25,7 +25,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/build/linux/arch/gcc/debug/DAL/DAL_unit_tests",
       "args": [],
-      "cwd": "${workspaceFolder}/DAL",
+      "cwd": "${workspaceFolder}",
       "terminal": "integrated"
     },
     {
@@ -34,7 +34,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/build/linux/arch/gcc/release/DAL/DAL_unit_tests",
       "args": [],
-      "cwd": "${workspaceFolder}/DAL",
+      "cwd": "${workspaceFolder}",
       "terminal": "integrated"
     }
   ]
