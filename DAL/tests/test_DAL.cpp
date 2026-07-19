@@ -101,12 +101,12 @@ TEST_F(SqlgenExampleTest, SelectFrom002)
 TEST_F(SqlgenExampleTest, GenericRepositoryGetAll) 
 {
     auto conn = sqlgen::sqlite::connect(dbPath);
-    RepoGen001<Person> repo(conn);
+    PersonRepo repo(conn);
 
     const auto people = repo.get_all();
 
     ASSERT_EQ(people.size(), 2);
-    ASSERT_EQ(people[0].FirstName, "test1");
+    ASSERT_EQ(people[0].getFirstName(), "test1");
 }
 
 TEST_F(SqlgenExampleTest, CustomRepositoryFindById) 
@@ -117,8 +117,8 @@ TEST_F(SqlgenExampleTest, CustomRepositoryFindById)
     const auto person = repo.find_by_id(1);
 
     ASSERT_TRUE(person.has_value());
-    ASSERT_EQ(person->FirstName, "test1");
-    ASSERT_EQ(person->LastName, "test11");
+    ASSERT_EQ(person->getFirstName(), "test1");
+    ASSERT_EQ(person->getLastName(), "test11");
 }
 
 TEST_F(SqlgenExampleTest, CustomRepositoryFindByLastName) 
@@ -129,7 +129,7 @@ TEST_F(SqlgenExampleTest, CustomRepositoryFindByLastName)
     const auto people = repo.find_by_last_name("test22");
 
     ASSERT_EQ(people.size(), 1);
-    ASSERT_EQ(people[0].Id.value(), 2);
+    ASSERT_EQ(people[0].getId(), 2);
 }
 
 TEST_F(SqlgenExampleTest, InsertOne_ShouldPersistPerson)
@@ -137,7 +137,7 @@ TEST_F(SqlgenExampleTest, InsertOne_ShouldPersistPerson)
     auto conn = sqlgen::sqlite::connect(dbPath);
     PersonRepo repo(conn);
 
-    Person p{.Id = 3, .FirstName = "test3", .LastName = "test33"};
+    Core::Person p(3, "test3", "test33");
 
     auto inserted = repo.insert_one(p);
     ASSERT_TRUE(inserted) << "insert_one failed";
@@ -145,9 +145,9 @@ TEST_F(SqlgenExampleTest, InsertOne_ShouldPersistPerson)
     auto found = repo.find_by_id(3);
     ASSERT_TRUE(found.has_value()) << "Inserted row was not found";
 
-    ASSERT_EQ(found->Id.value(), 3);
-    ASSERT_EQ(found->FirstName, "test3");
-    ASSERT_EQ(found->LastName, "test33");
+    ASSERT_EQ(found->getId(), 3);
+    ASSERT_EQ(found->getFirstName(), "test3");
+    ASSERT_EQ(found->getLastName(), "test33");
 }
 
 TEST_F(SqlgenExampleTest, InsertThenDelete_PersistPersonToThenDelete)
@@ -155,7 +155,7 @@ TEST_F(SqlgenExampleTest, InsertThenDelete_PersistPersonToThenDelete)
     auto conn = sqlgen::sqlite::connect(dbPath);
     PersonRepo repo(conn);
 
-    Person p{.Id = 4, .FirstName = "test4", .LastName = "test44"};
+    Core::Person p(4, "test4", "test44");
 
     auto inserted = repo.insert_one(p);
     ASSERT_TRUE(inserted) << "insert_one failed";
@@ -163,9 +163,9 @@ TEST_F(SqlgenExampleTest, InsertThenDelete_PersistPersonToThenDelete)
     auto found = repo.find_by_id(4);
     ASSERT_TRUE(found.has_value()) << "Inserted row was not found";
 
-    ASSERT_EQ(found->Id.value(), 4);
-    ASSERT_EQ(found->FirstName, "test4");
-    ASSERT_EQ(found->LastName, "test44");
+    ASSERT_EQ(found->getId(), 4);
+    ASSERT_EQ(found->getFirstName(), "test4");
+    ASSERT_EQ(found->getLastName(), "test44");
 
     auto before = repo.get_by_id(4);
     ASSERT_TRUE(before.has_value());

@@ -8,20 +8,6 @@ Your source code will go into src folder.
 
 No main file, the tests will have the generator of the database.
 
-```
-CodeFirstCppDB_sqlgen/
-├── .gitignore
-├── CMakeLists.txt        
-├── extern/
-│   ├── googletest/
-│   ├── sqlgen/
-│   └── reflect-cpp/
-├── src/
-│   └── TODO
-└── tests/
-    └── test_main.cpp  
-```
-
 These are the required libs. You can probably get away with fewer than the current list, depending on your needs.
 
 ```bash
