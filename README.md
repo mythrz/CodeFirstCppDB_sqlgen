@@ -2,10 +2,6 @@
 
 Code-First Database tests with sqlgen, C++20, ArchLinux EOS
 
-Folder hierarchy of the project. The extern folder will hold the submodules sqlgen and googletest. 
-
-Your source code will go into src folder. 
-
 No main file, the tests will have the generator of the database.
 
 These are the required libs. You can probably get away with fewer than the current list, depending on your needs.
