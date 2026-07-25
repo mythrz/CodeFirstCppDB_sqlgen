@@ -20,6 +20,14 @@ cmake --build build
 ./build/DAL/DAL_unit_tests
 ```
 
+Specific for Modules:
+```bash
+ rm -rf build/linux/arch/clang/debug
+    cmake --preset clang-debug -DCMAKE_CXX_FLAGS="-stdlib=libc++"
+    cmake --build build/linux/arch/clang/debug
+    ./build/linux/arch/clang/debug/Startup/Startup
+```
+
 ---
 
 ## Architecture Overview

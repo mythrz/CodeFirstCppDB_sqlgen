@@ -12,6 +12,45 @@
       "type": "shell",
       "command": "git submodule update --init --recursive --remote",
       "problemMatcher": []
+    },
+    {
+      "label": "cmake: configure & build (clang-debug)",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--preset",
+        "clang-debug",
+        "-DCMAKE_CXX_FLAGS=-stdlib=libc++"
+      ],
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "dependsOn": [
+        {
+          "label": "cmake: build (clang-debug)",
+          "type": "shell"
+        }
+      ]
+    },
+    {
+      "label": "cmake: build (clang-debug)",
+      "type": "shell",
+      "command": "cmake",
+      "args": [
+        "--build",
+        "build/linux/arch/clang/debug"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
     }
   ]
 }

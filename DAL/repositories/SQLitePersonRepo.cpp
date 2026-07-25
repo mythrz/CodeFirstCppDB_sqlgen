@@ -40,6 +40,39 @@ namespace DAL
         };
 
         sqlgen::write(conn, dto);
-        return true; 
+        return true;
+    }
+
+    std::vector<Core::Person> SQLitePersonRepository::get_all() const {
+        return {};
+    }
+
+    std::optional<Core::Person> SQLitePersonRepository::find_by_id(int id) const {
+        return get_by_id(id);
+    }
+
+    std::vector<Core::Person> SQLitePersonRepository::find_by_last_name(const std::string& lastName) const {
+        return {};
+    }
+
+    bool SQLitePersonRepository::insert_many(const std::vector<Core::Person>& items) {
+        for (const auto& item : items) {
+            insert_one(item);
+        }
+        return true;
+    }
+
+    bool SQLitePersonRepository::update_one(const Core::Person& item) {
+        return false;
+    }
+
+    void SQLitePersonRepository::delete_by_id(int id) {}
+
+    bool SQLitePersonRepository::exists_by_id(int id) const {
+        return get_by_id(id).has_value();
+    }
+
+    std::size_t SQLitePersonRepository::count() const {
+        return 0;
     }
 }

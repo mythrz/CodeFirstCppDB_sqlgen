@@ -2,6 +2,15 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "Debug Startup (clang debug libc++)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/linux/arch/clang/debug/Startup/Startup",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated"
+    },
+    {
       "name": "Debug DAL_unit_tests (clang debug)",
       "type": "lldb",
       "request": "launch",

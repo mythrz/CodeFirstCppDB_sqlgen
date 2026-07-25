@@ -3,7 +3,9 @@ export module core:iperson_repository;
 import std;
 import :person; // Internal partition import (no 'export' needed)
 
-export class IPersonRepository {
+export namespace Core {
+
+class IPersonRepository {
 public:
     virtual ~IPersonRepository() = default;
     
@@ -23,3 +25,5 @@ public:
     [[nodiscard]] virtual bool exists_by_id(int id) const = 0;
     [[nodiscard]] virtual std::size_t count() const = 0;
 };
+
+} // namespace Core

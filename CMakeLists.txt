@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 4.4) # 3.30 probably works too
-set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "0e5b6991-d74f-4b3d-a41c-cf096e0b2508") # 3.30
-# set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
-# set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "f35a9ac6-8463-4d38-8eec-5d6008153e7d") # not tested
+set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "f35a9ac6-8463-4d38-8eec-5d6008153e7d")
 project(SqlGenIsolationTest LANGUAGES CXX)
 
 # set(CMAKE_CXX_STANDARD 20)
@@ -11,7 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Enable automatic module dependency scanning across targets
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
-# set(CMAKE_CXX_MODULE_STD ON) # build std module
+set(CMAKE_CXX_MODULE_STD ON) # build std module
 
 # NOT using vcpkg
 set(SQLGEN_USE_VCPKG OFF CACHE BOOL "" FORCE) 
@@ -45,4 +43,4 @@ add_subdirectory(Core)
 add_subdirectory(DAL)
 add_subdirectory(Startup)
 
-set(CMAKE_CXX_MODULE_STD ON) # build std module 
+# set(CMAKE_CXX_MODULE_STD ON) # build std module 

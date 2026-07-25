@@ -1,3 +1,9 @@
+// // Global Module Fragment: Includes remain isolated from the module interface
+// #include <string>
+// #include <vector>
+// #include <optional>
+// #include <cstdint>
+
 export module core:person;
 
 import std;
@@ -7,11 +13,11 @@ export namespace Core {
     class Person {
     public:
         Person() = default;
-        Person(uint32_t id, const std::string& firstName, const std::string& lastName)
+        Person(std::uint32_t id, const std::string& firstName, const std::string& lastName)
             : id_(id), firstName_(firstName), lastName_(lastName) {}
         
-        [[nodiscard]] uint32_t getId() const noexcept { return id_; }
-        void setId(uint32_t id) noexcept { id_ = id; }
+        [[nodiscard]] std::uint32_t getId() const noexcept { return id_; }
+        void setId(std::uint32_t id) noexcept { id_ = id; }
         
         [[nodiscard]] const std::string& getFirstName() const noexcept { return firstName_; }
         void setFirstName(std::string firstName) noexcept { firstName_ = std::move(firstName); }
@@ -20,7 +26,7 @@ export namespace Core {
         void setLastName(std::string lastName) noexcept { lastName_ = std::move(lastName); }
 
     private:
-        uint32_t id_ = 0;
+        std::uint32_t id_ = 0;
         std::string firstName_;
         std::string lastName_;
     };
