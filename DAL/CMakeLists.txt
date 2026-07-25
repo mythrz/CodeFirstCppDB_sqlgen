@@ -1,20 +1,26 @@
-add_library(DAL INTERFACE)
+# if(NOT DEFINED CMAKE_PROJECT_NAME OR CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+#   project(Core LANGUAGES CXX)
+# endif()
 
-add_executable(DAL_unit_tests 
-    tests/test_DAL.cpp
+add_library(DAL)
+
+# Target-level isolation: enable std module exclusively for DAL
+# set_target_properties(DAL PROPERTIES CXX_MODULE_STD ON)
+
+target_sources(DAL
+    PUBLIC
+        FILE_SET CXX_MODULES FILES
+            schema/PersonDTO.ixx
+            repositories/SQLitePersonRepo.ixx
+            dal.ixx
+    PRIVATE
+        repositories/SQLitePersonRepo.cpp
 )
 
-target_include_directories(DAL_unit_tests 
-    PRIVATE 
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/DAL
-        ${CMAKE_SOURCE_DIR}/Core/include
-        
-        ${CMAKE_SOURCE_DIR}/extern/sqlgen/include
-        ${CMAKE_SOURCE_DIR}/extern/reflect-cpp/include
-)
-
-target_link_libraries(DAL_unit_tests 
-    PRIVATE 
-        sqlgen::sqlgen 
-        GTest::gtest_main
+target_link_libraries(DAL 
+    PUBLIC 
+        Core
+        reflectcpp 
+        sqlgen 
+        SQLite3::SQLite3 ## SQLite::SQLite3 ## SQLite3::SQLite3 ?!
 )
