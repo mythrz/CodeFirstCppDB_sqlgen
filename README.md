@@ -1,8 +1,6 @@
 ### A. Context
 
-Code-First Database tests with sqlgen, C++20, ArchLinux EOS
-
-No main file, the tests will have the generator of the database.
+Code-First Database tests with sqlgen, C++20/23, ArchLinux EOS.
 
 These are the required libs. You can probably get away with fewer than the current list, depending on your needs.
 
@@ -14,30 +12,9 @@ sudo pacman -S --needed base-devel cmake ninja autoconf bison flex postgresql-li
 ---
 ---
 
-### B. Clone and test this repo
+### B. Steps to reproduce this without modules
 
-If you just want to test this repo on your machine. Just clone this repo, navigate to the root of the project, update the submodules, config + build + run tests.
-
-```bash
-## update extern submodules (commit or latest. Choose one)
-# git submodule update --init --recursive
-# git submodule update --init --recursive --remote
-
-## Configure, build, run
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-./build/unit_tests
-```
-
-CMakePresets.json, launch.json and tasks.json are presented too if you do not want to use the command line and vscode/codium instead.
-
----
----
----
-
-### C. Steps to reproduce this repository
-
-Setup the modules. Open a terminal in the root of your personal project.
+Open a terminal in the root of your personal project.
 
 ```bash
 mkdir extern
