@@ -4,6 +4,7 @@ project(SqlGenIsolationTest LANGUAGES CXX)
 
 # set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD 23)
+# set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -38,9 +39,6 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 add_subdirectory(extern/googletest)
 
 # projects
-
 add_subdirectory(Core)
 add_subdirectory(DAL)
 add_subdirectory(Startup)
-
-# set(CMAKE_CXX_MODULE_STD ON) # build std module 

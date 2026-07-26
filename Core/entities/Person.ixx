@@ -2,9 +2,11 @@ export module core:person;
 
 import std;
 
-export namespace Core {
+export namespace Core 
+{
 
-    class Person {
+    class Person 
+    {
     public:
         Person() = default;
         Person(std::uint32_t id, const std::string& firstName, const std::string& lastName)

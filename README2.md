@@ -20,14 +20,6 @@ cmake --build build
 ./build/DAL/DAL_unit_tests
 ```
 
-Specific for Modules:
-```bash
- rm -rf build/linux/arch/clang/debug
-    cmake --preset clang-debug -DCMAKE_CXX_FLAGS="-stdlib=libc++"
-    cmake --build build/linux/arch/clang/debug
-    ./build/linux/arch/clang/debug/Startup/Startup
-```
-
 ---
 
 ## Architecture Overview
@@ -259,3 +251,37 @@ namespace DAL {
 ```
 
 ---
+
+
+TODO: Specific for Modules:
+
+# CodeFirstCppDB_sqlgen Specification
+
+Modern, maintainable, code-first database access layer built with C++20/23 modules, static reflection traits, and concept-constrained generic repositories.
+
+## Architectural Layers
+
+1. **Core**: Business logic and domain entities (`Core::Person`, `Core::Something`). Pure C++20 classes with zero database dependencies.
+2. **DAL::Schema**: Plain-Old-Data (POD) structs used exclusively by `sqlgen` for static compile-time reflection.
+3. **DAL::Mappers**: Centralized `MapperTraits<Domain, DTO>` specializing bidirectional conversions.
+4. **DAL::Repositories**: Concept-constrained `GenericRepository<Domain, DTO>` handling standard CRUD operations alongside specialized repository interfaces.
+5. **Startup**: Entry point responsible for dependency wiring and driver initialization.
+
+## Build Requirements
+
+* Clang 18+ or GCC 14+ with C++20/23 standard library support
+* CMake 3.30+ using `FILE_SET CXX_MODULES`
+* Ninja build system
+
+```bash
+# Reconfigure and Build
+cmake -B build/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/debug
+```
+
+```bash
+ rm -rf build/linux/arch/clang/debug
+    cmake --preset clang-debug -DCMAKE_CXX_FLAGS="-stdlib=libc++"
+    cmake --build build/linux/arch/clang/debug
+    ./build/linux/arch/clang/debug/Startup/Startup
+```

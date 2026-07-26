@@ -1,4 +1,4 @@
-export module dal:schema;
+export module dal:schema_person;
 
 import std;
 
