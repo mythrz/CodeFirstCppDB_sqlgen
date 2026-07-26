@@ -16,6 +16,24 @@
     {
       "label": "cmake: configure & build (clang-debug)",
       "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "cmake --preset clang-debug && cmake --build build/linux/arch/clang/debug"
+      ],
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "cmake: configure & build (clang-debug)2",
+      "type": "shell",
       "command": "cmake",
       "args": [
         "--preset",

@@ -11,6 +11,19 @@
       "terminal": "integrated"
     },
     {
+      "name": "Launch Startup (clang debug)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/linux/arch/clang/debug/Startup/Startup",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cmake: configure & build (clang-debug)",
+      "terminal": "integrated",
+      "env": {
+        "LD_LIBRARY_PATH": "${workspaceFolder}/build/linux/arch/clang/debug:${env:LD_LIBRARY_PATH}"
+      }
+    },
+    {
       "name": "Debug DAL_unit_tests (clang debug)",
       "type": "lldb",
       "request": "launch",

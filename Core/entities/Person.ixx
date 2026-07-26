@@ -1,9 +1,3 @@
-// // Global Module Fragment: Includes remain isolated from the module interface
-// #include <string>
-// #include <vector>
-// #include <optional>
-// #include <cstdint>
-
 export module core:person;
 
 import std;
