@@ -4,7 +4,6 @@ import std;
 
 export namespace DAL::Schema 
 {
-
     struct PersonDTO 
     {
         int id;
@@ -12,7 +11,6 @@ export namespace DAL::Schema
         std::string last_name;
     };
 
-    // c++20 Concept: enforces structural conformity for database entities
     template<typename T>
     concept RelationalEntity = requires(T dto) 
     {

@@ -12,7 +12,6 @@ namespace
         }
 
         template <typename DTO> std::vector<DTO> fetch_all() { return {}; }
-        // template <typename DTO> std::optional<DTO> find_by_id(std::int32_t) { return std::nullopt; }
         template <typename DTO> std::optional<DTO> get_by_id(std::int32_t) { return std::nullopt; }
         template <typename DTO> bool insert(const DTO&) { return true; }
         template <typename DTO> bool insert_many(const std::vector<DTO>&) { return true; } // required

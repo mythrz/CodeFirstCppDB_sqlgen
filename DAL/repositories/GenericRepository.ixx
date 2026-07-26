@@ -25,23 +25,12 @@ export namespace DAL::Repositories
             return std::vector<Domain>(domain_view.begin(), domain_view.end());
         }
 
-        // [[nodiscard]] std::optional<Domain> get_by_id(std::int32_t id) const 
-        // {
-        //     // C++23 monadic optional transformation
-        //     return conn_.template find_by_id<DTO>(id)
-        //         .transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
-        // }
         [[nodiscard]] std::optional<Domain> get_by_id(std::int32_t id) const 
         {
             // C++23 monadic optional transformation
             return conn_.template get_by_id<DTO>(id)
                 .transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
         }
-        // /// TODO: remove. this is duplicated
-        // [[nodiscard]] std::optional<Domain> find_by_id(std::int32_t id) const override
-        // {
-        //     return get_by_id(id);
-        // }
 
         bool insert_one(const Domain& item) 
         {
@@ -49,12 +38,6 @@ export namespace DAL::Repositories
             return conn_.insert(dto);
         }
 
-        // bool insert_many(const std::vector<Domain>& items) 
-        // {
-        //     auto dto_view = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto);
-        //     std::vector<DTO> dtos(dto_view.begin(), dto_view.end());
-        //     return conn_.insert_batch(dtos);
-        // }
         bool insert_many(const std::vector<Domain>& items) 
         {
             auto dto_view = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto);

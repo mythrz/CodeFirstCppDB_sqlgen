@@ -11,7 +11,7 @@ target_sources(DAL
             repositories/SQLitePersonRepo.ixx
             dal.ixx
     PRIVATE
-        #repositories/SQLitePersonRepo.cpp
+    
 )
 
 target_link_libraries(DAL 
