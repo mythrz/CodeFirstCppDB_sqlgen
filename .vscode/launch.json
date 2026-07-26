@@ -27,7 +27,7 @@
       "name": "Debug DAL_unit_tests (clang debug)",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/build/linux/arch/clang/debug/DAL/DAL_unit_tests",
+      "program": "${workspaceFolder}/build/linux/arch/clang/debug/DAL/tests/test_DAL",
       "args": [],
       "cwd": "${workspaceFolder}",
       "terminal": "integrated"
@@ -36,7 +36,7 @@
       "name": "Debug DAL_unit_tests (clang release)",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/build/linux/arch/clang/release/DAL/DAL_unit_tests",
+      "program": "${workspaceFolder}/build/linux/arch/clang/release/DAL/tests/test_DAL",
       "args": [],
       "cwd": "${workspaceFolder}",
       "terminal": "integrated"
@@ -45,7 +45,7 @@
       "name": "Debug DAL_unit_tests (gcc debug)",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/build/linux/arch/gcc/debug/DAL/DAL_unit_tests",
+      "program": "${workspaceFolder}/build/linux/arch/gcc/debug/DAL/tests/test_DAL",
       "args": [],
       "cwd": "${workspaceFolder}",
       "terminal": "integrated"
@@ -54,7 +54,7 @@
       "name": "Debug DAL_unit_tests (gcc release)",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/build/linux/arch/gcc/release/DAL/DAL_unit_tests",
+      "program": "${workspaceFolder}/build/linux/arch/gcc/release/DAL/tests/test_DAL",
       "args": [],
       "cwd": "${workspaceFolder}",
       "terminal": "integrated"

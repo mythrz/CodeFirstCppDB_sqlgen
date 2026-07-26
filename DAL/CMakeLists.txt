@@ -23,3 +23,5 @@ target_link_libraries(DAL
         sqlgen 
         SQLite3::SQLite3 ## SQLite::SQLite3 ## SQLite3::SQLite3 ?!
 )
+
+add_subdirectory(tests)
