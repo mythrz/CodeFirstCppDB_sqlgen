@@ -4,7 +4,6 @@ import std;
 
 export namespace Core 
 {
-
     class Person 
     {
     public:
@@ -26,5 +25,4 @@ export namespace Core
         std::string firstName_;
         std::string lastName_;
     };
-
 } // namespace Core

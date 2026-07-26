@@ -12,7 +12,6 @@ public:
 
     [[nodiscard]] virtual std::vector<DomainEntity> get_all() const = 0;
     [[nodiscard]] virtual std::optional<DomainEntity> get_by_id(int id) const = 0;
-    // [[nodiscard]] virtual std::optional<DomainEntity> find_by_id(int id) const = 0;
 
     virtual bool insert_one(const DomainEntity& item) = 0;
     virtual bool insert_many(const std::vector<DomainEntity>& items) = 0;

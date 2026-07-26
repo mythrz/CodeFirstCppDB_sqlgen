@@ -5,3 +5,5 @@ export import :something;
 export import :person_something;
 export import :igeneric_repository;
 export import :iperson_repository;
+export import :isomething_repository;
+export import :iperson_something_repository;

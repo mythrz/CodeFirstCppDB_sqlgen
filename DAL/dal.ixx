@@ -6,3 +6,5 @@ export import :schema_person_something;
 export import :mappers;
 export import :generic_repo;
 export import :sqlite_person_repo;
+export import :sqlite_something_repo;
+export import :sqlite_person_something_repo;

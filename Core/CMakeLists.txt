@@ -8,5 +8,7 @@ target_sources(Core
             entities/Person_Something.ixx
             repositories/IGenericRepository.ixx
             repositories/IPersonRepository.ixx
+            repositories/ISomethingRepository.ixx
+            repositories/IPerson_SomethingRepository.ixx
             core.ixx
 )

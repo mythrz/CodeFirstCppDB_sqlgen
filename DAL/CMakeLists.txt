@@ -9,9 +9,11 @@ target_sources(DAL
             mappers/MapperTraits.ixx
             repositories/GenericRepository.ixx
             repositories/SQLitePersonRepo.ixx
+            repositories/SQLiteSomethingRepo.ixx
+            repositories/SQLitePerson_SomethingRepo.ixx
             dal.ixx
     PRIVATE
-    
+
 )
 
 target_link_libraries(DAL 
