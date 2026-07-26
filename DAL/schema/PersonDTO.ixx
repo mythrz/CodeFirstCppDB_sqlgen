@@ -2,9 +2,11 @@ export module dal:schema_person;
 
 import std;
 
-export namespace DAL::Schema {
+export namespace DAL::Schema 
+{
 
-    struct PersonDTO {
+    struct PersonDTO 
+    {
         int id;
         std::string first_name;
         std::string last_name;
@@ -12,7 +14,8 @@ export namespace DAL::Schema {
 
     // c++20 Concept: enforces structural conformity for database entities
     template<typename T>
-    concept RelationalEntity = requires(T dto) {
+    concept RelationalEntity = requires(T dto) 
+    {
         { dto.id } -> std::same_as<int&>;
     };
 

@@ -1,7 +1,7 @@
 export module core:iperson_repository;
 
 import std;
-import :person; // Internal partition import (no 'export' needed)
+import :person;
 
 export namespace Core {
 

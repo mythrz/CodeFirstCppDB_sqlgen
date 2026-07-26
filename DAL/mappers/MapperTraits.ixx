@@ -2,9 +2,6 @@ export module dal:mappers;
 
 import std;
 import core;
-// import dal:schema_person;
-// import dal:schema_something;
-// import dal:schema_person_something;
 import :schema_person;
 import :schema_something;
 import :schema_person_something;
@@ -15,7 +12,6 @@ export namespace DAL::Mappers
 template <typename Domain, typename DTO>
 struct MapperTraits;
 
-// Core::Person <-> DAL::Schema::PersonDTO
 template <>
 struct MapperTraits<Core::Person, DAL::Schema::PersonDTO> 
 {
@@ -38,7 +34,6 @@ struct MapperTraits<Core::Person, DAL::Schema::PersonDTO>
     }
 };
 
-// Core::Something <-> DAL::Schema::SomethingDTO
 template <>
 struct MapperTraits<Core::Something, DAL::Schema::SomethingDTO> 
 {
@@ -65,7 +60,6 @@ struct MapperTraits<Core::Something, DAL::Schema::SomethingDTO>
     }
 };
 
-// Core::Person_Something <-> DAL::Schema::Person_SomethingDTO
 template <>
 struct MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO> 
 {
@@ -98,49 +92,3 @@ concept Mappable = requires(const Domain& domain, const DTO& dto)
 };
 
 } // namespace DAL::Mappers
-
-// export module dal:mappers;
-
-// import std;
-// import core;
-// import :schema_person;
-
-// export namespace DAL::Mappers {
-
-// // Generic trait primary template
-// template <typename Domain, typename DTO>
-// struct MapperTraits;
-
-// // Specialization for Person <-> PersonDTO
-// template <>
-// struct MapperTraits<Core::Person, DAL::Schema::PersonDTO> {
-//     [[nodiscard]] static Core::Person to_domain(const DAL::Schema::PersonDTO& dto) 
-//     {
-//         return Core::Person
-//         (
-//             static_cast<std::uint32_t>(dto.id),
-//             dto.first_name,
-//             dto.last_name
-//         );
-//     }
-
-//     [[nodiscard]] static DAL::Schema::PersonDTO to_dto(const Core::Person& domain) 
-//     {
-//         return DAL::Schema::PersonDTO
-//         {
-//             .id = static_cast<std::int32_t>(domain.getId()),
-//             .first_name = domain.getFirstName(),
-//             .last_name = domain.getLastName()
-//         };
-//     }
-// };
-
-// // C++20 Concept enforcing valid bidirectional mapping traits
-// template <typename Domain, typename DTO>
-// concept Mappable = requires(const Domain& domain, const DTO& dto) 
-// {
-//     { MapperTraits<Domain, DTO>::to_domain(dto) } -> std::same_as<Domain>;
-//     { MapperTraits<Domain, DTO>::to_dto(domain) } -> std::same_as<DTO>;
-// };
-
-// } // namespace DAL::Mappers
