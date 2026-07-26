@@ -6,8 +6,7 @@ import dal;
 
 namespace {
 
-// In-Memory Database Connection mock simulating a database driver
-// satisfying DAL::Repositories::DatabaseConnection concept
+// In-Memory Database Connection mock simulating a database driver satisfying DAL::Repositories::DatabaseConnection concept
 class TestDatabaseConnection 
 {
 public:
