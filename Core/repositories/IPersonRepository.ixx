@@ -6,7 +6,7 @@ import :igeneric_repository;
 
 export namespace Core 
 {
-    class IPersonRepository : public IGenericRepository<Person>
+    class IPersonRepository : public virtual IGenericRepository<Person>
     {
     public:
         virtual ~IPersonRepository() = default;

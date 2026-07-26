@@ -13,7 +13,7 @@ export namespace DAL::Repositories
 
     template <typename Domain, typename DTO, typename ConnectionHandle>
         requires DAL::Mappers::Mappable<Domain, DTO> 
-    class GenericRepository : public Core::IGenericRepository<Domain>
+    class GenericRepository : public virtual Core::IGenericRepository<Domain>
     {
     public:
         explicit GenericRepository(ConnectionHandle& conn) : conn_(conn) {}
