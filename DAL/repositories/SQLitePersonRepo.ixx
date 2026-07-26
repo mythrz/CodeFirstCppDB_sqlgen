@@ -20,13 +20,19 @@ public:
     explicit SQLitePersonRepo(ConnectionHandle& conn) noexcept 
         : Base(conn) {}
 
-    // --- Core::IPersonRepository Interface Contract Fulfillment ---
-
     [[nodiscard]] std::vector<Core::Person> get_all() const override { 
         return Base::get_all(); 
     }
 
-    // Fulfills IPersonRepository pure virtual requirement
+    [[nodiscard]] std::optional<Core::Person> find_by_id(int id) const override {
+        // Direct template invocation handles the dependent name lookup correctly
+        auto dto_opt = this->conn_.template find_by_id<DAL::Schema::PersonDTO>(id);
+        if (!dto_opt) {
+            return std::nullopt;
+        }
+        return DAL::Mappers::MapperTraits<Core::Person, DAL::Schema::PersonDTO>::to_domain(*dto_opt);
+    }
+    
     [[nodiscard]] std::optional<Core::Person> get_by_id(int id) const override {
         auto dto_opt = this->conn_.template find_by_id<DAL::Schema::PersonDTO>(id);
         if (!dto_opt) {
