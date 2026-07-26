@@ -12,8 +12,8 @@ export namespace DAL::Repositories
     };
 
     template <typename Domain, typename DTO, typename ConnectionHandle>
-        requires DAL::Mappers::Mappable<Domain, DTO>
-    class GenericRepository 
+        requires DAL::Mappers::Mappable<Domain, DTO> 
+    class GenericRepository : public Core::IGenericRepository<Domain>
     {
     public:
         explicit GenericRepository(ConnectionHandle& conn) : conn_(conn) {}
@@ -25,12 +25,23 @@ export namespace DAL::Repositories
             return std::vector<Domain>(domain_view.begin(), domain_view.end());
         }
 
+        // [[nodiscard]] std::optional<Domain> get_by_id(std::int32_t id) const 
+        // {
+        //     // C++23 monadic optional transformation
+        //     return conn_.template find_by_id<DTO>(id)
+        //         .transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+        // }
         [[nodiscard]] std::optional<Domain> get_by_id(std::int32_t id) const 
         {
             // C++23 monadic optional transformation
-            return conn_.template find_by_id<DTO>(id)
+            return conn_.template get_by_id<DTO>(id)
                 .transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
         }
+        // /// TODO: remove. this is duplicated
+        // [[nodiscard]] std::optional<Domain> find_by_id(std::int32_t id) const override
+        // {
+        //     return get_by_id(id);
+        // }
 
         bool insert_one(const Domain& item) 
         {
@@ -38,11 +49,17 @@ export namespace DAL::Repositories
             return conn_.insert(dto);
         }
 
+        // bool insert_many(const std::vector<Domain>& items) 
+        // {
+        //     auto dto_view = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto);
+        //     std::vector<DTO> dtos(dto_view.begin(), dto_view.end());
+        //     return conn_.insert_batch(dtos);
+        // }
         bool insert_many(const std::vector<Domain>& items) 
         {
             auto dto_view = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto);
             std::vector<DTO> dtos(dto_view.begin(), dto_view.end());
-            return conn_.insert_batch(dtos);
+            return conn_.insert_many(dtos);
         }
 
         bool update_one(const Domain& item) 

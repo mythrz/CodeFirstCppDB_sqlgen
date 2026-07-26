@@ -6,6 +6,7 @@ target_sources(Core
             entities/Person.ixx
             entities/Something.ixx
             entities/Person_Something.ixx
+            repositories/IGenericRepository.ixx
             repositories/IPersonRepository.ixx
             core.ixx
 )
