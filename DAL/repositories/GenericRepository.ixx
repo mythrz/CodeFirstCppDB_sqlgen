@@ -34,23 +34,32 @@ export namespace DAL::Repositories
         std::expected<void, std::string> insert_one(const Domain& item)
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
-            bool ok = conn_.insert(dto);
-            return ok ? std::expected<void, std::string>{} : std::unexpected<std::string>{"insert_one failed"};
+            auto res = conn_.insert(dto);
+            if (!res) {
+                return std::unexpected<std::string>{ res.error().what() };
+            }
+            return {};
         }
 
         std::expected<void, std::string> insert_many(const std::vector<Domain>& items)
         {
             auto dto_view = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto);
             std::vector<DTO> dtos(dto_view.begin(), dto_view.end());
-            bool ok = conn_.insert_many(dtos);
-            return ok ? std::expected<void, std::string>{} : std::unexpected<std::string>{"insert_many failed"};
+            auto res = conn_.insert_many(dtos);
+            if (!res) {
+                return std::unexpected<std::string>{ res.error().what() };
+            }
+            return {};
         }
 
         std::expected<void, std::string> update_one(const Domain& item)
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
-            bool ok = conn_.update(dto);
-            return ok ? std::expected<void, std::string>{} : std::unexpected<std::string>{"update_one failed"};
+            auto res = conn_.update(dto);
+            if (!res) {
+                return std::unexpected<std::string>{ res.error().what() };
+            }
+            return {};
         }
 
         std::expected<void, std::string> delete_by_id(std::int32_t id)

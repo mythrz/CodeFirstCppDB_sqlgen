@@ -3,7 +3,8 @@
 import std;
 import core;
 import dal;
-
+// #include "../extern/sqlgen/include/sqlgen/Result.hpp"
+#include "../../extern/sqlgen/include/sqlgen/Result.hpp"
 namespace {
 
 // In-Memory Database Connection mock simulating a database driver satisfying DAL::Repositories::DatabaseConnection concept
@@ -60,36 +61,41 @@ public:
         return std::nullopt;
     }
 
+    // Updated to return sqlgen::Result<sqlgen::Nothing> preserving error information
+    
+
     template <typename DTO>
-    bool insert(const DTO& item) 
+    sqlgen::Result<sqlgen::Nothing> insert(const DTO& item)
     {
         get_storage<DTO>().push_back(item);
-        return true;
+        // success -> default-constructed Result (has value)
+        return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
     }
 
     template <typename DTO>
-    bool insert_many(const std::vector<DTO>& items) 
+    sqlgen::Result<sqlgen::Nothing> insert_many(const std::vector<DTO>& items)
     {
         auto& storage = get_storage<DTO>();
         storage.insert(storage.end(), items.begin(), items.end());
-        return true;
+        return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
     }
 
     template <typename DTO>
-    bool update(const DTO& item) 
+    sqlgen::Result<sqlgen::Nothing> update(const DTO& item)
     {
         auto& storage = get_storage<DTO>();
         for (auto& elem : storage) {
-            if constexpr (requires { elem.id; }) 
+            if constexpr (requires { elem.id; })
             {
-                if (elem.id == item.id) 
+                if (elem.id == item.id)
                 {
                     elem = item;
-                    return true;
+                    return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
                 }
             }
         }
-        return false;
+        // Return an error if the item was not found
+        return sqlgen::error("Update failed: item not found");
     }
 
     template <typename DTO>
