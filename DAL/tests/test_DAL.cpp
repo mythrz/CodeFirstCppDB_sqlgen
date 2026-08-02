@@ -224,8 +224,10 @@ TEST_F(SqlgenExampleTest, InsertOne_ShouldPersistPerson)
 
     Core::Person p(3, "test3", "test33");
 
-    const bool inserted = repo.insert_one(p);
-    ASSERT_TRUE(inserted) << "insert_one failed";
+    // const bool inserted = repo.insert_one(p);
+    // ASSERT_TRUE(inserted) << "insert_one failed";
+    auto result = repo.insert_one(p);
+    ASSERT_TRUE(result.has_value()) << result.error();
 
     const auto found = repo.get_by_id(3);
     ASSERT_TRUE(found.has_value()) << "Inserted row was not found";
@@ -244,8 +246,10 @@ TEST_F(SqlgenExampleTest, InsertMany_ShouldPersistMultiplePersons)
         Core::Person(11, "batch2", "last2")
     };
 
-    const bool inserted = repo.insert_many(newPeople);
-    ASSERT_TRUE(inserted);
+    // const bool inserted = repo.insert_many(newPeople);
+    // ASSERT_TRUE(inserted);
+    auto result = repo.insert_many(newPeople);
+    ASSERT_TRUE(result.has_value()) << result.error();
 
     ASSERT_EQ(repo.count(), 4);
     ASSERT_TRUE(repo.exists_by_id(10));
@@ -257,8 +261,10 @@ TEST_F(SqlgenExampleTest, UpdateOne_ShouldUpdateExistingPerson)
     DAL::Repositories::SQLitePersonRepo<TestDatabaseConnection> repo(conn);
 
     Core::Person updatedPerson(1, "test1_updated", "test11_updated");
-    const bool updated = repo.update_one(updatedPerson);
-    ASSERT_TRUE(updated);
+    // const bool updated = repo.update_one(updatedPerson);
+    // ASSERT_TRUE(updated);
+    auto result = repo.update_one(updatedPerson);
+    ASSERT_TRUE(result.has_value()) << result.error();
 
     const auto found = repo.get_by_id(1);
     ASSERT_TRUE(found.has_value());
@@ -272,15 +278,19 @@ TEST_F(SqlgenExampleTest, InsertThenDelete_PersistPersonToThenDelete)
 
     Core::Person p(4, "test4", "test44");
 
-    const bool inserted = repo.insert_one(p);
-    ASSERT_TRUE(inserted) << "insert_one failed";
+    // const bool inserted = repo.insert_one(p);
+    // ASSERT_TRUE(inserted) << "insert_one failed";
+    auto result = repo.insert_one(p);
+    ASSERT_TRUE(result.has_value()) << result.error();
 
     auto before = repo.get_by_id(4);
     ASSERT_TRUE(before.has_value());
     ASSERT_EQ(before->getId(), 4);
     ASSERT_EQ(before->getFirstName(), "test4");
 
-    repo.delete_by_id(4);
+    // repo.delete_by_id(4);
+    auto delete_result = repo.delete_by_id(4);
+    ASSERT_TRUE(delete_result.has_value()) << delete_result.error();
 
     auto after = repo.get_by_id(4);
     ASSERT_FALSE(after.has_value());
@@ -302,7 +312,9 @@ TEST_F(SqlgenExampleTest, DependencyInjection_InterfacePolymorphism)
     ASSERT_EQ(byLastName[0].getFirstName(), "test1");
 
     Core::Person p(5, "DI_User", "DI_LastName");
-    ASSERT_TRUE(repo->insert_one(p));
+    // ASSERT_TRUE(repo->insert_one(p));
+    auto result = repo->insert_one(p);
+    ASSERT_TRUE(result.has_value()) << result.error();
     ASSERT_TRUE(repo->exists_by_id(5));
 }
 
@@ -317,7 +329,9 @@ TEST_F(SqlgenExampleTest, SomethingRepository_GenericRepoOperations)
     ASSERT_EQ(items[0].getDescription().value_or(""), "Desc1");
 
     Core::Something newItem(3, "Item3", "Cat3", "Desc3");
-    ASSERT_TRUE(somethingRepo.insert_one(newItem));
+    // ASSERT_TRUE(somethingRepo.insert_one(newItem));
+    auto result = somethingRepo.insert_one(newItem);
+    ASSERT_TRUE(result.has_value()) << result.error();
     ASSERT_EQ(somethingRepo.count(), 3);
 }
 

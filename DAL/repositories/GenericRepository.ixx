@@ -27,33 +27,39 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::optional<Domain> get_by_id(std::int32_t id) const 
         {
-            // C++23 monadic optional transformation
             return conn_.template get_by_id<DTO>(id)
                 .transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
         }
 
-        bool insert_one(const Domain& item) 
+        std::expected<void, std::string> insert_one(const Domain& item)
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
-            return conn_.insert(dto);
+            bool ok = conn_.insert(dto);
+            return ok ? std::expected<void, std::string>{} : std::unexpected<std::string>{"insert_one failed"};
         }
 
-        bool insert_many(const std::vector<Domain>& items) 
+        std::expected<void, std::string> insert_many(const std::vector<Domain>& items)
         {
             auto dto_view = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto);
             std::vector<DTO> dtos(dto_view.begin(), dto_view.end());
-            return conn_.insert_many(dtos);
+            bool ok = conn_.insert_many(dtos);
+            return ok ? std::expected<void, std::string>{} : std::unexpected<std::string>{"insert_many failed"};
         }
 
-        bool update_one(const Domain& item) 
+        std::expected<void, std::string> update_one(const Domain& item)
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
-            return conn_.update(dto);
+            bool ok = conn_.update(dto);
+            return ok ? std::expected<void, std::string>{} : std::unexpected<std::string>{"update_one failed"};
         }
 
-        void delete_by_id(std::int32_t id) 
+        std::expected<void, std::string> delete_by_id(std::int32_t id)
         {
+            // The current connection API does not report deletion errors.
+            // Preserve the expected-based repository API; deletion is successful
+            // from the repository's perspective unless the connection throws.
             conn_.template delete_by_id<DTO>(id);
+            return {};
         }
 
         [[nodiscard]] bool exists_by_id(std::int32_t id) const 
@@ -70,4 +76,4 @@ export namespace DAL::Repositories
         ConnectionHandle& conn_;
     };
 
-} // namespace DAL::Repositories
+} // namespace DAL
