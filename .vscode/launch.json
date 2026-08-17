@@ -11,6 +11,15 @@
       "terminal": "integrated"
     },
     {
+      "name": "Debug Startup (gcc debug)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/linux/arch/gcc/debug/Startup/Startup",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated"
+    },
+    {
       "name": "Launch Startup (clang debug)",
       "type": "lldb",
       "request": "launch",
