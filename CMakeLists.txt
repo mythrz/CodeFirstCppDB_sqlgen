@@ -8,12 +8,15 @@ set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Enable C++26 reflection. gcc 16+ only
+add_compile_options(-freflection)
+
 # Enable automatic module dependency scanning across targets
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_CXX_MODULE_STD ON) # build std module
 
 # NOT using vcpkg
-set(SQLGEN_USE_VCPKG OFF CACHE BOOL "" FORCE) 
+set(SQLGEN_USE_VCPKG OFF CACHE BOOL "" FORCE)
 
 # reflect-cpp (Submodule)
 add_subdirectory(extern/reflect-cpp)
