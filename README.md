@@ -1,6 +1,6 @@
 ### A. Context
 
-Code-First Database tests with sqlgen, C++20/23, ArchLinux EOS.
+Code-First Database tests with sqlgen, C++20/23/26, ArchLinux EOS.
 
 These are the required libs. You can probably get away with fewer than the current list, depending on your needs.
 
@@ -12,7 +12,7 @@ sudo pacman -S --needed base-devel cmake ninja autoconf bison flex postgresql-li
 ---
 ---
 
-### B. Steps to reproduce this without modules
+### B. Minimum steps to reproduce this project
 
 Open a terminal in the root of your personal project.
 
