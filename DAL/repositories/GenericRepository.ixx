@@ -31,38 +31,38 @@ export namespace DAL::Repositories
                 .transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
         }
 
-        std::expected<void, std::string> insert_one(const Domain& item)
+        std::expected<void, Core::DbError> insert_one(const Domain& item)
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
             auto res = conn_.insert(dto);
             if (!res) {
-                return std::unexpected<std::string>{ res.error().what() };
+                return std::unexpected<Core::DbError>{ Core::DbError{Core::DbErrorCode::Unknown, res.error().what()} };
             }
             return {};
         }
 
-        std::expected<void, std::string> insert_many(const std::vector<Domain>& items)
+        std::expected<void, Core::DbError> insert_many(const std::vector<Domain>& items)
         {
             auto dto_view = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto);
             std::vector<DTO> dtos(dto_view.begin(), dto_view.end());
             auto res = conn_.insert_many(dtos);
             if (!res) {
-                return std::unexpected<std::string>{ res.error().what() };
+                return std::unexpected<Core::DbError>{ Core::DbError{Core::DbErrorCode::Unknown, res.error().what()} };
             }
             return {};
         }
 
-        std::expected<void, std::string> update_one(const Domain& item)
+        std::expected<void, Core::DbError> update_one(const Domain& item)
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
             auto res = conn_.update(dto);
             if (!res) {
-                return std::unexpected<std::string>{ res.error().what() };
+                return std::unexpected<Core::DbError>{ Core::DbError{Core::DbErrorCode::Unknown, res.error().what()} };
             }
             return {};
         }
 
-        std::expected<void, std::string> delete_by_id(std::int32_t id)
+        std::expected<void, Core::DbError> delete_by_id(std::int32_t id)
         {
             // The current connection API does not report deletion errors.
             // Preserve the expected-based repository API; deletion is successful

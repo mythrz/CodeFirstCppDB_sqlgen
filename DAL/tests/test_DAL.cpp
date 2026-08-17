@@ -247,7 +247,7 @@ namespace
         // const bool inserted = repo.insert_one(p);
         // ASSERT_TRUE(inserted) << "insert_one failed";
         auto result = repo.insert_one(p);
-        ASSERT_TRUE(result.has_value()) << result.error();
+        ASSERT_TRUE(result.has_value()) << result.error().to_string();
 
         const auto found = repo.get_by_id(3);
         ASSERT_TRUE(found.has_value()) << "Inserted row was not found";
@@ -266,7 +266,7 @@ namespace
         // const bool inserted = repo.insert_many(newPeople);
         // ASSERT_TRUE(inserted);
         auto result = repo.insert_many(newPeople);
-        ASSERT_TRUE(result.has_value()) << result.error();
+        ASSERT_TRUE(result.has_value()) << result.error().to_string();
 
         ASSERT_EQ(repo.count(), 4);
         ASSERT_TRUE(repo.exists_by_id(10));
@@ -281,7 +281,7 @@ namespace
         // const bool updated = repo.update_one(updatedPerson);
         // ASSERT_TRUE(updated);
         auto result = repo.update_one(updatedPerson);
-        ASSERT_TRUE(result.has_value()) << result.error();
+        ASSERT_TRUE(result.has_value()) << result.error().to_string();
 
         const auto found = repo.get_by_id(1);
         ASSERT_TRUE(found.has_value());
@@ -298,7 +298,7 @@ namespace
         // const bool inserted = repo.insert_one(p);
         // ASSERT_TRUE(inserted) << "insert_one failed";
         auto result = repo.insert_one(p);
-        ASSERT_TRUE(result.has_value()) << result.error();
+        ASSERT_TRUE(result.has_value()) << result.error().to_string();
 
         auto before = repo.get_by_id(4);
         ASSERT_TRUE(before.has_value());
@@ -307,11 +307,27 @@ namespace
 
         // repo.delete_by_id(4);
         auto delete_result = repo.delete_by_id(4);
-        ASSERT_TRUE(delete_result.has_value()) << delete_result.error();
+        ASSERT_TRUE(delete_result.has_value()) << delete_result.error().to_string();
 
         auto after = repo.get_by_id(4);
         ASSERT_FALSE(after.has_value());
         ASSERT_FALSE(repo.exists_by_id(4));
+    }
+
+    TEST_F(SqlgenExampleTest, UpdateOne_ShouldReturnError_WhenItemNotFound)
+    {
+        DAL::Repositories::SQLitePersonRepo<TestDatabaseConnection> repo(conn);
+
+        // Attempt to update an item that doesn't exist
+        Core::Person nonExistentPerson(999, "Ghost", "Protocol");
+        auto result = repo.update_one(nonExistentPerson);
+
+        ASSERT_FALSE(result.has_value()) << "Expected update_one to fail";
+        
+        // Ensure the error type is correctly captured as Core::DbError
+        Core::DbError err = result.error();
+        EXPECT_EQ(err.code, Core::DbErrorCode::Unknown); // GenericRepository hardcodes Unknown for conn errors
+        EXPECT_EQ(err.message, "Update failed: item not found"); // This matches TestDatabaseConnection::update behavior
     }
 
     TEST_F(SqlgenExampleTest, DependencyInjection_InterfacePolymorphism)
@@ -330,7 +346,7 @@ namespace
         Core::Person p(5, "DI_User", "DI_LastName");
         // ASSERT_TRUE(repo->insert_one(p));
         auto result = repo->insert_one(p);
-        ASSERT_TRUE(result.has_value()) << result.error();
+        ASSERT_TRUE(result.has_value()) << result.error().to_string();
         ASSERT_TRUE(repo->exists_by_id(5));
     }
 
@@ -347,7 +363,7 @@ namespace
         Core::Something newItem(3, "Item3", "Cat3", "Desc3");
         // ASSERT_TRUE(somethingRepo.insert_one(newItem));
         auto result = somethingRepo.insert_one(newItem);
-        ASSERT_TRUE(result.has_value()) << result.error();
+        ASSERT_TRUE(result.has_value()) << result.error().to_string();
         ASSERT_EQ(somethingRepo.count(), 3);
     }
 
