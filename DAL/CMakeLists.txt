@@ -6,6 +6,7 @@ target_sources(DAL
             schema/PersonDTO.ixx
             schema/SomethingDTO.ixx
             schema/Person_SomethingDTO.ixx
+            schema/SchemaTraits.ixx
             mappers/MapperTraits.ixx
             repositories/GenericRepository.ixx
             repositories/SQLitePersonRepo.ixx

@@ -65,7 +65,7 @@ namespace
             {
                 if constexpr (requires { item.id; })
                 {
-                    if (item.id == id)
+                    if (item.id.value() == id)
                         return item;
                 }
             }
@@ -98,7 +98,7 @@ namespace
             {
                 if constexpr (requires { elem.id; })
                 {
-                    if (elem.id == item.id)
+                    if (elem.id.value() == item.id.value())
                     {
                         elem = item;
                         return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
@@ -119,7 +119,7 @@ namespace
                 {
                     if constexpr (requires { item.id; })
                     {
-                        return item.id == id;
+                        return item.id.value() == id;
                     }
                     return false;
                 });

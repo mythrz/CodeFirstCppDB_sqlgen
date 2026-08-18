@@ -83,7 +83,19 @@ export namespace DAL::Mappers
                             arr[i] = detail::find_matching_domain_member(dto_members[i], domain_members);
                         return arr;
                     }());
-                return Domain(static_cast<[:std::meta::type_of(dom_members_matched[Is]):]>(dto.[:dto_members[Is]:])...);
+                auto extract_value = []<typename T>(const T& val) -> decltype(auto)
+                {
+                    if constexpr (requires { val.value(); })
+                    {
+                        return val.value();
+                    }
+                    else
+                    {
+                        return val;
+                    }
+                };
+
+                return Domain(static_cast<[:std::meta::type_of(dom_members_matched[Is]):]>(extract_value(dto.[:dto_members[Is]:]))...);
             }(std::make_index_sequence<dto_members.size()>{});
         }
 
