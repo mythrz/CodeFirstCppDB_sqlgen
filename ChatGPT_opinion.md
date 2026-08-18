@@ -1,920 +1,1299 @@
-# ChatGPT Opinion — SQLGen CMake / C++ Project
+# ChatGPT Opinion — Code-First C++26 Database Prototype with sqlgen
 
-**Review date:** 2026-08-01
-
-## Executive summary
-
-The project has a **good architectural foundation** and I would **not rewrite it from scratch**.
-
-The strongest parts are the Core/DAL separation, DTOs and mappers, C++ modules, concepts, generic repository machinery, and SQLGen as the database-facing layer.
-
-The main opportunity now is not adding as many new C++26 features as possible. It is to make the existing architecture more rigorous: improve error handling, typing, repository composition, transactions, testing, and CMake. Once those foundations are solid, the project can become very C++26-ready without making C++26 a hard dependency.
-
-## Overall assessment
-
-| Area | Current | Target |
-|---|---:|---:|
-| Overall architecture | 8/10 | 9.5/10 |
-| C++ usage | 8/10 | 9.5/10 |
-| C++ modules | 8.5/10 | 9.5/10 |
-| CMake | 6.5/10 | 9.5/10 |
-| Repository design | 6/10 | 9/10 |
-| Error handling | 5/10 | 9.5/10 |
-| Testing | 6/10 | 9/10 |
-| DTO / mapping design | 7/10 | 9/10 |
-| Database abstraction | 6/10 | 9/10 |
-| C++26 readiness | 8/10 | 10/10 |
+**Review date:** 2026-08-18  
+**Reviewed project:** `CodeFirstCppDB_sqlgen_b`  
+**Target:** GCC 16.x / C++26 / modules / static reflection / templates / sqlgen / SQLite  
+**Purpose:** Prototype a genuinely code-first database layer using modern C++ rather than build a production ORM.
 
 ---
 
-# 1. What I would keep
+## 1. Executive opinion
 
-## Core / DAL separation
+I think this is a **very good prototype direction**, and more importantly, it is using C++26 for something that actually benefits from compile-time programming rather than using new language features merely because they exist.
 
-This is one of the best architectural decisions in the project.
-
-The dependency direction should remain approximately:
+The strongest idea in the project is this:
 
 ```text
-        Core
-         ↑
-         |
-        DAL
-         ↑
-         |
-      Startup
+Domain types
+     │
+     │ C++26 reflection
+     ▼
+Generic mapper
+     │
+     ▼
+DTO / relational representation
+     │
+     │ sqlgen
+     ▼
+SQL / SQLite
 ```
 
-Core entities should remain independent of SQLite and SQLGen.
+The combination of:
 
-That gives the project room to support other database backends later without contaminating the domain layer.
+- named C++ modules,
+- `import std;`,
+- concepts,
+- templates,
+- `std::expected`,
+- strong ID types,
+- C++26 static reflection,
+- expansion statements,
+- compile-time member discovery,
+- sqlgen's type-based SQL generation,
 
-**Keep this.**
+is exactly the sort of experiment for which a GCC-16/C++26 prototype makes sense.
 
-## DTO / domain separation
+However, I would **not yet call the current implementation a complete "code-first database"**.
 
-Keeping domain entities separate from database DTOs is also a good decision.
+At the moment it is closer to:
 
-For example:
+> **A reflection-assisted repository/ORM prototype where DTO structs describe the relational schema and C++ domain classes are mapped to those DTOs.**
 
-```text
-Domain                    Database
+That distinction matters.
 
-Person                    PersonDTO
- ├── id                    ├── id
- ├── firstName             ├── first_name
- └── lastName              └── last_name
-```
-
-This is preferable to making the domain model itself the database representation.
-
-**Keep this.**
-
-## C++ modules
-
-I would continue using C++ modules.
-
-The move toward:
-
-```cpp
-export module core;
-export module dal;
-export module dal:generic_repo;
-```
-
-and:
-
-```cpp
-import std;
-```
-
-is the correct direction for a modern C++ project.
-
-I would not abandon modules just to simplify short-term build issues.
-
-## Concepts
-
-The project is correctly using concepts instead of old SFINAE-style constraints.
-
-That should remain a central part of the design.
-
-However, the existing concepts should become more precise.
-
-## Generic repository machinery
-
-The idea behind a generic repository is good:
-
-```text
-Domain
-  ↓
-Mapper
-  ↓
-DTO
-  ↓
-Database backend
-  ↓
-SQLGen
-```
-
-The problem is not the idea. The problem is how much inheritance and interface machinery surrounds it.
-
-I would retain the reusable generic CRUD/query implementation but simplify its public architecture.
-
-## Ranges
-
-The use of ranges and `std::views::transform` is appropriate and modern.
-
-Keep using ranges where they improve clarity, but do not force ranges into code where an ordinary loop is clearer.
+The next major step should not be adding random C++26 features. The next step should be making the **database schema itself emerge from the C++ type model**.
 
 ---
 
-# 2. Biggest change: error handling
+# 2. The architecture is fundamentally sound
 
-The current use of:
-
-```cpp
-bool insert_one(...);
-bool insert_many(...);
-bool update_one(...);
-void delete_by_id(...);
-```
-
-throws away too much information.
-
-Database operations can fail for many different reasons:
-
-- duplicate key
-- foreign-key violation
-- constraint violation
-- connection failure
-- database locked
-- SQL error
-- transaction failure
-- I/O error
-- serialization/conversion error
-
-A `bool` cannot communicate those distinctions.
-
-## Recommendation
-
-Use `std::expected`.
-
-For example:
-
-```cpp
-enum class RepositoryError
-{
-    connection_closed,
-    not_found,
-    duplicate_key,
-    constraint_violation,
-    database_error,
-    transaction_error
-};
-```
-
-Then:
-
-```cpp
-std::expected<void, RepositoryError>
-insert_one(const Person&);
-```
-
-and:
-
-```cpp
-std::expected<Person, RepositoryError>
-get_by_id(PersonId);
-```
-
-This should be one of the first major refactors.
-
----
-
-# 3. Do not add a virtual IDatabaseConnection
-
-A tempting future design is:
-
-```cpp
-class IDatabaseConnection
-{
-    virtual ...
-};
-```
-
-I would **not** do that.
-
-The current concept/template approach is better suited to this project:
-
-```cpp
-template<typename ConnectionHandle>
-class GenericRepository;
-```
-
-C++ templates and concepts can provide compile-time polymorphism without introducing runtime virtual dispatch.
-
-I would strengthen the existing concepts instead of replacing them with a virtual database interface.
-
----
-
-# 4. Simplify repository inheritance
-
-The current architecture has a hierarchy resembling:
-
-```text
-IGenericRepository
-       ↑
-GenericRepository
-       ↑
-SQLitePersonRepo
-       ↑
-IPersonRepository
-```
-
-with multiple inheritance involved.
-
-It works, but I think it is unnecessarily complicated.
-
-I would prefer:
+The current separation is:
 
 ```text
 Core
+ ├── Domain entities
+ ├── Strong IDs
+ ├── Repository interfaces
+ └── Database errors
 
-IPersonRepository
-       ↑
-       |
-SQLitePersonRepository
+        ↓
+
+DAL
+ ├── SQL DTO/schema types
+ ├── C++26 reflection mapper
+ ├── Generic repository
+ └── SQLite repositories
+
+        ↓
+
+Startup
+ └── Application / composition root
 ```
 
-while the concrete repository **composes** reusable generic functionality internally:
+This is a good architecture for the experiment.
 
-```cpp
-class SQLitePersonRepository
-    : public Core::IPersonRepository
-{
-    GenericCrud<Person, PersonDTO, Connection> crud_;
-};
+The most important architectural decision is that `Core` does not depend on SQLite or sqlgen.
+
+That means the project can eventually have:
+
+```text
+                 ┌── SQLite / sqlgen
+                 │
+Core interfaces ─┼── PostgreSQL
+                 │
+                 ├── MySQL
+                 │
+                 └── In-memory test database
 ```
 
-This separates public domain-facing repository contracts, reusable implementation machinery, and database backend details.
+without changing the domain model.
+
+That is exactly what I would preserve.
 
 ---
 
-# 5. Strongly typed IDs
+# 3. The C++26 reflection work is the most interesting part
 
-There are inconsistent ID types between entities, DTOs and repository interfaces.
+`MapperTraits` is currently the most valuable piece of experimental code.
 
-At minimum:
-
-```cpp
-using PersonId = std::uint32_t;
-using SomethingId = std::uint32_t;
-```
-
-Better still:
+The project is using:
 
 ```cpp
-struct PersonId
-{
-    std::uint32_t value;
-};
-
-struct SomethingId
-{
-    std::uint32_t value;
-};
+std::meta::nonstatic_data_members_of(...)
 ```
 
-This prevents accidental mixing of IDs belonging to different tables.
+together with:
+
+```cpp
+^^T
+```
+
+reflection queries, static arrays, expansion statements and splicing:
+
+```cpp
+dto.[:dto_m:]
+```
+
+This is no longer just "template magic".
+
+It is approaching what people traditionally need an external code generator, macro system, or runtime reflection library to accomplish.
+
+The mapper is therefore a legitimate demonstration of why static reflection is useful.
+
+GCC 16 officially implements P2996R13 static reflection behind `-freflection`, together with related reflection proposals and expansion statements. GCC's documentation explicitly describes this support as experimental, which is important for this project's positioning. 
+
+The project's use of:
+
+```text
+-std=c++26
+-freflection
+```
+
+is therefore appropriate for this prototype.
 
 ---
 
-# 6. Composite keys expose a generic-repository limitation
+# 4. The biggest problem in the current reflection mapper
 
-`Person_Something` is an association entity:
+There is one piece I would change before building more functionality.
+
+This function:
+
+```cpp
+find_matching_domain_member(...)
+```
+
+contains:
+
+```cpp
+return domain_members[0];
+```
+
+when no member matches.
+
+That is dangerous.
+
+A reflection-based mapper should **fail at compile time when the mapping is ambiguous or impossible**.
+
+It should never silently decide:
+
+> "I couldn't find the member, so I will use the first member."
+
+For example, if a DTO eventually changes from:
+
+```text
+id
+first_name
+last_name
+```
+
+to:
+
+```text
+id
+email
+last_name
+```
+
+while the domain model does not change appropriately, the current fallback can produce extremely confusing compile-time behaviour or, worse, a seemingly valid but semantically incorrect mapping.
+
+I would make the mapper distinguish:
+
+```text
+exact match
+naming-convention match
+ambiguous match
+no match
+```
+
+and reject the last two.
+
+This is especially important because the whole point of this project is **compile-time safety**.
+
+---
+
+# 5. The mapper currently has an even deeper coupling
+
+`to_domain()` eventually constructs the domain object like this:
+
+```cpp
+return Domain(
+    mapped_member_1,
+    mapped_member_2,
+    mapped_member_3
+);
+```
+
+That means the reflection system discovers members, but the final construction is still dependent on the domain constructor's parameter order.
+
+So the mapping currently combines two different models:
+
+```text
+member names
++
+constructor ordering
+```
+
+I would eventually make the construction mechanism itself reflection-driven.
+
+For a prototype, the current approach is completely reasonable.
+
+For the final design, however, I would prefer something closer to:
+
+```text
+DTO member
+    ↓
+find domain member
+    ↓
+convert type
+    ↓
+assign domain member
+```
+
+rather than:
+
+```text
+DTO member
+    ↓
+find domain member
+    ↓
+put value into constructor position N
+```
+
+This becomes particularly important once entities contain:
+
+- optional fields,
+- nested objects,
+- collections,
+- generated IDs,
+- relationships,
+- nullable database columns,
+- computed properties.
+
+---
+
+# 6. The current "code-first" definition should be reconsidered
+
+This is the biggest conceptual issue in the project.
+
+Currently you have:
+
+```cpp
+struct PersonDTO
+{
+    static constexpr auto tablename = "Person";
+
+    sqlgen::PrimaryKey<std::int32_t, true> id;
+    std::string first_name;
+    std::string last_name;
+};
+```
+
+This is a perfectly valid schema representation.
+
+But it means the DTO is effectively the database model.
+
+Meanwhile:
+
+```cpp
+class Person
+{
+    PersonId id_;
+    std::string firstName_;
+    std::string lastName_;
+};
+```
+
+is the domain model.
+
+Therefore the current direction is:
+
+```text
+DTO/schema → database
+domain      → DTO
+```
+
+rather than:
+
+```text
+domain model → schema → database
+```
+
+That is an important distinction.
+
+If the ultimate goal is a true code-first database, I would eventually want:
+
+```cpp
+struct Person
+{
+    PersonId id;
+    std::string firstName;
+    std::string lastName;
+};
+```
+
+plus compile-time metadata describing:
+
+```text
+primary key
+column name
+nullable
+foreign key
+index
+unique
+default value
+table name
+```
+
+and have reflection derive the relational representation.
+
+C++26 annotations/reflection are particularly interesting for this direction.
+
+---
+
+# 7. I would NOT eliminate DTOs yet
+
+Even though DTO generation is the natural next step, I would **keep the DTO layer for now**.
+
+There is a good architectural reason.
+
+The domain model and relational model are not necessarily identical.
+
+For example:
+
+```text
+Domain:
+
+Person
+ ├── PersonId
+ ├── Name
+ └── Address
+```
+
+while SQL might contain:
 
 ```text
 Person
-  |
-  +---- Person_Something ----+
-                             |
-                         Something
+ ├── id
+ ├── first_name
+ ├── last_name
+ └── address_id
 ```
 
-It does not naturally have one scalar ID.
+A database representation can contain things that the domain should not expose.
 
-Instead it has a composite key:
-
-```cpp
-struct PersonSomethingKey
-{
-    PersonId person;
-    SomethingId something;
-};
-```
-
-This shows that a generic repository should not assume every entity has:
+Therefore I would aim for:
 
 ```text
-get_by_id(int)
-update(int)
-delete_by_id(int)
+             C++ domain model
+                    │
+              reflection
+                    │
+                    ▼
+          relational metadata
+                    │
+                    ▼
+                 DTO
+                    │
+                  sqlgen
+                    │
+                    ▼
+                 database
 ```
 
-A better abstraction has a repository key:
-
-```text
-RepositoryKey<Person>
-        = PersonId
-
-RepositoryKey<Something>
-        = SomethingId
-
-RepositoryKey<PersonSomething>
-        = PersonSomethingKey
-```
-
-This would make the design much more general.
+The DTO should become **generated or mechanically derived**, rather than manually maintaining a second schema forever.
 
 ---
 
-# 7. Strengthen database concepts
+# 8. Strong IDs are good — but currently not quite strong enough
 
-A concept that only checks something such as:
+The project has:
 
 ```cpp
+template<typename Tag>
+struct Id
+{
+    std::int32_t value;
+};
+```
+
+and:
+
+```cpp
+using PersonId = Id<PersonTag>;
+using SomethingId = Id<SomethingTag>;
+```
+
+This is good.
+
+It prevents:
+
+```cpp
+PersonId person;
+SomethingId thing;
+
+foo(thing); // should not compile if foo expects PersonId
+```
+
+That is exactly what I want from a code-first database prototype.
+
+However, this:
+
+```cpp
+constexpr operator std::int32_t() const noexcept
+```
+
+weakens the type safety.
+
+The project is effectively saying:
+
+> "IDs are strongly typed, except whenever conversion becomes inconvenient."
+
+I would eventually remove the implicit conversion.
+
+Prefer explicit conversion:
+
+```cpp
+constexpr std::int32_t get() const noexcept;
+```
+
+and let the mapper/database adapter explicitly perform the conversion.
+
+That keeps the safety boundary obvious.
+
+---
+
+# 9. Composite keys expose a real architectural limitation
+
+`Person_SomethingDTO` is particularly interesting:
+
+```cpp
+sqlgen::ForeignKey<std::int32_t, PersonDTO, "id"> person_id;
+sqlgen::ForeignKey<std::int32_t, SomethingDTO, "id"> something_id;
+```
+
+It correctly does not satisfy:
+
+```cpp
+RelationalEntity
+```
+
+because it does not have a single:
+
+```cpp
+id
+```
+
+field.
+
+This is actually revealing an important problem.
+
+The generic repository currently assumes:
+
+```cpp
+get_by_id(int32_t)
+delete_by_id(int32_t)
+exists_by_id(int32_t)
+```
+
+That is not a relationally universal model.
+
+You eventually need to distinguish:
+
+```text
+Single-key entity
+Composite-key entity
+Keyless/query entity
+Join entity
+```
+
+I would not try to force everything into:
+
+```cpp
+IGenericRepository<T>
+```
+
+with one `int32_t` key.
+
+A better long-term abstraction might be conceptually:
+
+```text
+Entity
+ ├── PrimaryKey
+ ├── CompositeKey
+ └── NoKey
+```
+
+with repository operations generated according to the key metadata.
+
+This is an excellent place for C++26 reflection.
+
+---
+
+# 10. `DatabaseConnection` is currently too weak
+
+Currently:
+
+```cpp
+template<typename T>
 concept DatabaseConnection = requires(T conn)
 {
     { conn.is_open() } -> std::same_as<bool>;
 };
 ```
 
-is too weak if the repository subsequently assumes many other operations exist.
+This only proves that:
 
-Consider capability concepts such as:
-
-```text
-QueryableConnection
-InsertableConnection
-UpdatableConnection
-DeletableConnection
-TransactionalConnection
+```cpp
+conn.is_open()
 ```
 
-or one precise backend concept describing exactly what the generic repository requires.
+exists.
 
-The concept should describe the actual contract, not merely whether `is_open()` exists.
+But `GenericRepository` assumes a much larger interface:
+
+```text
+fetch_all
+get_by_id
+insert
+insert_many
+update
+delete_by_id
+exists
+count
+query
+```
+
+Consequently, the concept is not really describing the connection contract.
+
+I would improve this later.
+
+The difficulty is that templated member functions make a generic concept more verbose.
+
+That is acceptable.
+
+The concept should document the actual contract that `GenericRepository` requires.
+
+The goal should be:
+
+> Bad connection types fail at the concept boundary, not 500 lines later during template instantiation.
 
 ---
 
-# 8. Testing should have three layers
+# 11. `std::expected` was the right move
 
-The current fake/in-memory database connection is useful, but it should not be considered a real database integration test.
+The transition away from:
 
-## Layer 1 — Unit tests
-
-Fast tests for:
-
-- Core
-- mappers
-- repository algorithms
-- validation
-- fake backend behavior
-
-## Layer 2 — SQLGen/SQLite integration tests
-
-Use a real in-memory SQLite database.
-
-Test:
-
-- schema creation
-- INSERT
-- SELECT
-- UPDATE
-- DELETE
-- constraints
-- foreign keys
-- joins
-- transactions
-- query behavior
-
-## Layer 3 — Migration tests
-
-Use temporary SQLite files and test:
-
-```text
-schema v1
-   ↓
-migration
-   ↓
-schema v2
+```cpp
+bool
 ```
 
-This becomes especially important once schema migrations are introduced.
+towards:
 
----
-
-# 9. Add CTest
-
-CMake should own test execution.
-
-The desired workflow should become:
-
-```bash
-cmake --preset clang-debug
-cmake --build --preset clang-debug
-ctest --preset clang-debug
+```cpp
+std::expected<void, Core::DbError>
 ```
 
-Tests should be categorized, for example:
+was definitely the right architectural choice.
 
-```text
-Core.Unit
-Mapper.Unit
-Repository.Unit
-SQLite.Integration
-Migration.Integration
-```
+It makes repository errors explicit.
 
-This also makes CI much easier.
+This is much better:
 
----
+```cpp
+auto result = repo.insert_one(person);
 
-# 10. Improve CMake
-
-CMake is currently the area I would clean up the most.
-
-There are dependency-discovery workarounds such as manually writing package configuration files. I would remove those where possible and make dependency discovery explicit and reproducible.
-
-Also avoid relying on global:
-
-```cmake
-CMAKE_CXX_FLAGS
-```
-
-for settings that should be target- or toolchain-specific.
-
-Prefer:
-
-```cmake
-target_compile_options(...)
-target_link_options(...)
-```
-
-or dedicated toolchain files.
-
-Clang debug/release configurations should also consistently define their standard-library choice.
-
----
-
-# 11. CMake presets
-
-I would aim for:
-
-```text
-CMakePresets.json
-
-configurePresets:
-    clang-debug
-    clang-release
-    gcc-debug
-    gcc-release
-
-buildPresets:
+if (!result)
+{
     ...
+}
+```
 
-testPresets:
+than:
+
+```cpp
+if (!repo.insert_one(person))
+{
     ...
+}
 ```
 
-Potentially:
+because the failure contains information.
+
+However, there is still a problem:
+
+```cpp
+Core::DbErrorCode::Unknown
+```
+
+is currently used for almost everything.
+
+That means the abstraction exists, but the semantic error model is not finished.
+
+Eventually I would want something like:
 
 ```text
-cmake/
-    toolchains/
-        clang-libcxx.cmake
-        gcc.cmake
+ConnectionError
+ConstraintViolation
+DuplicateKey
+NotFound
+InvalidEntity
+TransactionError
+SqlError
+MappingError
 ```
 
-The goal is that configuring, building and testing are all reproducible.
+and ideally preserve the underlying sqlgen/database error rather than flattening everything to a string.
 
 ---
 
-# 12. Add sanitizers and stronger warnings
+# 12. `delete_by_id()` currently violates the promise of `expected`
 
-I would add dedicated debug presets for:
+This is one of the concrete issues I would fix soon.
 
-```text
-clang-asan-debug
-clang-ubsan-debug
+The repository says:
+
+```cpp
+std::expected<void, Core::DbError> delete_by_id(...)
 ```
 
-and use ThreadSanitizer where appropriate.
+but then:
 
-A reasonable warning baseline includes:
-
-```text
--Wall
--Wextra
--Wpedantic
--Wconversion
--Wsign-conversion
--Wshadow
--Wnull-dereference
--Wnon-virtual-dtor
--Woverloaded-virtual
+```cpp
+conn_->template delete_by_id<DTO>(id);
+return {};
 ```
 
-Introduce stricter warnings progressively rather than immediately making every warning an error.
+The connection operation is effectively ignored.
+
+So the API promises:
+
+```text
+operation can fail
+```
+
+while the implementation says:
+
+```text
+I will always return success unless something exceptional happens.
+```
+
+This should be resolved at the sqlgen adapter boundary.
+
+Either:
+
+1. sqlgen exposes a result for deletion and the error is propagated, or
+2. the repository contract explicitly documents deletion as non-failing for the supported connection.
+
+I strongly prefer option 1.
 
 ---
 
-# 13. Transactions should come before async
+# 13. Read operations have inconsistent error semantics
 
-The roadmap mentions P2300 / `std::execution`.
+Mutating operations use:
 
-That is interesting, but it should not be a priority yet.
+```cpp
+std::expected
+```
 
-A database library needs correct transactional semantics before asynchronous execution.
+but:
+
+```cpp
+get_all()
+```
+
+returns:
+
+```cpp
+std::vector<Domain>
+```
+
+and:
+
+```cpp
+get_by_id()
+```
+
+returns:
+
+```cpp
+std::optional<Domain>
+```
+
+That is acceptable for a prototype, but it creates an important semantic distinction.
+
+What does this mean?
+
+```cpp
+repo.get_by_id(42)
+```
+
+returning `std::nullopt`?
+
+Possibilities:
+
+```text
+A. Row does not exist.
+B. Database failed.
+C. Connection is closed.
+D. Mapping failed.
+```
+
+The current API can only represent A.
+
+For a serious repository abstraction, I would eventually prefer:
+
+```cpp
+std::expected<std::optional<Domain>, DbError>
+```
+
+or another clearly defined result model.
+
+The important thing is consistency.
+
+---
+
+# 14. The test database is actually a very good idea
+
+I like the `TestDatabaseConnection` approach.
+
+The repository is templated on:
+
+```cpp
+ConnectionHandle
+```
+
+and the test supplies a completely different implementation.
+
+This proves something important:
+
+```text
+GenericRepository
+        ↓
+compile-time connection contract
+        ↓
+SQLite connection
+```
+
+and:
+
+```text
+GenericRepository
+        ↓
+compile-time connection contract
+        ↓
+in-memory test connection
+```
+
+That is much more interesting than simply mocking a virtual database interface.
+
+The test database also provides a useful future opportunity:
+
+**Use the same compile-time connection contract to test transactions, failures and constraints without SQLite.**
+
+---
+
+# 15. The tests should go further
+
+The existing tests cover the basic CRUD path reasonably well.
+
+The next tests I would add are compile-time tests.
 
 For example:
 
 ```text
-create Person
-    +
-create Something
-    +
-create association
+PersonId cannot be passed where SomethingId is required
 ```
 
-should be atomic.
+```text
+DTO without a valid primary key is rejected
+```
 
-I would first introduce a transaction abstraction:
+```text
+DTO/domain mismatch produces a compile-time failure
+```
+
+```text
+ambiguous reflection mapping is rejected
+```
+
+```text
+composite-key entities are rejected by single-key repository operations
+```
+
+```text
+unsupported member type is rejected
+```
+
+This project is particularly suited to **compile-time contract testing**.
+
+Runtime GoogleTest tests alone don't demonstrate the most interesting part of the project.
+
+---
+
+# 16. The project should eventually test the actual SQLite path more heavily
+
+The current unit tests primarily exercise:
+
+```text
+GenericRepository
++
+TestDatabaseConnection
+```
+
+The `Startup` example exercises real SQLite.
+
+I would add a second test layer:
+
+```text
+Unit tests
+    ↓
+TestDatabaseConnection
+
+Integration tests
+    ↓
+real sqlgen
+    ↓
+real SQLite
+```
+
+Then you can prove both:
+
+```text
+generic repository correctness
+```
+
+and:
+
+```text
+actual SQL/database correctness
+```
+
+without mixing the two.
+
+---
+
+# 17. CMake is already much better than the previous opinion suggests
+
+The existing project already has:
+
+```cmake
+enable_testing()
+```
+
+and:
+
+```cmake
+add_test(NAME test_DAL COMMAND test_DAL)
+```
+
+so that particular criticism from the previous `Antigravity_opinion.md` is outdated.
+
+Likewise, `Startup` explicitly links:
+
+```cmake
+sqlgen
+SQLite3::SQLite3
+```
+
+so I would not make those a priority either.
+
+The more important CMake concern is the experimental toolchain configuration.
+
+You currently have:
+
+```cmake
+cmake_minimum_required(VERSION 4.4)
+```
+
+and:
+
+```cmake
+set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+set(CMAKE_CXX_MODULE_STD ON)
+```
+
+This is appropriate for a bleeding-edge prototype, but the project should clearly distinguish:
+
+```text
+Required for this experiment
+```
+
+from:
+
+```text
+Required for ordinary C++26 projects
+```
+
+That will make the repository much easier to understand six months from now.
+
+---
+
+# 18. GCC 16 should be treated as a deliberate platform requirement
+
+I would explicitly document the supported compiler as something like:
+
+```text
+Supported:
+    GCC 16.x with C++26 reflection enabled
+
+Experimental:
+    GCC trunk
+
+Not currently supported:
+    Clang
+    MSVC
+```
+
+rather than presenting the project as generally portable C++26.
+
+GCC's own documentation describes C++26 support as experimental, and reflection specifically requires `-freflection`. 
+
+Also, be careful with the phrase **"GCC 16 main branch"**.
+
+As of 2026-08-18, GCC 16 is the released GCC 16 series; GCC development trunk is already targeting GCC 17. If the intention is to use the GCC 16 release branch, call it GCC 16.x. If the intention is to follow GCC development trunk, call it GCC trunk / GCC 17 development.
+
+For reproducibility, I strongly recommend recording:
+
+```text
+g++ --version
+cmake --version
+ninja --version
+```
+
+in the project documentation or CI artifact.
+
+---
+
+# 19. Do not try to use every C++26 feature
+
+This is important.
+
+The goal should **not** be:
+
+> "Use all available C++26 features."
+
+The better goal is:
+
+> "Use every C++26 feature that materially improves the code-first database model."
+
+For this project, the high-value features are:
+
+| C++ feature | Value to this project |
+|---|---:|
+| Static reflection | ★★★★★ |
+| Expansion statements | ★★★★★ |
+| Reflection splicing | ★★★★★ |
+| Annotations | ★★★★★ |
+| `std::expected` | ★★★★★ |
+| Modules | ★★★★★ |
+| Concepts | ★★★★★ |
+| `std::inplace_vector` | ★★ |
+| Contracts | ★★★ |
+| `std::function_ref` | ★★ |
+| `std::copyable_function` | ★ |
+| `std::simd` | ★ |
+| Senders/receivers | ★★ |
+
+GCC 16's published C++26 feature list includes reflection, expansion statements, annotations-related reflection support, `std::inplace_vector`, `std::optional<T&>`, `std::function_ref`, `std::copyable_function`, and other C++26 facilities. 
+
+The database prototype should remain focused.
+
+---
+
+# 20. Contracts could eventually be useful
+
+C++26 contracts are now available in GCC 16.
+
+They could become interesting for database invariants such as:
+
+```text
+ID must be valid
+required field must not be empty
+repository must have an open connection
+```
+
+However, I would **not introduce contracts yet**.
+
+First finish the reflection/schema architecture.
+
+Contracts are useful around the edges.
+
+Reflection is the core of this project.
+
+---
+
+# 21. C++26 annotations are potentially much more important
+
+This is one of the areas I would investigate next.
+
+Instead of hard-coding database semantics entirely into wrapper types:
 
 ```cpp
-transaction([&]
+sqlgen::PrimaryKey<int, true>
+```
+
+the long-term experiment could explore metadata attached to domain members.
+
+Conceptually:
+
+```cpp
+struct Person
 {
-    persons.insert(...);
-    somethings.insert(...);
-    associations.insert(...);
-});
+    [[db::primary_key]]
+    PersonId id;
+
+    [[db::column("first_name")]]
+    std::string firstName;
+
+    [[db::column("last_name")]]
+    std::string lastName;
+};
 ```
 
-Only after that should asynchronous database execution become a major focus.
-
----
-
-# 14. Database context / Unit of Work
-
-I would eventually introduce a database context or Unit of Work:
+Then reflection can discover:
 
 ```text
-DatabaseContext
-    |
-    +-- connection
-    +-- transaction
-    +-- PersonRepository
-    +-- SomethingRepository
-    +-- PersonSomethingRepository
+member
+type
+name
+annotations
 ```
 
-This gives the application a clean composition point and makes transaction boundaries explicit.
+and produce the SQL schema.
+
+That is much closer to a true C++26 code-first ORM.
+
+This is the direction I would investigate before adding more repository features.
 
 ---
 
-# 15. Keep the domain independent
+# 22. The ideal long-term architecture
 
-Do not move SQL or SQLGen into Core.
-
-The domain should not need to know about:
-
-- SQLite
-- SQLGen
-- SQL strings
-- connection objects
-- transaction implementation
-- database-specific errors
-
-Keep those concerns in DAL/infrastructure.
-
-This is one of the project's strongest architectural properties today.
-
----
-
-# 16. Reflection: design for C++26, but don't depend on it yet
-
-C++26 reflection is one of the most interesting future opportunities for SQLGen.
-
-Eventually, reflection could provide:
+If the experiment succeeds, I would aim for something like:
 
 ```text
-entity metadata
-    ↓
-table metadata
-    ↓
-column metadata
-    ↓
-mapper metadata
-    ↓
-query metadata
+                 ┌─────────────────────┐
+                 │     Domain Model    │
+                 │                     │
+                 │ Person              │
+                 │ Something           │
+                 │ Person_Something    │
+                 └──────────┬──────────┘
+                            │
+                       C++26 reflection
+                            │
+              ┌─────────────┴─────────────┐
+              │                           │
+              ▼                           ▼
+       Schema metadata              Mapper metadata
+              │                           │
+              ▼                           ▼
+        SQL definition                DTO mapping
+              │                           │
+              └─────────────┬─────────────┘
+                            │
+                          sqlgen
+                            │
+                            ▼
+                         SQLite
 ```
 
-However, native C++26 reflection support is still uneven across compilers and standard libraries.
-
-Therefore I would **not remove reflect-cpp immediately**.
-
-Instead create an internal abstraction:
-
-```text
-sqlgen::reflection
-       |
-       +-- C++26 reflection implementation
-       |
-       +-- reflect-cpp implementation
-```
-
-Then the rest of SQLGen does not care which reflection mechanism is being used.
-
-This is the most future-proof approach.
+And ideally the programmer only writes the domain/schema definition once.
 
 ---
 
-# 17. C++26 contracts
+# 23. What I would NOT do
 
-Contracts are useful, but they should be used for programmer invariants rather than ordinary database failures.
+I would avoid turning this project into a giant ORM framework prematurely.
 
-Good candidate:
+Do not add:
+
+```text
+dependency injection framework
+reflection framework
+custom serialization framework
+query DSL
+migration framework
+async framework
+connection pool
+generic transaction manager
+runtime metadata registry
+```
+
+just because they are interesting.
+
+The experiment has one central question:
+
+> **How far can C++26 static reflection take a code-first relational database design?**
+
+Everything should support that question.
+
+---
+
+# 24. Recommended roadmap
+
+## Phase 1 — Stabilize the current prototype
+
+- Remove the reflection mapper's `domain_members[0]` fallback.
+- Make mapping failures compile-time errors.
+- Improve `DbErrorCode`.
+- Fix `delete_by_id()` error propagation.
+- Decide on consistent read-operation error semantics.
+- Strengthen `DatabaseConnection`.
+- Remove implicit conversion from strong IDs if possible.
+- Add compile-time mapping tests.
+
+## Phase 2 — Make keys first-class
+
+Introduce compile-time concepts/metadata for:
+
+```text
+Single primary key
+Composite primary key
+Foreign key
+No primary key
+```
+
+Then stop forcing all repositories through:
 
 ```cpp
-void set_id(PersonId id)
-    pre(id != invalid_id);
+std::int32_t id
 ```
 
-Poor candidate:
+This is particularly important for `Person_Something`.
 
-```cpp
-void insert(...)
-    pre(database_is_connected);
-```
+## Phase 3 — Reflection-driven schema
 
-A disconnected database is an operational failure and should normally be represented through the error/result mechanism.
-
-The distinction should be:
+Investigate C++26 reflection/annotations for:
 
 ```text
-Contracts
+table name
+column name
+primary key
+foreign key
+nullable
+unique
+index
+default
+generated ID
+```
+
+The goal is to remove as much duplicated schema information as possible.
+
+## Phase 4 — Generate/derive DTOs
+
+Once the metadata model works, determine whether DTOs can be:
+
+```text
+generated
+```
+
+or:
+
+```text
+mechanically derived
+```
+
+from the domain/schema definition.
+
+Do not remove DTOs simply for aesthetic reasons; remove them only when the reflection architecture makes them unnecessary.
+
+## Phase 5 — SQL schema generation
+
+The ultimate demonstration would be:
+
+```cpp
+create_database_schema<Core::Person>();
+create_database_schema<Core::Something>();
+create_database_schema<Core::Person_Something>();
+```
+
+with SQL generated entirely from compile-time metadata.
+
+At that point I would genuinely call the project a C++26 code-first database prototype.
+
+---
+
+# 25. My ranking of the current project
+
+| Area | Opinion |
+|---|---:|
+| Overall architecture | 9/10 |
+| C++26 experimentation | 10/10 |
+| Reflection usage | 9/10 |
+| Module organization | 9/10 |
+| Template/concept design | 8/10 |
+| Strong typing | 8/10 |
+| Error model | 7/10 |
+| Repository abstraction | 7/10 |
+| Schema abstraction | 6/10 |
+| Code-first database aspect | 6/10 |
+| Testing foundation | 8/10 |
+| CMake | 8/10 |
+| Potential | **10/10** |
+
+The lower schema score is not because the implementation is bad.
+
+It is because the **interesting part has not been implemented yet**.
+
+The project has built a very good foundation for the difficult part.
+
+---
+
+# 26. Final verdict
+
+I would continue this project.
+
+In fact, I think the project has reached the point where adding more conventional ORM features would be less interesting than going deeper into reflection.
+
+The most valuable next milestone is not:
+
+```text
+"more repositories"
+```
+
+or:
+
+```text
+"more CRUD operations"
+```
+
+It is:
+
+```text
+DOMAIN TYPE
     ↓
-programmer invariants
-
-std::expected / errors
+C++26 REFLECTION
     ↓
-operational/domain failures
+RELATIONAL METADATA
+    ↓
+SQLGEN
+    ↓
+DATABASE
 ```
 
----
+with as little manually duplicated information as possible.
 
-# 18. Strongly typed queries
+If that works, the project becomes a genuinely interesting demonstration of what C++26 static reflection can do.
 
-One of the biggest long-term improvements would be reducing raw SQL column names such as:
+The strongest possible end result would be that a developer writes something conceptually close to:
 
 ```cpp
-.where("last_name", lastName)
+struct Person
+{
+    PersonId id;
+    std::string firstName;
+    std::string lastName;
+};
 ```
 
-A typo like:
-
-```cpp
-.where("last_nam", lastName)
-```
-
-should ideally be caught by the compiler.
-
-A future SQLGen query layer should move toward expressions based on actual C++ fields or generated schema metadata:
-
-```cpp
-PersonDTO::last_name == lastName
-```
-
-or an equivalent typed expression.
-
-That would provide much stronger compile-time guarantees.
-
----
-
-# 19. Schema metadata should become central
-
-The long-term architecture should be:
+and the library can compile-time derive enough information to provide:
 
 ```text
-                 Entity Metadata
-                       |
-          +------------+------------+
-          |            |            |
-          v            v            v
-       Mapping      SQL Schema    Queries
-          |            |            |
-          v            v            v
-       Domain       Database      SQLGen
+SQL table definition
+SQL columns
+primary key
+CRUD
+DTO conversion
+repository implementation
+mapping
+validation
 ```
 
-Instead of each subsystem independently knowing about the entity, they should consume the same metadata.
+without runtime reflection and without an external code-generation step.
 
-This is where C++26 reflection can eventually provide major value.
+That is the experiment I think is worth pursuing.
 
----
-
-# 20. Mappers
-
-The current `MapperTraits<Domain, DTO>` approach is good.
-
-Keep it.
-
-Eventually, common mappings should require little or no manual mapping code:
-
-```text
-Person
-  ↓
-automatic mapping
-```
-
-while complicated cases such as `Person_Something` can provide explicit/custom mapping.
-
-This gives the project a good balance between automation and control.
-
----
-
-# 21. Migrations
-
-The proposed migration system is worthwhile.
-
-I would start with explicit migrations:
-
-```text
-migrations/
-    001_initial_schema.sql
-    002_add_person_email.sql
-    003_add_something_description.sql
-```
-
-with a migration runner tracking the current schema version.
-
-Later, reflection/schema metadata can help generate migration information.
-
-Explicit migrations are easier to review, test and reason about.
-
----
-
-# 22. What I would not do
-
-Avoid these directions unless a concrete requirement appears:
-
-### Do not add a virtual `IDatabaseConnection`
-
-Concepts/templates are a better fit.
-
-### Do not make everything asynchronous
-
-Correct transactions and semantics matter first.
-
-### Do not put SQL into Core
-
-Keep the domain database-independent.
-
-### Do not merge DTOs into domain entities
-
-The current separation is valuable.
-
-### Do not make every repository inherit from generic CRUD
-
-Prefer composition for implementation reuse.
-
-### Do not use `bool` for database failures
-
-Use `std::expected` or a similarly expressive result type.
-
-### Do not use `int` for every ID
-
-Use domain-specific ID types.
-
-### Do not make automatic migration inference the first migration system
-
-Start with explicit migrations.
-
-### Do not add C++26 features merely because they are new
-
-Use them where they solve a real architectural problem.
-
----
-
-# 23. Recommended roadmap
-
-## Phase 1 — Clean the current architecture
-
-1. Fix ID types.
-2. Simplify repository inheritance.
-3. Strengthen concepts.
-4. Replace boolean/void database results with `std::expected`.
-5. Clean up CMake dependency handling.
-6. Add CTest.
-7. Add sanitizer presets.
-8. Separate unit and integration tests.
-
-## Phase 2 — Database infrastructure
-
-9. Add transactions.
-10. Add Unit of Work / Database Context.
-11. Add strongly typed keys.
-12. Improve typed query support.
-13. Define a database error taxonomy.
-
-## Phase 3 — Schema system
-
-14. Introduce shared schema metadata.
-15. Add schema versioning.
-16. Add explicit migrations.
-17. Add migration integration tests.
-
-## Phase 4 — Reflection
-
-18. Introduce a `sqlgen::reflection` abstraction.
-19. Keep reflect-cpp as one implementation.
-20. Add a native C++26 reflection implementation.
-21. Generate mapper metadata where possible.
-22. Generate schema metadata where possible.
-
-## Phase 5 — C++26 modernization
-
-23. Add a C++26 build preset.
-24. Introduce contracts where they provide real value.
-25. Adopt reflection when compiler/library support is sufficiently mature.
-26. Adopt other C++26 facilities selectively.
-
----
-
-# 24. Target architecture
-
-```text
-                         Application
-                              |
-                              v
-                     Database Context
-                    /     |      |                        /      |      |                        v       v      v       v
-             Person   Something  Association
-            Repository Repository Repository
-                  \       |       /
-                   \      |      /
-                    v     v     v
-                 Generic CRUD / Query
-                  Concepts + Traits
-                          |
-                          v
-                    DB Backend
-              SQLite / PostgreSQL / ...
-                          |
-                          v
-                         SQLGen
-```
-
-With a shared metadata layer underneath:
-
-```text
-                  Schema / Reflection Metadata
-                             |
-              +--------------+--------------+
-              |              |              |
-              v              v              v
-           Mapping        SQL Schema      Queries
-```
-
-That would give SQLGen a strong long-term architecture without forcing the whole project to depend on the newest compiler feature immediately.
-
----
-
-# 25. Final opinion
-
-**I would keep the foundation.**
-
-The project is already beyond the point where a rewrite would be justified. The current Core/DAL split, DTOs, mapper traits, concepts, modules and generic database machinery are all worth preserving.
-
-The next stage should be about **making the architecture more precise rather than making it larger**.
-
-The most important improvements are:
-
-1. `std::expected`-based error handling.
-2. Strongly typed IDs and composite keys.
-3. Simpler repository composition.
-4. Stronger database concepts.
-5. Real transaction support.
-6. Proper unit/integration/migration testing.
-7. CTest and sanitizer-enabled CMake presets.
-8. Cleaner dependency handling in CMake.
-9. Typed query/schema metadata.
-10. A reflection abstraction that can transition from `reflect-cpp` to native C++26 reflection.
-
-The most important strategic decision is:
-
-> **Make the project C++26-ready without making it C++26-dependent.**
-
-That gives you a project that is robust and practical today, while being positioned to take advantage of native reflection, contracts and other C++26 facilities as compiler and standard-library support matures.
-
-**I would call the current project a strong foundation that needs architectural refinement, not a rewrite.**
+**My recommendation: keep the current Core/DAL/sqlgen architecture, but make C++26 reflection the center of the project rather than merely the mapper implementation.**

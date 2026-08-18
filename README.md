@@ -1,6 +1,6 @@
 ### A. Context
 
-Code-First Database tests with sqlgen, C++20/23/26, ArchLinux EOS.
+Code-First Database tests with sqlgen, C++20/23/26, ArchLinux EOS. This is currently working for gcc 16.1 (it is using reflection). Clang has not adopted reflection in their main branch yet (it is in a separate clang branch, so I am not covering that in this project).
 
 These are the required libs. You can probably get away with fewer than the current list, depending on your needs.
 
@@ -14,7 +14,7 @@ sudo pacman -S --needed base-devel cmake ninja autoconf bison flex postgresql-li
 
 ### B. Minimum steps to reproduce this project
 
-Open a terminal in the root of your personal project.
+If you want to make your own project, open a terminal in the root of your personal project (these are the external dependencies. try with 20 first, then upper if they allow it, since these are not maintained by me, I have no control over it)
 
 ```bash
 mkdir extern
@@ -72,35 +72,9 @@ target_link_libraries(unit_tests
 )
 ```
 
-Your tests acting as the main
+Once the external dependencies are handled, you can write your own code.
 
-```bash
-mkdir tests
-```
-
-```cpp
-#include <gtest/gtest.h>
-#include <sqlgen/sqlite.hpp>
-
-struct User { std::string name; int id; };
-
-TEST(DatabaseTest, CanConnectAndWrite) 
-{
-    auto conn = sqlgen::sqlite::connect(":memory:"); // In-memory for pure isolation
-    // Your sqlgen logic here...
-    SUCCEED();
-}
-```
-
-Configure, build, run (your project root)
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-cmake --build build
-
-./build/linux/arch/clang/debug/DAL/DAL_unit_tests
-```
+If you are testing this project, you can configure, build, run. Check the CMakePresets.json and the .vscode files (VSCode/Codium IDE). Working with gcc 16.1+.
 
 ---
 ---

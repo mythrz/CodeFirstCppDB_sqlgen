@@ -79,7 +79,8 @@ CodeFirstCppDB_sqlgen/
 │   ├── schema/                     # Relational DTO Schemas (POD structs for sqlgen)
 │   │   ├── PersonDTO.ixx           # DAL::Schema::PersonDTO
 │   │   ├── SomethingDTO.ixx        # DAL::Schema::SomethingDTO
-│   │   └── Person_SomethingDTO.ixx # DAL::Schema::Person_SomethingDTO
+│   │   ├── Person_SomethingDTO.ixx # DAL::Schema::Person_SomethingDTO
+|   |   └── SchemaTraits.ixx        # DAL::Schema::SchemaTraits
 │   ├── mappers/                    # Bidirectional Domain <-> DTO Mappers
 │   │   └── MapperTraits.ixx        # DAL::Mappers::MapperTraits<Domain, DTO>
 │   ├── repositories/               # Generic & Concrete Repository Implementations
