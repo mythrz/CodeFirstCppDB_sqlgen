@@ -184,18 +184,19 @@ namespace
     class SqlgenExampleTest : public ::testing::Test
     {
     protected:
-        TestDatabaseConnection conn;
+        std::shared_ptr<TestDatabaseConnection> conn;
 
         void SetUp() override
         {
-            conn.insert(DAL::Schema::PersonDTO{ .id = 1, .first_name = "test1", .last_name = "test11" });
-            conn.insert(DAL::Schema::PersonDTO{ .id = 2, .first_name = "test2", .last_name = "test22" });
+            conn = std::make_shared<TestDatabaseConnection>();
+            conn->insert(DAL::Schema::PersonDTO{ .id = 1, .first_name = "test1", .last_name = "test11" });
+            conn->insert(DAL::Schema::PersonDTO{ .id = 2, .first_name = "test2", .last_name = "test22" });
 
-            conn.insert(DAL::Schema::SomethingDTO{ .id = 1, .name = "Item1", .category = "Cat1", .description = "Desc1" });
-            conn.insert(DAL::Schema::SomethingDTO{ .id = 2, .name = "Item2", .category = "Cat2", .description = "Desc2" });
+            conn->insert(DAL::Schema::SomethingDTO{ .id = 1, .name = "Item1", .category = "Cat1", .description = "Desc1" });
+            conn->insert(DAL::Schema::SomethingDTO{ .id = 2, .name = "Item2", .category = "Cat2", .description = "Desc2" });
 
-            conn.insert(DAL::Schema::Person_SomethingDTO{ .person_id = 1, .something_id = 1, .association_type = "Owner" });
-            conn.insert(DAL::Schema::Person_SomethingDTO{ .person_id = 2, .something_id = 2, .association_type = "User" });
+            conn->insert(DAL::Schema::Person_SomethingDTO{ .person_id = 1, .something_id = 1, .association_type = "Owner" });
+            conn->insert(DAL::Schema::Person_SomethingDTO{ .person_id = 2, .something_id = 2, .association_type = "User" });
         }
     };
 
