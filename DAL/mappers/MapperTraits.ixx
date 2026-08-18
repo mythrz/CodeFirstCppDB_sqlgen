@@ -66,12 +66,25 @@ export namespace DAL::Mappers
     {
         [[nodiscard]] static Domain to_domain(const DTO& dto)
         {
-            static constexpr auto members =
+            static constexpr auto dto_members =
                 std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
+            static constexpr auto domain_members =
+                std::define_static_array(std::meta::nonstatic_data_members_of(^^Domain, std::meta::access_context::unchecked()));
+
             return [&]<std::size_t... Is>(std::index_sequence<Is...>)
             {
-                return Domain(static_cast<std::remove_cvref_t<decltype(dto.[:members[Is]:])>>(dto.[:members[Is]:])...);
-            }(std::make_index_sequence<members.size()>{});
+                // Cast to the domain member's type so that strong ID types
+                // (e.g. PersonId) are constructed from their int32_t DTO counterpart.
+                constexpr auto dom_members_matched = std::define_static_array(
+                    []() consteval
+                    {
+                        std::array<std::meta::info, dto_members.size()> arr{};
+                        for (std::size_t i = 0; i < dto_members.size(); ++i)
+                            arr[i] = detail::find_matching_domain_member(dto_members[i], domain_members);
+                        return arr;
+                    }());
+                return Domain(static_cast<[:std::meta::type_of(dom_members_matched[Is]):]>(dto.[:dto_members[Is]:])...);
+            }(std::make_index_sequence<dto_members.size()>{});
         }
 
         [[nodiscard]] static DTO to_dto(const Domain& domain)

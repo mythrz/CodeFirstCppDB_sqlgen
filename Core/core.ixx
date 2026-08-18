@@ -1,5 +1,6 @@
 export module core;
 
+export import :id;
 export import :person;
 export import :something;
 export import :person_something;

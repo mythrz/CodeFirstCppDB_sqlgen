@@ -42,6 +42,7 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 add_subdirectory(extern/googletest)
 
 # projects
+enable_testing()
 add_subdirectory(Core)
 add_subdirectory(DAL)
 add_subdirectory(Startup)

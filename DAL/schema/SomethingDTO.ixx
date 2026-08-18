@@ -2,11 +2,11 @@ export module dal:schema_something;
 
 import std;
 
-export namespace DAL::Schema 
+export namespace DAL::Schema
 {
-    struct SomethingDTO 
+    struct SomethingDTO
     {
-        int id{0};
+        std::int32_t id{ 0 };
         std::string name;
         std::string category;
         std::optional<std::string> description;

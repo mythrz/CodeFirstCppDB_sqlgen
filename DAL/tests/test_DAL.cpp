@@ -206,10 +206,10 @@ namespace
         const auto people = repo.get_all();
 
         ASSERT_EQ(people.size(), 2);
-        ASSERT_EQ(people[0].getId(), 1);
+        ASSERT_EQ(people[0].getId().get(), 1);
         ASSERT_EQ(people[0].getFirstName(), "test1");
         ASSERT_EQ(people[0].getLastName(), "test11");
-        ASSERT_EQ(people[1].getId(), 2);
+        ASSERT_EQ(people[1].getId().get(), 2);
         ASSERT_EQ(people[1].getFirstName(), "test2");
         ASSERT_EQ(people[1].getLastName(), "test22");
     }
@@ -221,7 +221,7 @@ namespace
         const auto person = repo.get_by_id(1);
 
         ASSERT_TRUE(person.has_value());
-        ASSERT_EQ(person->getId(), 1);
+        ASSERT_EQ(person->getId().get(), 1);
         ASSERT_EQ(person->getFirstName(), "test1");
         ASSERT_EQ(person->getLastName(), "test11");
     }
@@ -233,7 +233,7 @@ namespace
         const auto people = repo.find_by_last_name("test22");
 
         ASSERT_EQ(people.size(), 1);
-        ASSERT_EQ(people[0].getId(), 2);
+        ASSERT_EQ(people[0].getId().get(), 2);
         ASSERT_EQ(people[0].getFirstName(), "test2");
         ASSERT_EQ(people[0].getLastName(), "test22");
     }
@@ -242,17 +242,15 @@ namespace
     {
         DAL::Repositories::SQLitePersonRepo<TestDatabaseConnection> repo(conn);
 
-        Core::Person p(3, "test3", "test33");
+        Core::Person p(Core::PersonId{ 3 }, "test3", "test33");
 
-        // const bool inserted = repo.insert_one(p);
-        // ASSERT_TRUE(inserted) << "insert_one failed";
         auto result = repo.insert_one(p);
         ASSERT_TRUE(result.has_value()) << result.error().to_string();
 
         const auto found = repo.get_by_id(3);
         ASSERT_TRUE(found.has_value()) << "Inserted row was not found";
 
-        ASSERT_EQ(found->getId(), 3);
+        ASSERT_EQ(found->getId().get(), 3);
         ASSERT_EQ(found->getFirstName(), "test3");
         ASSERT_EQ(found->getLastName(), "test33");
     }
@@ -261,10 +259,9 @@ namespace
     {
         DAL::Repositories::SQLitePersonRepo<TestDatabaseConnection> repo(conn);
 
-        std::vector<Core::Person> newPeople{ Core::Person(10, "batch1", "last1"), Core::Person(11, "batch2", "last2") };
+        std::vector<Core::Person> newPeople{ Core::Person(Core::PersonId{ 10 }, "batch1", "last1"),
+                                             Core::Person(Core::PersonId{ 11 }, "batch2", "last2") };
 
-        // const bool inserted = repo.insert_many(newPeople);
-        // ASSERT_TRUE(inserted);
         auto result = repo.insert_many(newPeople);
         ASSERT_TRUE(result.has_value()) << result.error().to_string();
 
@@ -277,9 +274,7 @@ namespace
     {
         DAL::Repositories::SQLitePersonRepo<TestDatabaseConnection> repo(conn);
 
-        Core::Person updatedPerson(1, "test1_updated", "test11_updated");
-        // const bool updated = repo.update_one(updatedPerson);
-        // ASSERT_TRUE(updated);
+        Core::Person updatedPerson(Core::PersonId{ 1 }, "test1_updated", "test11_updated");
         auto result = repo.update_one(updatedPerson);
         ASSERT_TRUE(result.has_value()) << result.error().to_string();
 
@@ -293,19 +288,16 @@ namespace
     {
         DAL::Repositories::SQLitePersonRepo<TestDatabaseConnection> repo(conn);
 
-        Core::Person p(4, "test4", "test44");
+        Core::Person p(Core::PersonId{ 4 }, "test4", "test44");
 
-        // const bool inserted = repo.insert_one(p);
-        // ASSERT_TRUE(inserted) << "insert_one failed";
         auto result = repo.insert_one(p);
         ASSERT_TRUE(result.has_value()) << result.error().to_string();
 
         auto before = repo.get_by_id(4);
         ASSERT_TRUE(before.has_value());
-        ASSERT_EQ(before->getId(), 4);
+        ASSERT_EQ(before->getId().get(), 4);
         ASSERT_EQ(before->getFirstName(), "test4");
 
-        // repo.delete_by_id(4);
         auto delete_result = repo.delete_by_id(4);
         ASSERT_TRUE(delete_result.has_value()) << delete_result.error().to_string();
 
@@ -319,11 +311,11 @@ namespace
         DAL::Repositories::SQLitePersonRepo<TestDatabaseConnection> repo(conn);
 
         // Attempt to update an item that doesn't exist
-        Core::Person nonExistentPerson(999, "Ghost", "Protocol");
+        Core::Person nonExistentPerson(Core::PersonId{ 999 }, "Ghost", "Protocol");
         auto result = repo.update_one(nonExistentPerson);
 
         ASSERT_FALSE(result.has_value()) << "Expected update_one to fail";
-        
+
         // Ensure the error type is correctly captured as Core::DbError
         Core::DbError err = result.error();
         EXPECT_EQ(err.code, Core::DbErrorCode::Unknown); // GenericRepository hardcodes Unknown for conn errors
@@ -343,8 +335,7 @@ namespace
         ASSERT_EQ(byLastName.size(), 1);
         ASSERT_EQ(byLastName[0].getFirstName(), "test1");
 
-        Core::Person p(5, "DI_User", "DI_LastName");
-        // ASSERT_TRUE(repo->insert_one(p));
+        Core::Person p(Core::PersonId{ 5 }, "DI_User", "DI_LastName");
         auto result = repo->insert_one(p);
         ASSERT_TRUE(result.has_value()) << result.error().to_string();
         ASSERT_TRUE(repo->exists_by_id(5));
@@ -360,8 +351,7 @@ namespace
         ASSERT_EQ(items[0].getCategory(), "Cat1");
         ASSERT_EQ(items[0].getDescription().value_or(""), "Desc1");
 
-        Core::Something newItem(3, "Item3", "Cat3", "Desc3");
-        // ASSERT_TRUE(somethingRepo.insert_one(newItem));
+        Core::Something newItem(Core::SomethingId{ 3 }, "Item3", "Cat3", "Desc3");
         auto result = somethingRepo.insert_one(newItem);
         ASSERT_TRUE(result.has_value()) << result.error().to_string();
         ASSERT_EQ(somethingRepo.count(), 3);

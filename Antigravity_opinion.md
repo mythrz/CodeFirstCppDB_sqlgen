@@ -187,7 +187,7 @@ This means the concept gates nothing meaningful — you only discover the missin
 
 **What to do:** Either expand `DatabaseConnection` to cover the full interface (which is hard to express generically for templated members), or document explicitly that the concept is a minimal liveness check and rely on instantiation errors for the rest.
 
-### 3.8 🟢 CMake — Minor Improvements
+### 3.8 🟢 CMake — Minor Improvements (done)
 
 **`Startup/CMakeLists.txt` is too minimal:**
 
