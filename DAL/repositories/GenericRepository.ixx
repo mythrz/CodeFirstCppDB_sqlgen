@@ -68,10 +68,11 @@ export namespace DAL::Repositories
 
         std::expected<void, Core::DbError> delete_by_id(std::int32_t id)
         {
-            // The current connection API does not report deletion errors.
-            // Preserve the expected-based repository API; deletion is successful
-            // from the repository's perspective unless the connection throws.
-            conn_->template delete_by_id<DTO>(id);
+            auto res = conn_->template delete_by_id<DTO>(id);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError{ Core::DbErrorCode::Unknown, res.error().what() } };
+            }
             return {};
         }
 

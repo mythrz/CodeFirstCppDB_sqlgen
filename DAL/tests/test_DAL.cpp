@@ -110,7 +110,7 @@ namespace
         }
 
         template<typename DTO>
-        void delete_by_id(std::int32_t id)
+        sqlgen::Result<sqlgen::Nothing> delete_by_id(std::int32_t id)
         {
             auto& storage = get_storage<DTO>();
             std::erase_if(
@@ -123,6 +123,7 @@ namespace
                     }
                     return false;
                 });
+            return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
         }
 
         template<typename DTO>
@@ -356,6 +357,153 @@ namespace
         auto result = somethingRepo.insert_one(newItem);
         ASSERT_TRUE(result.has_value()) << result.error().to_string();
         ASSERT_EQ(somethingRepo.count(), 3);
+    }
+
+    // MapperTraits direct tests. These exercise to_domain and to_dto independently of the repository layer, verifying every field for each
+    // entity/DTO pair. Person PersonDTO
+    TEST(MapperTraitsTest, PersonDTO_to_domain_MapsAllFields)
+    {
+        DAL::Schema::PersonDTO dto{ .id = 42, .first_name = "Alice", .last_name = "Smith" };
+
+        const Core::Person person = DAL::Mappers::MapperTraits<Core::Person, DAL::Schema::PersonDTO>::to_domain(dto);
+
+        EXPECT_EQ(person.getId().get(), 42);
+        EXPECT_EQ(person.getFirstName(), "Alice");
+        EXPECT_EQ(person.getLastName(), "Smith");
+    }
+
+    TEST(MapperTraitsTest, Person_to_dto_MapsAllFields)
+    {
+        Core::Person person(Core::PersonId{ 7 }, "Bob", "Jones");
+
+        const DAL::Schema::PersonDTO dto = DAL::Mappers::MapperTraits<Core::Person, DAL::Schema::PersonDTO>::to_dto(person);
+
+        EXPECT_EQ(dto.id.value(), 7);
+        EXPECT_EQ(dto.first_name, "Bob");
+        EXPECT_EQ(dto.last_name, "Jones");
+    }
+
+    TEST(MapperTraitsTest, Person_RoundTrip_DomainToDtoToDomain)
+    {
+        Core::Person original(Core::PersonId{ 99 }, "Charlie", "Brown");
+
+        const auto dto = DAL::Mappers::MapperTraits<Core::Person, DAL::Schema::PersonDTO>::to_dto(original);
+        const auto back = DAL::Mappers::MapperTraits<Core::Person, DAL::Schema::PersonDTO>::to_domain(dto);
+
+        EXPECT_EQ(back.getId().get(), original.getId().get());
+        EXPECT_EQ(back.getFirstName(), original.getFirstName());
+        EXPECT_EQ(back.getLastName(), original.getLastName());
+    }
+
+    TEST(MapperTraitsTest, Person_RoundTrip_DtoToDomainToDto)
+    {
+        DAL::Schema::PersonDTO original{ .id = 5, .first_name = "Diana", .last_name = "Prince" };
+
+        const auto domain = DAL::Mappers::MapperTraits<Core::Person, DAL::Schema::PersonDTO>::to_domain(original);
+        const auto back = DAL::Mappers::MapperTraits<Core::Person, DAL::Schema::PersonDTO>::to_dto(domain);
+
+        EXPECT_EQ(back.id.value(), original.id.value());
+        EXPECT_EQ(back.first_name, original.first_name);
+        EXPECT_EQ(back.last_name, original.last_name);
+    }
+
+    // Something SomethingDTO
+    TEST(MapperTraitsTest, SomethingDTO_to_domain_MapsAllFields_WithDescription)
+    {
+        DAL::Schema::SomethingDTO dto{ .id = 10, .name = "Widget", .category = "Tools", .description = "A useful widget" };
+
+        const Core::Something item = DAL::Mappers::MapperTraits<Core::Something, DAL::Schema::SomethingDTO>::to_domain(dto);
+
+        EXPECT_EQ(item.getId().get(), 10);
+        EXPECT_EQ(item.getName(), "Widget");
+        EXPECT_EQ(item.getCategory(), "Tools");
+        ASSERT_TRUE(item.getDescription().has_value());
+        EXPECT_EQ(item.getDescription().value(), "A useful widget");
+    }
+
+    TEST(MapperTraitsTest, SomethingDTO_to_domain_MapsAllFields_NulloptDescription)
+    {
+        DAL::Schema::SomethingDTO dto{ .id = 11, .name = "Gadget", .category = "Electronics", .description = std::nullopt };
+
+        const Core::Something item = DAL::Mappers::MapperTraits<Core::Something, DAL::Schema::SomethingDTO>::to_domain(dto);
+
+        EXPECT_EQ(item.getId().get(), 11);
+        EXPECT_EQ(item.getName(), "Gadget");
+        EXPECT_EQ(item.getCategory(), "Electronics");
+        EXPECT_FALSE(item.getDescription().has_value());
+    }
+
+    TEST(MapperTraitsTest, Something_to_dto_MapsAllFields)
+    {
+        Core::Something item(Core::SomethingId{ 20 }, "Thingamajig", "Misc", "Some description");
+
+        const DAL::Schema::SomethingDTO dto = DAL::Mappers::MapperTraits<Core::Something, DAL::Schema::SomethingDTO>::to_dto(item);
+
+        EXPECT_EQ(dto.id.value(), 20);
+        EXPECT_EQ(dto.name, "Thingamajig");
+        EXPECT_EQ(dto.category, "Misc");
+        ASSERT_TRUE(dto.description.has_value());
+        EXPECT_EQ(dto.description.value(), "Some description");
+    }
+
+    TEST(MapperTraitsTest, Something_RoundTrip_DomainToDtoToDomain)
+    {
+        Core::Something original(Core::SomethingId{ 55 }, "Doohickey", "Widgets", "Round-trip desc");
+
+        const auto dto = DAL::Mappers::MapperTraits<Core::Something, DAL::Schema::SomethingDTO>::to_dto(original);
+        const auto back = DAL::Mappers::MapperTraits<Core::Something, DAL::Schema::SomethingDTO>::to_domain(dto);
+
+        EXPECT_EQ(back.getId().get(), original.getId().get());
+        EXPECT_EQ(back.getName(), original.getName());
+        EXPECT_EQ(back.getCategory(), original.getCategory());
+        EXPECT_EQ(back.getDescription().value_or(""), original.getDescription().value_or(""));
+    }
+
+    TEST(MapperTraitsTest, Something_RoundTrip_NulloptDescription_PreservedThroughDto)
+    {
+        Core::Something original(Core::SomethingId{ 56 }, "Whatchamacallit", "Unknown", std::nullopt);
+
+        const auto dto = DAL::Mappers::MapperTraits<Core::Something, DAL::Schema::SomethingDTO>::to_dto(original);
+        const auto back = DAL::Mappers::MapperTraits<Core::Something, DAL::Schema::SomethingDTO>::to_domain(dto);
+
+        EXPECT_FALSE(back.getDescription().has_value());
+    }
+
+    // Person_SomethingPerson_SomethingDTO
+    TEST(MapperTraitsTest, Person_SomethingDTO_to_domain_MapsAllFields)
+    {
+        DAL::Schema::Person_SomethingDTO dto{ .person_id = 1, .something_id = 2, .association_type = "Owner" };
+
+        const Core::Person_Something ps =
+            DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain(dto);
+
+        EXPECT_EQ(ps.getPersonId().get(), 1);
+        EXPECT_EQ(ps.getSomethingId().get(), 2);
+        EXPECT_EQ(ps.getAssociationType(), "Owner");
+    }
+
+    TEST(MapperTraitsTest, Person_Something_to_dto_MapsAllFields)
+    {
+        Core::Person_Something ps(Core::PersonId{ 3 }, Core::SomethingId{ 4 }, "Viewer");
+
+        const DAL::Schema::Person_SomethingDTO dto =
+            DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_dto(ps);
+
+        EXPECT_EQ(dto.person_id.value(), 3);
+        EXPECT_EQ(dto.something_id.value(), 4);
+        EXPECT_EQ(dto.association_type, "Viewer");
+    }
+
+    TEST(MapperTraitsTest, Person_Something_RoundTrip_DomainToDtoToDomain)
+    {
+        Core::Person_Something original(Core::PersonId{ 7 }, Core::SomethingId{ 8 }, "Editor");
+
+        const auto dto = DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_dto(original);
+        const auto back = DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain(dto);
+
+        EXPECT_EQ(back.getPersonId().get(), original.getPersonId().get());
+        EXPECT_EQ(back.getSomethingId().get(), original.getSomethingId().get());
+        EXPECT_EQ(back.getAssociationType(), original.getAssociationType());
     }
 
 } // namespace
