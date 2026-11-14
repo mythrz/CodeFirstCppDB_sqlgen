@@ -31,12 +31,6 @@ int main(int argc, char* argv[])
         }
     }
 
-    if (shouldReset && std::filesystem::exists(dbPath))
-    {
-        std::filesystem::remove(dbPath);
-        std::println("Reset: Removed existing database file.");
-    }
-
     std::println("Connecting to SQLite database: {}", dbPath);
     auto connRes = DAL::SQLiteConnection::connect(dbPath);
     if (!connRes)
@@ -45,8 +39,19 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // 1. Initialize DbContext and auto-create schema from reflected DbSet members
+    // 1. Initialize DbContext and reset/auto-create schema from reflected DbSet members
     AppDbContext db(connRes.value());
+
+    if (shouldReset)
+    {
+        std::println("Reset: Dropping existing database tables via db.ensure_deleted()...");
+        auto dropRes = db.ensure_deleted();
+        if (!dropRes)
+        {
+            std::println(std::cerr, "Failed to drop database schema: {}", dropRes.error().to_string());
+            return 1;
+        }
+    }
 
     std::println("Ensuring database schema and foreign keys...");
     auto schemaRes = db.ensure_created();

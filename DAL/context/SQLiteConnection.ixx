@@ -21,6 +21,31 @@ export namespace DAL
         {
         }
 
+        ~SQLiteConnection() noexcept
+        {
+            close();
+        }
+
+        void close() noexcept
+        {
+            if (!is_open_)
+            {
+                return;
+            }
+            if (in_transaction_)
+            {
+                try
+                {
+                    (void)conn_->rollback();
+                }
+                catch (...)
+                {
+                }
+                in_transaction_ = false;
+            }
+            is_open_ = false;
+        }
+
         [[nodiscard]] static std::expected<std::shared_ptr<SQLiteConnection>, Core::DbError> connect(
             const std::string& dbPath)
         {
@@ -42,6 +67,27 @@ export namespace DAL
                 };
             }
             auto res = sqlgen::CreateTable<DTO>{ .if_not_exists_ = true }(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        template<typename DTO>
+        std::expected<void, Core::DbError> ensure_table_dropped()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot drop table: database connection is closed")
+                };
+            }
+            auto res = sqlgen::Drop<DTO>{
+                .what_ = sqlgen::transpilation::get_table_or_view<DTO>(),
+                .cascade_ = false,
+                .if_exists_ = true
+            }(conn_);
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
@@ -141,7 +187,7 @@ export namespace DAL
 
         [[nodiscard]] bool is_open() const noexcept
         {
-            return true;
+            return is_open_;
         }
 
         [[nodiscard]] sqlgen::Ref<sqlgen::sqlite::Connection>& raw_connection() noexcept
@@ -272,6 +318,12 @@ export namespace DAL
         template<typename DTO>
         auto insert(const DTO& item)
         {
+            if (!is_open())
+            {
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
+                    sqlgen::error("Database connection is closed")
+                };
+            }
             std::vector<DTO> vec{ item };
             return sqlgen::insert(std::ref(vec))(conn_);
         }
@@ -279,12 +331,24 @@ export namespace DAL
         template<typename DTO>
         auto insert_many(const std::vector<DTO>& items)
         {
+            if (!is_open())
+            {
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
+                    sqlgen::error("Database connection is closed")
+                };
+            }
             return sqlgen::insert(std::ref(items))(conn_);
         }
 
         template<typename DTO>
         auto update(const DTO& item)
         {
+            if (!is_open())
+            {
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
+                    sqlgen::error("Database connection is closed")
+                };
+            }
             auto exists_query = sqlgen::read<std::vector<DTO>>
                               | sqlgen::where(DAL::Schema::make_dto_key_where<DTO>(item))
                               | sqlgen::limit(1);
@@ -322,6 +386,12 @@ export namespace DAL
         template<typename DTO>
         auto delete_by_id(std::int32_t id)
         {
+            if (!is_open())
+            {
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
+                    sqlgen::error("Database connection is closed")
+                };
+            }
             return (sqlgen::delete_from<DTO>
                   | sqlgen::where(DAL::Schema::make_pk_where<DTO>(id)))(conn_);
         }
@@ -329,6 +399,12 @@ export namespace DAL
         template<typename DTO = DAL::Schema::Person_SomethingDTO, typename... Parts>
         [[nodiscard]] auto delete_by_composite_id(const Parts&... parts)
         {
+            if (!is_open())
+            {
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
+                    sqlgen::error("Database connection is closed")
+                };
+            }
             return (sqlgen::delete_from<DTO>
                   | sqlgen::where(DAL::Schema::make_composite_where<DTO>(parts...)))(conn_);
         }
@@ -382,6 +458,7 @@ export namespace DAL
         };
 
         sqlgen::Ref<sqlgen::sqlite::Connection> conn_;
+        bool is_open_{ true };
         bool in_transaction_{ false };
     };
 

@@ -254,13 +254,13 @@ flowchart LR
     P9 --> P10["Phase 10<br/>Server-Side Query Pushdown<br/>(where_col, order_by, page) &amp; ChangeTracker"]
 ```
 
-### Phase 7: Lifetime Hardening, Connection Lifecycle & `db.ensure_deleted()`
-- [ ] **Task 7.1: Prevent Dangling Context Pointers (`DAL/context/DbContext.ixx`)**
+### Phase 7: Lifetime Hardening, Connection Lifecycle & `db.ensure_deleted()` *(Completed)*
+- [x] **Task 7.1: Prevent Dangling Context Pointers (`DAL/context/DbContext.ixx`)**
   - Explicitly `= delete` copy and move constructors/assignment operators on `DbContextBase` so `Set<T>{ this }` member closures can never dangle.
   - Replace the unused `ITransaction` interface with an RAII `TransactionScope` guard that automatically rolls back on scope exit if not committed.
-- [ ] **Task 7.2: `SQLiteConnection::close()` & Destructor Safety (`DAL/context/SQLiteConnection.ixx`)**
+- [x] **Task 7.2: `SQLiteConnection::close()` & Destructor Safety (`DAL/context/SQLiteConnection.ixx`)**
   - Add `void close() noexcept` and `bool is_open_{ true };` to `SQLiteConnection`, automatically rolling back if `in_transaction_` is true when closed or destroyed.
-- [ ] **Task 7.3: Reflection-Driven `db.ensure_deleted()` (`DAL/context/DbContext.ixx` & `SQLiteConnection.ixx`)**
+- [x] **Task 7.3: Reflection-Driven `db.ensure_deleted()` (`DAL/context/DbContext.ixx` & `SQLiteConnection.ixx`)**
   - Add `ensure_table_dropped<DTO>()` (`sqlgen::drop<DTO> | sqlgen::if_exists`) and `db.ensure_deleted(this Self&& self)` (iterating reflected `Set<T>` members in reverse order so child/junction tables are dropped before parent tables), eliminating `std::filesystem::remove(dbPath)` in `Startup/main.cpp`.
 
 ### Phase 8: Zero-DTO Single-Struct POCO Mode & Auto-Inferred Keys

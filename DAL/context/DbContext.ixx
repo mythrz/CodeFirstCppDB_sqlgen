@@ -11,15 +11,6 @@ import :db_set;
 
 export namespace DAL
 {
-    // Transaction handle abstraction for Unit of Work execution
-    class ITransaction
-    {
-    public:
-        virtual ~ITransaction() = default;
-        virtual std::expected<void, Core::DbError> commit() = 0;
-        virtual std::expected<void, Core::DbError> rollback() = 0;
-    };
-
     template<typename T>
     concept IsDbSetMember = requires {
         typename T::DomainType;
@@ -38,6 +29,12 @@ export namespace DAL
             : conn_(std::move(conn))
         {
         }
+
+        // Non-copyable and non-movable so Set<T>{ this } member closures never dangle
+        DbContextBase(const DbContextBase&) = delete;
+        DbContextBase& operator=(const DbContextBase&) = delete;
+        DbContextBase(DbContextBase&&) = delete;
+        DbContextBase& operator=(DbContextBase&&) = delete;
 
         virtual ~DbContextBase() = default;
 
@@ -132,6 +129,76 @@ export namespace DAL
             }
 
             return conn_->enable_foreign_keys();
+        }
+
+        // =====================================================================
+        // Reflection-Driven Schema Deletion (db.ensure_deleted())
+        // =====================================================================
+
+        template<typename Self>
+        std::expected<void, Core::DbError> ensure_deleted(this Self&& self)
+        {
+            if (!self.is_connected())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot drop schema: database connection is closed")
+                };
+            }
+
+            using DerivedType = std::remove_cvref_t<Self>;
+            static constexpr auto members = std::define_static_array(
+                std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
+            static constexpr auto reversed_members = []() consteval {
+                std::array<std::meta::info, members.size()> rev{};
+                for (std::size_t i = 0; i < members.size(); ++i)
+                {
+                    rev[i] = members[members.size() - 1 - i];
+                }
+                return rev;
+            }();
+
+            std::expected<void, Core::DbError> result{};
+            template for (constexpr auto m : reversed_members)
+            {
+                using RawMemberType = [:std::meta::type_of(m):];
+                using MemberType = std::remove_cvref_t<RawMemberType>;
+                if constexpr (IsDbSetMember<MemberType>)
+                {
+                    if (result)
+                    {
+                        result = self.conn_->template ensure_table_dropped<typename MemberType::DTOType>();
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        template<typename... Domains>
+        std::expected<void, Core::DbError> ensure_deleted_for()
+        {
+            if (!is_connected())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot drop schema: database connection is closed")
+                };
+            }
+
+            static constexpr std::size_t count = sizeof...(Domains);
+            std::array<std::function<std::expected<void, Core::DbError>()>, count> droppers{
+                [this]() { return conn_->template ensure_table_dropped<Schema::SchemaOf_t<Domains>>(); }...
+            };
+
+            for (std::size_t i = count; i > 0; --i)
+            {
+                auto res = droppers[i - 1]();
+                if (!res)
+                {
+                    return res;
+                }
+            }
+
+            return {};
         }
 
         // =====================================================================
@@ -319,6 +386,82 @@ export namespace DAL
         std::shared_ptr<ConnectionHandle> conn_;
         std::vector<std::function<std::expected<void, Core::DbError>()>> pending_ops_;
         bool defer_changes_{ false };
+    };
+
+    // RAII transaction guard that automatically rolls back on scope exit if not committed
+    template<typename ConnectionHandle>
+        requires Repositories::DatabaseConnection<ConnectionHandle>
+    class TransactionScope
+    {
+    public:
+        explicit TransactionScope(DbContextBase<ConnectionHandle>& ctx)
+            : ctx_(&ctx)
+        {
+            begin_result_ = ctx_->begin_transaction();
+        }
+
+        ~TransactionScope()
+        {
+            if (!committed_ && ctx_ && ctx_->in_transaction())
+            {
+                (void)ctx_->rollback();
+            }
+        }
+
+        TransactionScope(const TransactionScope&) = delete;
+        TransactionScope& operator=(const TransactionScope&) = delete;
+        TransactionScope(TransactionScope&&) = delete;
+        TransactionScope& operator=(TransactionScope&&) = delete;
+
+        [[nodiscard]] bool is_active() const noexcept
+        {
+            return begin_result_.has_value() && !committed_ && ctx_ && ctx_->in_transaction();
+        }
+
+        [[nodiscard]] const std::expected<void, Core::DbError>& begin_result() const noexcept
+        {
+            return begin_result_;
+        }
+
+        std::expected<void, Core::DbError> commit()
+        {
+            if (!begin_result_)
+            {
+                return begin_result_;
+            }
+            if (committed_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TransactionScope already committed")
+                };
+            }
+            auto res = ctx_->save_changes();
+            if (res)
+            {
+                committed_ = true;
+            }
+            return res;
+        }
+
+        std::expected<void, Core::DbError> rollback()
+        {
+            if (committed_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot rollback a committed TransactionScope")
+                };
+            }
+            if (ctx_ && ctx_->in_transaction())
+            {
+                return ctx_->rollback();
+            }
+            return {};
+        }
+
+    private:
+        DbContextBase<ConnectionHandle>* ctx_{ nullptr };
+        std::expected<void, Core::DbError> begin_result_{};
+        bool committed_{ false };
     };
 
 } // namespace DAL

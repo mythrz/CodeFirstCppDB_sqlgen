@@ -34,6 +34,19 @@ namespace
             return {};
         }
 
+        template<typename DTO>
+        std::expected<void, Core::DbError> ensure_table_dropped()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TestDatabaseConnection is closed")
+                };
+            }
+            get_storage<DTO>().clear();
+            return {};
+        }
+
         std::expected<void, Core::DbError> enable_foreign_keys()
         {
             if (!is_open())
@@ -1424,6 +1437,113 @@ namespace
         EXPECT_EQ(db.pending_changes_count(), 0u);
         ASSERT_TRUE(db.save_changes().has_value());
         EXPECT_EQ(db.people.count(), 1u);
+    }
+
+    // =========================================================================
+    // Phase 7 Tests: Lifetime Hardening, TransactionScope, close(), & ensure_deleted()
+    // =========================================================================
+
+    TEST(Phase7LifecycleAndDeleteTest, DbContextBase_IsNonCopyableAndNonMovable)
+    {
+        static_assert(!std::is_copy_constructible_v<Phase6AppDbContext>);
+        static_assert(!std::is_copy_assignable_v<Phase6AppDbContext>);
+        static_assert(!std::is_move_constructible_v<Phase6AppDbContext>);
+        static_assert(!std::is_move_assignable_v<Phase6AppDbContext>);
+        SUCCEED();
+    }
+
+    TEST(Phase7LifecycleAndDeleteTest, TransactionScope_AutoRollbackOnScopeExitAndExplicitCommit)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        Phase6AppDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // 1. Scope exits without commit() -> automatic rollback
+        {
+            DAL::TransactionScope scope(db);
+            ASSERT_TRUE(scope.begin_result().has_value());
+            EXPECT_TRUE(scope.is_active());
+            EXPECT_TRUE(db.in_transaction());
+
+            ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Uncommitted", "User")).has_value());
+            EXPECT_EQ(db.people.count(), 1u);
+        }
+        EXPECT_FALSE(db.in_transaction());
+        EXPECT_EQ(db.people.count(), 0u);
+
+        // 2. Scope with explicit commit() -> persists changes
+        {
+            DAL::TransactionScope scope(db);
+            ASSERT_TRUE(scope.begin_result().has_value());
+            ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Committed", "User")).has_value());
+            ASSERT_TRUE(scope.commit().has_value());
+            EXPECT_FALSE(scope.is_active());
+        }
+        EXPECT_FALSE(db.in_transaction());
+        EXPECT_EQ(db.people.count(), 1u);
+        auto persisted = db.people.find(1);
+        ASSERT_TRUE(persisted.has_value());
+        EXPECT_EQ(persisted->getFirstName(), "Committed");
+    }
+
+    TEST(Phase7LifecycleAndDeleteTest, SQLiteConnection_CloseRollsBackAndRejectsSubsequentOps)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        Phase6AppDbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Persisted", "User")).has_value());
+
+        // Start a transaction and insert an uncommitted row, then close()
+        ASSERT_TRUE(db.begin_transaction().has_value());
+        EXPECT_TRUE(conn->in_transaction());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Temp", "User")).has_value());
+
+        conn->close();
+        EXPECT_FALSE(conn->is_open());
+        EXPECT_FALSE(conn->in_transaction());
+        EXPECT_FALSE(db.is_connected());
+
+        // Subsequent reads/writes fail with ConnectionError
+        auto readRes = db.people.try_to_vector();
+        ASSERT_FALSE(readRes.has_value());
+        EXPECT_EQ(readRes.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto writeRes = db.people.add(Core::Person(Core::PersonId{ 3 }, "AfterClose", "User"));
+        ASSERT_FALSE(writeRes.has_value());
+        EXPECT_EQ(writeRes.error().code, Core::DbErrorCode::ConnectionError);
+    }
+
+    TEST(Phase7LifecycleAndDeleteTest, EnsureDeleted_DropsInReverseOrderAndRecreatesCleanly)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        Phase6AppDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(db.somethings.add(Core::Something(Core::SomethingId{ 1 }, "Book", "Media")).has_value());
+        ASSERT_TRUE(db.personSomethings.add(
+            Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Reader")).has_value());
+
+        EXPECT_EQ(db.people.count(), 1u);
+        EXPECT_EQ(db.somethings.count(), 1u);
+        EXPECT_EQ(db.personSomethings.count(), 1u);
+
+        // Drop all tables in reverse order (junction table before parent tables)
+        auto dropRes = db.ensure_deleted();
+        ASSERT_TRUE(dropRes.has_value()) << dropRes.error().to_string();
+
+        // Recreate schema cleanly -> tables are empty
+        ASSERT_TRUE(db.ensure_created().has_value());
+        EXPECT_EQ(db.people.count(), 0u);
+        EXPECT_EQ(db.somethings.count(), 0u);
+        EXPECT_EQ(db.personSomethings.count(), 0u);
     }
 
 } // namespace
