@@ -263,10 +263,10 @@ flowchart LR
 - [x] **Task 7.3: Reflection-Driven `db.ensure_deleted()` (`DAL/context/DbContext.ixx` & `SQLiteConnection.ixx`)**
   - Add `ensure_table_dropped<DTO>()` (`sqlgen::drop<DTO> | sqlgen::if_exists`) and `db.ensure_deleted(this Self&& self)` (iterating reflected `Set<T>` members in reverse order so child/junction tables are dropped before parent tables), eliminating `std::filesystem::remove(dbPath)` in `Startup/main.cpp`.
 
-### Phase 8: Zero-DTO Single-Struct POCO Mode & Auto-Inferred Keys
-- [ ] **Task 8.1: Identity Fast-Path in `MapperTraits<T, T>` (`DAL/mappers/MapperTraits.ixx`)**
+### Phase 8: Zero-DTO Single-Struct POCO Mode & Auto-Inferred Keys *(Completed)*
+- [x] **Task 8.1: Identity Fast-Path in `MapperTraits<T, T>` (`DAL/mappers/MapperTraits.ixx`)**
   - Add `if constexpr (std::is_same_v<Domain, DTO>) return dto;` in `MapperTraits::to_domain` and `to_dto` so a single struct annotated with `sqlgen::PrimaryKey` / `sqlgen::ForeignKey` can serve as both `Domain` and `DTO` with zero copy/mapping overhead.
-- [ ] **Task 8.2: Automatic `InferredKey_t<DTO>` Fallback (`DAL/schema/SchemaTraits.ixx` & `EntityMetadata.ixx`)**
+- [x] **Task 8.2: Automatic `InferredKey_t<DTO>` Fallback (`DAL/schema/SchemaTraits.ixx` & `EntityMetadata.ixx`)**
   - Use C++26 `<meta>` over `key_members_of<DTO>()` to synthesize `Core::SingleKey<V>` or `Core::CompositeKey<V1, V2, ...>` automatically when `Domain::Key` is not manually defined on a POCO struct.
 
 ### Phase 9: Compile-Time Topological Foreign-Key Sorting

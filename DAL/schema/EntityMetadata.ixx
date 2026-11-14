@@ -11,12 +11,12 @@ import :mappers;
 export namespace DAL::Schema
 {
     template<typename Domain, typename DTO = SchemaOf_t<Domain>>
-        requires RelationalEntity<DTO> && Core::Key<typename Domain::Key> && DAL::Mappers::Mappable<Domain, DTO>
+        requires RelationalEntity<DTO> && Core::Key<EntityKey_t<Domain, DTO>> && DAL::Mappers::Mappable<Domain, DTO>
     struct EntityMetadata
     {
         using DomainType = Domain;
         using DTOType = DTO;
-        using KeyType = typename Domain::Key;
+        using KeyType = EntityKey_t<Domain, DTO>;
 
         static constexpr std::string_view table_name = DTO::tablename;
         static constexpr bool is_composite_key = Core::CompositeKeyType<KeyType>;

@@ -1546,4 +1546,123 @@ namespace
         EXPECT_EQ(db.personSomethings.count(), 0u);
     }
 
+    // =========================================================================
+    // Phase 8 Tests: Zero-DTO Single-Struct POCO Mode & Auto-Inferred Keys
+    // =========================================================================
+
+    struct PocoUser
+    {
+        static constexpr auto tablename = "PocoUsers";
+        sqlgen::PrimaryKey<std::int32_t, true> user_id{ 0 };
+        std::string username;
+    };
+
+    struct PocoRole
+    {
+        static constexpr auto tablename = "PocoRoles";
+        sqlgen::PrimaryKey<std::int32_t, true> role_id{ 0 };
+        std::string role_name;
+    };
+
+    struct PocoUserRole
+    {
+        static constexpr auto tablename = "PocoUserRoles";
+        sqlgen::ForeignKey<std::int32_t, PocoUser, "user_id"> user_id{ 0 };
+        sqlgen::ForeignKey<std::int32_t, PocoRole, "role_id"> role_id{ 0 };
+        std::string assigned_by;
+    };
+
+    class PocoDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+    public:
+        Set<PocoUser> users{ this };
+        Set<PocoRole> roles{ this };
+        Set<PocoUserRole> userRoles{ this };
+
+        explicit PocoDbContext(std::shared_ptr<DAL::SQLiteConnection> conn)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(conn))
+        {
+        }
+    };
+
+    TEST(Phase8PocoModeTest, IdentityMapperAndInferredKeyTraits)
+    {
+        // Identity fast-path
+        static_assert(DAL::Mappers::Mappable<PocoUser, PocoUser>);
+        static_assert(DAL::Mappers::Mappable<PocoUserRole, PocoUserRole>);
+
+        PocoUser u{ .user_id = 42, .username = "alice" };
+        auto mappedDomain = DAL::Mappers::MapperTraits<PocoUser, PocoUser>::to_domain(u);
+        auto mappedDto = DAL::Mappers::MapperTraits<PocoUser, PocoUser>::to_dto(u);
+        EXPECT_EQ(mappedDomain.user_id.value(), 42);
+        EXPECT_EQ(mappedDomain.username, "alice");
+        EXPECT_EQ(mappedDto.user_id.value(), 42);
+
+        // InferredKey_t & EntityKey_t
+        static_assert(std::same_as<DAL::Schema::InferredKey_t<PocoUser>, Core::SingleKey<std::int32_t>>);
+        static_assert(std::same_as<DAL::Schema::InferredKey_t<PocoUserRole>, Core::CompositeKey<std::int32_t, std::int32_t>>);
+        static_assert(std::same_as<DAL::Schema::EntityKey_t<PocoUser>, Core::SingleKey<std::int32_t>>);
+        static_assert(std::same_as<DAL::Schema::EntityKey_t<PocoUserRole>, Core::CompositeKey<std::int32_t, std::int32_t>>);
+        static_assert(std::same_as<DAL::Schema::EntityKey_t<Core::Person>, Core::Person::Key>);
+
+        // EntityMetadata on POCO structs
+        using UserMeta = DAL::Schema::EntityMetadata<PocoUser>;
+        static_assert(UserMeta::table_name == "PocoUsers");
+        static_assert(!UserMeta::is_composite_key);
+        static_assert(UserMeta::key_arity == 1);
+        EXPECT_EQ(UserMeta::extract_key(u), Core::SingleKey<std::int32_t>{ 42 });
+
+        using UserRoleMeta = DAL::Schema::EntityMetadata<PocoUserRole>;
+        static_assert(UserRoleMeta::table_name == "PocoUserRoles");
+        static_assert(UserRoleMeta::is_composite_key);
+        static_assert(UserRoleMeta::key_arity == 2);
+        PocoUserRole ur{ .user_id = 42, .role_id = 7, .assigned_by = "admin" };
+        EXPECT_EQ(UserRoleMeta::extract_key(ur), (Core::CompositeKey<std::int32_t, std::int32_t>{ 42, 7 }));
+    }
+
+    TEST(Phase8PocoModeTest, ZeroDtoPocoCrudWithLiveSQLite)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        PocoDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.users.add(PocoUser{ .username = "alice" }).has_value());
+        ASSERT_TRUE(db.roles.add(PocoRole{ .role_name = "Admin" }).has_value());
+        ASSERT_TRUE(db.userRoles.add(PocoUserRole{ .user_id = 1, .role_id = 1, .assigned_by = "system" }).has_value());
+
+        EXPECT_EQ(db.users.count(), 1u);
+        EXPECT_EQ(db.roles.count(), 1u);
+        EXPECT_EQ(db.userRoles.count(), 1u);
+
+        // Single-key POCO find & update
+        auto foundUser = db.users.find(1);
+        ASSERT_TRUE(foundUser.has_value());
+        EXPECT_EQ(foundUser->username, "alice");
+
+        ASSERT_TRUE(db.users.update(PocoUser{ .user_id = 1, .username = "alice_updated" }).has_value());
+        auto reloadedUser = db.users.try_find(1);
+        ASSERT_TRUE(reloadedUser.has_value());
+        ASSERT_TRUE(reloadedUser->has_value());
+        EXPECT_EQ(reloadedUser->value().username, "alice_updated");
+
+        // Composite-key POCO find, update, contains, remove
+        auto foundLink = db.userRoles.find(1, 1);
+        ASSERT_TRUE(foundLink.has_value());
+        EXPECT_EQ(foundLink->assigned_by, "system");
+
+        ASSERT_TRUE(db.userRoles.update(PocoUserRole{ .user_id = 1, .role_id = 1, .assigned_by = "root" }).has_value());
+        auto reloadedLink = db.userRoles.find(1, 1);
+        ASSERT_TRUE(reloadedLink.has_value());
+        EXPECT_EQ(reloadedLink->assigned_by, "root");
+
+        EXPECT_TRUE(db.userRoles.contains(1, 1));
+        ASSERT_TRUE(db.userRoles.remove(1, 1).has_value());
+        EXPECT_FALSE(db.userRoles.contains(1, 1));
+        EXPECT_EQ(db.userRoles.count(), 0u);
+
+        ASSERT_TRUE(db.ensure_deleted().has_value());
+    }
+
 } // namespace

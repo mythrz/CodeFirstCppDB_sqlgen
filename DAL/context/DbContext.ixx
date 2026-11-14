@@ -53,13 +53,13 @@ export namespace DAL
         // Type alias for zero-boilerplate DbSet declarations inside derived DbContext classes
         template<typename Domain,
                  typename DTO = Schema::SchemaOf_t<Domain>,
-                 typename KeyType = typename Domain::Key>
+                 typename KeyType = Schema::EntityKey_t<Domain, DTO>>
         using Set = DbSet<Domain, DTO, ConnectionHandle, KeyType>;
 
         // Factory helper to construct a DbSet bound to this context's connection
         template<typename Domain,
                  typename DTO = Schema::SchemaOf_t<Domain>,
-                 typename KeyType = typename Domain::Key>
+                 typename KeyType = Schema::EntityKey_t<Domain, DTO>>
         [[nodiscard]] Set<Domain, DTO, KeyType> create_set() const
         {
             return Set<Domain, DTO, KeyType>(conn_);

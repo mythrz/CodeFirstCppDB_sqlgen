@@ -7,6 +7,7 @@ module;
 export module dal:schema_traits;
 
 import std;
+import core;
 
 export namespace DAL::Schema
 {
@@ -260,5 +261,53 @@ export namespace DAL::Schema
             return ((col_of<km[Is]> == unwrap_field(item.[:km[Is]:])) && ...);
         }(std::make_index_sequence<km.size()>{});
     }
+
+    // =========================================================================
+    // Phase 8: Auto-Inferred Key Trait for Zero-DTO POCO Mode
+    // =========================================================================
+
+    namespace detail
+    {
+        template<typename DTO, std::size_t... Is>
+        consteval auto infer_key_type_helper(std::index_sequence<Is...>)
+        {
+            static constexpr auto km = key_members_of<DTO>();
+            if constexpr (sizeof...(Is) == 1)
+            {
+                return std::type_identity<
+                    Core::SingleKey<typename member_reflection_value_type<km[0]>::type>>{};
+            }
+            else
+            {
+                return std::type_identity<
+                    Core::CompositeKey<typename member_reflection_value_type<km[Is]>::type...>>{};
+            }
+        }
+    } // namespace detail
+
+    // Synthesizes Core::SingleKey<V> or Core::CompositeKey<V1, V2, ...> from DTO key fields
+    template<typename DTO>
+        requires RelationalEntity<DTO>
+    using InferredKey_t = typename decltype(
+        detail::infer_key_type_helper<DTO>(std::make_index_sequence<key_member_count<DTO>()>{}))::type;
+
+    // Resolves Domain::Key when explicitly defined, or falls back to InferredKey_t<DTO>
+    template<typename Domain, typename DTO = SchemaOf_t<Domain>>
+        requires RelationalEntity<DTO>
+    struct EntityKey
+    {
+        using type = InferredKey_t<DTO>;
+    };
+
+    template<typename Domain, typename DTO>
+        requires RelationalEntity<DTO> && requires { typename Domain::Key; } && Core::Key<typename Domain::Key>
+    struct EntityKey<Domain, DTO>
+    {
+        using type = typename Domain::Key;
+    };
+
+    template<typename Domain, typename DTO = SchemaOf_t<Domain>>
+        requires RelationalEntity<DTO>
+    using EntityKey_t = typename EntityKey<Domain, DTO>::type;
 
 } // namespace DAL::Schema

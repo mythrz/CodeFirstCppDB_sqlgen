@@ -14,7 +14,7 @@ export namespace DAL
     template<typename Domain,
              typename DTO = Schema::SchemaOf_t<Domain>,
              typename ConnectionHandle = SQLiteConnection,
-             typename KeyType = typename Domain::Key>
+             typename KeyType = Schema::EntityKey_t<Domain, DTO>>
         requires DAL::Mappers::Mappable<Domain, DTO> && Repositories::DatabaseConnection<ConnectionHandle>
     class DbSet
     {

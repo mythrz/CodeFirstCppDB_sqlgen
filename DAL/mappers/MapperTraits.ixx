@@ -183,56 +183,70 @@ export namespace DAL::Mappers
         // driven entirely by member names via find_matching_dto_member.
         [[nodiscard]] static Domain to_domain(const DTO& dto)
         {
-            static constexpr auto dto_members =
-                std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
-            static constexpr auto domain_members =
-                std::define_static_array(std::meta::nonstatic_data_members_of(^^Domain, std::meta::access_context::unchecked()));
-
-            // Extract the raw value from sqlgen wrapper types (e.g. PrimaryKey, ForeignKey)
-            // that expose a .value() accessor, or pass through plain types unchanged.
-            // std::optional is detected via is_optional_v (partial specialisation) so
-            // that ::value_type is never accessed on non-optional types such as ForeignKey.
-            // Return type is auto (value semantics) to avoid decltype(auto) deduction
-            // conflicts across branches that return different reference categories.
-            auto extract_value = []<typename T>(const T& val) -> auto
+            if constexpr (std::is_same_v<Domain, DTO>)
             {
-                if constexpr (detail::is_optional_v<std::remove_cvref_t<T>>)
-                    return val; // keep std::optional<X> as-is
-                else if constexpr (requires { val.value(); })
-                    return val.value(); // unwrap sqlgen PrimaryKey / ForeignKey
-                else
-                    return val;
-            };
-
-            Domain result{};
-            template for (constexpr auto dom_m : domain_members)
-            {
-                // Locate the DTO member whose name matches this domain member.
-                // Ill-formed at compile time if no unique match is found.
-                constexpr auto dto_m = detail::find_matching_dto_member(dom_m, dto_members);
-
-                // Write directly into the private domain member via unchecked splice.
-                // Cast to the domain member's type so that strong ID types
-                // (e.g. PersonId) are constructed from their int32_t DTO counterpart.
-                result.[:dom_m:] = static_cast<[:std::meta::type_of(dom_m):]>(extract_value(dto.[:dto_m:]));
+                return dto;
             }
-            return result;
+            else
+            {
+                static constexpr auto dto_members =
+                    std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
+                static constexpr auto domain_members =
+                    std::define_static_array(std::meta::nonstatic_data_members_of(^^Domain, std::meta::access_context::unchecked()));
+
+                // Extract the raw value from sqlgen wrapper types (e.g. PrimaryKey, ForeignKey)
+                // that expose a .value() accessor, or pass through plain types unchanged.
+                // std::optional is detected via is_optional_v (partial specialisation) so
+                // that ::value_type is never accessed on non-optional types such as ForeignKey.
+                // Return type is auto (value semantics) to avoid decltype(auto) deduction
+                // conflicts across branches that return different reference categories.
+                auto extract_value = []<typename T>(const T& val) -> auto
+                {
+                    if constexpr (detail::is_optional_v<std::remove_cvref_t<T>>)
+                        return val; // keep std::optional<X> as-is
+                    else if constexpr (requires { val.value(); })
+                        return val.value(); // unwrap sqlgen PrimaryKey / ForeignKey
+                    else
+                        return val;
+                };
+
+                Domain result{};
+                template for (constexpr auto dom_m : domain_members)
+                {
+                    // Locate the DTO member whose name matches this domain member.
+                    // Ill-formed at compile time if no unique match is found.
+                    constexpr auto dto_m = detail::find_matching_dto_member(dom_m, dto_members);
+
+                    // Write directly into the private domain member via unchecked splice.
+                    // Cast to the domain member's type so that strong ID types
+                    // (e.g. PersonId) are constructed from their int32_t DTO counterpart.
+                    result.[:dom_m:] = static_cast<[:std::meta::type_of(dom_m):]>(extract_value(dto.[:dto_m:]));
+                }
+                return result;
+            }
         }
 
         [[nodiscard]] static DTO to_dto(const Domain& domain)
         {
-            DTO dto{};
-            static constexpr auto dto_members =
-                std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
-            static constexpr auto domain_members =
-                std::define_static_array(std::meta::nonstatic_data_members_of(^^Domain, std::meta::access_context::unchecked()));
-
-            template for (constexpr auto dto_m : dto_members)
+            if constexpr (std::is_same_v<Domain, DTO>)
             {
-                constexpr auto dom_m = detail::find_matching_domain_member(dto_m, domain_members);
-                dto.[:dto_m:] = static_cast<std::remove_cvref_t<decltype(dto.[:dto_m:])>>(domain.[:dom_m:]);
+                return domain;
             }
-            return dto;
+            else
+            {
+                DTO dto{};
+                static constexpr auto dto_members =
+                    std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
+                static constexpr auto domain_members =
+                    std::define_static_array(std::meta::nonstatic_data_members_of(^^Domain, std::meta::access_context::unchecked()));
+
+                template for (constexpr auto dto_m : dto_members)
+                {
+                    constexpr auto dom_m = detail::find_matching_domain_member(dto_m, domain_members);
+                    dto.[:dto_m:] = static_cast<std::remove_cvref_t<decltype(dto.[:dto_m:])>>(domain.[:dom_m:]);
+                }
+                return dto;
+            }
         }
     };
 
