@@ -5,87 +5,145 @@ import std;
 import core;
 import dal;
 
-int main()
+// Application-specific DbContext coordinating entities (EF Core style)
+class AppDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+{
+public:
+    DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection> people;
+    DAL::DbSet<Core::Something, DAL::Schema::SomethingDTO, DAL::SQLiteConnection> somethings;
+
+    explicit AppDbContext(std::shared_ptr<DAL::SQLiteConnection> conn)
+        : DAL::DbContextBase<DAL::SQLiteConnection>(conn)
+        , people(conn)
+        , somethings(conn)
+    {
+    }
+};
+
+int main(int argc, char* argv[])
 {
     const std::string dbPath = "relationalDB.db";
     std::println("Target SQLite Database path: {}", dbPath);
 
-    if (std::filesystem::exists(dbPath))
+    // Support optional --no-reset CLI argument to keep database across runs
+    bool shouldReset = true;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::string_view(argv[i]) == "--no-reset")
+        {
+            shouldReset = false;
+        }
+    }
+
+    if (shouldReset && std::filesystem::exists(dbPath))
     {
         std::filesystem::remove(dbPath);
-        std::println("Removed existing database file.");
+        std::println("Reset: Removed existing database file.");
     }
 
     std::println("Connecting to SQLite database: {}", dbPath);
-    auto conn = sqlgen::sqlite::connect(dbPath);
-
-    std::vector<DAL::Schema::PersonDTO> persons = { DAL::Schema::PersonDTO{ .id = 1, .first_name = "Rz", .last_name = "D" },
-                                                    DAL::Schema::PersonDTO{ .id = 2, .first_name = "R First", .last_name = "D Last" } };
-
-    std::vector<DAL::Schema::SomethingDTO> somethings = {
-        DAL::Schema::SomethingDTO{ .id = 1, .name = "Laptop", .category = "Electronics", .description = "Developer Workstation" },
-        DAL::Schema::SomethingDTO{ .id = 2, .name = "Coffee Machine", .category = "Appliances", .description = "Espresso Maker" }
-    };
-
-    std::vector<DAL::Schema::Person_SomethingDTO> personSomethings = {
-        DAL::Schema::Person_SomethingDTO{ .person_id = 1, .something_id = 1, .association_type = "Owner" },
-        DAL::Schema::Person_SomethingDTO{ .person_id = 2, .something_id = 2, .association_type = "User" }
-    };
-
-    std::println("Creating tables and inserting 2 rows for each entity...");
-
-    auto result = conn.and_then(sqlgen::create_table<DAL::Schema::PersonDTO> | sqlgen::if_not_exists)
-                      .and_then(sqlgen::create_table<DAL::Schema::SomethingDTO> | sqlgen::if_not_exists)
-                      .and_then(sqlgen::create_table<DAL::Schema::Person_SomethingDTO> | sqlgen::if_not_exists)
-                      .and_then(sqlgen::insert(std::ref(persons)))
-                      .and_then(sqlgen::insert(std::ref(somethings)))
-                      .and_then(sqlgen::insert(std::ref(personSomethings)));
-
-    if (result)
+    auto rawConnRes = sqlgen::sqlite::connect(dbPath);
+    if (!rawConnRes)
     {
-        std::println("Database setup complete. Created tables and inserted 2 rows for each entity.");
-    }
-    else
-    {
-        std::println(stderr, "Failed to initialize database tables or insert records.");
+        std::println(stderr, "Failed to connect to SQLite: {}", rawConnRes.error().what());
         return 1;
     }
 
-    std::println("\nVerifying persisted entities from SQLite database:");
+    // 1. DDL: Ensure tables exist
+    std::println("Creating tables if they do not exist...");
+    auto ddlResult = rawConnRes.and_then(sqlgen::create_table<DAL::Schema::PersonDTO> | sqlgen::if_not_exists)
+                               .and_then(sqlgen::create_table<DAL::Schema::SomethingDTO> | sqlgen::if_not_exists)
+                               .and_then(sqlgen::create_table<DAL::Schema::Person_SomethingDTO> | sqlgen::if_not_exists);
 
-    auto readPersons = sqlgen::read<std::vector<DAL::Schema::PersonDTO>>(conn);
-    if (readPersons)
+    if (!ddlResult)
     {
-        std::println("--- Person Table ---");
-        for (const auto& dto : readPersons.value())
-        {
-            Core::Person p = DAL::Mappers::MapperTraits<Core::Person, DAL::Schema::PersonDTO>::to_domain(dto);
-            std::println("Person [ID: {}]: {} {}", p.getId(), p.getFirstName(), p.getLastName());
-        }
+        std::println(stderr, "Failed to create database tables.");
+        return 1;
     }
 
-    auto readSomethings = sqlgen::read<std::vector<DAL::Schema::SomethingDTO>>(conn);
-    if (readSomethings)
+    auto rawConn = rawConnRes.value();
+
+    // Enforce SQLite foreign key constraints
+    rawConn->execute("PRAGMA foreign_keys = ON;");
+
+    // 2. Wrap the SQLite connection in DAL's connection adapter
+    auto connAdapter = std::make_shared<DAL::SQLiteConnection>(rawConn);
+
+    // 3. Initialize DbContext and junction repository
+    AppDbContext db(connAdapter);
+    DAL::Repositories::SQLitePerson_SomethingRepo<DAL::SQLiteConnection> linkRepo(connAdapter);
+
+    // 4. Seed database via clean entity and repository abstractions
+    std::println("Inserting initial entities via DbContext / Repositories...");
+
+    Core::Person person1(Core::PersonId{ 1 }, "Rz", "D");
+    Core::Person person2(Core::PersonId{ 2 }, "R First", "D Last");
+    auto r1 = db.people.add(person1);
+    auto r2 = db.people.add(person2);
+    if (!r1 || !r2)
     {
-        std::println("--- Something Table ---");
-        for (const auto& dto : readSomethings.value())
-        {
-            Core::Something s = DAL::Mappers::MapperTraits<Core::Something, DAL::Schema::SomethingDTO>::to_domain(dto);
-            std::println("Something [ID: {}]: {} ({}) - {}", s.getId(), s.getName(), s.getCategory(), s.getDescription().value_or("N/A"));
-        }
+        std::println(stderr, "Failed to insert person entities.");
+        return 1;
     }
 
-    auto readPersonSomethings = sqlgen::read<std::vector<DAL::Schema::Person_SomethingDTO>>(conn);
-    if (readPersonSomethings)
+    Core::Something something1(Core::SomethingId{ 1 }, "Laptop", "Electronics", "Developer Workstation");
+    Core::Something something2(Core::SomethingId{ 2 }, "Coffee Machine", "Appliances", "Espresso Maker");
+    auto s1 = db.somethings.add(something1);
+    auto s2 = db.somethings.add(something2);
+    if (!s1 || !s2)
     {
-        std::println("--- Person_Something Table ---");
-        for (const auto& dto : readPersonSomethings.value())
-        {
-            Core::Person_Something ps =
-                DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain(dto);
-            std::println(
-                "Person_Something: PersonID {} <-> SomethingID {} ({})", ps.getPersonId(), ps.getSomethingId(), ps.getAssociationType());
-        }
+        std::println(stderr, "Failed to insert something entities.");
+        return 1;
+    }
+
+    Core::Person_Something link1(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner");
+    Core::Person_Something link2(Core::PersonId{ 2 }, Core::SomethingId{ 2 }, "User");
+    auto l1 = linkRepo.insert_one(link1);
+    auto l2 = linkRepo.insert_one(link2);
+    if (!l1 || !l2)
+    {
+        std::println(stderr, "Failed to insert junction entities.");
+        return 1;
+    }
+
+    auto saveRes = db.save_changes();
+    if (!saveRes)
+    {
+        std::println(stderr, "Database save failed: {}", saveRes.error().to_string());
+        return 1;
+    }
+    std::println("Database setup complete. Created tables and persisted domain records.");
+
+    // 5. Query and verify persisted entities through clean domain layer (No DTO leaks!)
+    std::println("\nVerifying persisted entities via DbContext / Core domain models:");
+
+    std::println("--- Person Entities (via db.people) ---");
+    for (const auto& p : db.people.to_vector())
+    {
+        std::println("Person [ID: {}]: {} {}", p.getId(), p.getFirstName(), p.getLastName());
+    }
+
+    std::println("--- Something Entities (via db.somethings) ---");
+    for (const auto& s : db.somethings.to_vector())
+    {
+        std::println("Something [ID: {}]: {} ({}) - {}", s.getId(), s.getName(), s.getCategory(), s.getDescription().value_or("N/A"));
+    }
+
+    std::println("--- Person_Something Junction Entities (via linkRepo) ---");
+    for (const auto& link : linkRepo.get_all())
+    {
+        std::println("Person_Something: PersonID {} <-> SomethingID {} ({})",
+                     link.getPersonId(), link.getSomethingId(), link.getAssociationType());
+    }
+
+    // 6. Demonstrate LINQ-style query
+    auto devItems = db.somethings.where([](const Core::Something& item) {
+        return item.getCategory() == "Electronics";
+    });
+    std::println("\nQuery: Found {} Electronics item(s):", devItems.size());
+    for (const auto& item : devItems)
+    {
+        std::println(" -> {}", item.getName());
     }
 
     std::println("\nDatabase successfully saved to: {}", std::filesystem::absolute(dbPath).string());

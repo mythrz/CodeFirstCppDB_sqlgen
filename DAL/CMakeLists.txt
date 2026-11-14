@@ -12,17 +12,18 @@ target_sources(DAL
             repositories/SQLitePersonRepo.ixx
             repositories/SQLiteSomethingRepo.ixx
             repositories/SQLitePerson_SomethingRepo.ixx
+            context/DbSet.ixx
+            context/DbContext.ixx
+            context/SQLiteConnection.ixx
             dal.ixx
     PRIVATE
-
 )
 
 target_link_libraries(DAL 
     PUBLIC 
         Core
-        reflectcpp 
         sqlgen 
-        SQLite3::SQLite3 ## SQLite::SQLite3 ## SQLite3::SQLite3 ?!
+        SQLite3::SQLite3
 )
 
 add_subdirectory(tests)

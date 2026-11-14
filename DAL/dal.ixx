@@ -9,3 +9,6 @@ export import :generic_repo;
 export import :sqlite_person_repo;
 export import :sqlite_something_repo;
 export import :sqlite_person_something_repo;
+export import :db_set;
+export import :db_context;
+export import :sqlite_connection;

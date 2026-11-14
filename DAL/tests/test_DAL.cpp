@@ -126,6 +126,18 @@ namespace
             return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
         }
 
+        sqlgen::Result<sqlgen::Nothing> delete_by_composite_id(std::int32_t personId, std::int32_t somethingId)
+        {
+            auto& storage = person_somethings_;
+            std::erase_if(
+                storage,
+                [personId, somethingId](const DAL::Schema::Person_SomethingDTO& item)
+                {
+                    return item.person_id.value() == personId && item.something_id.value() == somethingId;
+                });
+            return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
+        }
+
         template<typename DTO>
         bool exists(std::int32_t id) const
         {
@@ -318,10 +330,10 @@ namespace
 
         ASSERT_FALSE(result.has_value()) << "Expected update_one to fail";
 
-        // Ensure the error type is correctly captured as Core::DbError
+        // Ensure the error type is correctly classified via DbError::map_from_message
         Core::DbError err = result.error();
-        EXPECT_EQ(err.code, Core::DbErrorCode::Unknown); // GenericRepository hardcodes Unknown for conn errors
-        EXPECT_EQ(err.message, "Update failed: item not found"); // This matches TestDatabaseConnection::update behavior
+        EXPECT_EQ(err.code, Core::DbErrorCode::NotFound);
+        EXPECT_EQ(err.message, "Update failed: item not found");
     }
 
     TEST_F(SqlgenExampleTest, DependencyInjection_InterfacePolymorphism)
@@ -504,6 +516,128 @@ namespace
         EXPECT_EQ(back.getPersonId().get(), original.getPersonId().get());
         EXPECT_EQ(back.getSomethingId().get(), original.getSomethingId().get());
         EXPECT_EQ(back.getAssociationType(), original.getAssociationType());
+    }
+
+    // Composite key and junction table operations
+    TEST_F(SqlgenExampleTest, Person_SomethingRepository_CompositeKeyOperations)
+    {
+        DAL::Repositories::SQLitePerson_SomethingRepo<TestDatabaseConnection> psRepo(conn);
+
+        // Fetch all junction rows
+        const auto allLinks = psRepo.get_all();
+        ASSERT_EQ(allLinks.size(), 2);
+
+        // Composite key lookup
+        const auto link = psRepo.get_by_composite_id(Core::PersonId{ 1 }, Core::SomethingId{ 1 });
+        ASSERT_TRUE(link.has_value());
+        EXPECT_EQ(link->getPersonId().get(), 1);
+        EXPECT_EQ(link->getSomethingId().get(), 1);
+        EXPECT_EQ(link->getAssociationType(), "Owner");
+
+        // Filter by person
+        const auto byPerson = psRepo.find_by_person_id(Core::PersonId{ 1 });
+        ASSERT_EQ(byPerson.size(), 1);
+        EXPECT_EQ(byPerson[0].getAssociationType(), "Owner");
+
+        // Filter by something
+        const auto bySomething = psRepo.find_by_something_id(Core::SomethingId{ 2 });
+        ASSERT_EQ(bySomething.size(), 1);
+        EXPECT_EQ(bySomething[0].getAssociationType(), "User");
+
+        // Existence check
+        EXPECT_TRUE(psRepo.exists_by_composite_id(Core::PersonId{ 2 }, Core::SomethingId{ 2 }));
+        EXPECT_FALSE(psRepo.exists_by_composite_id(Core::PersonId{ 99 }, Core::SomethingId{ 99 }));
+
+        // Delete by composite ID
+        auto delRes = psRepo.delete_by_composite_id(Core::PersonId{ 1 }, Core::SomethingId{ 1 });
+        EXPECT_TRUE(delRes.has_value());
+        EXPECT_FALSE(psRepo.exists_by_composite_id(Core::PersonId{ 1 }, Core::SomethingId{ 1 }));
+        EXPECT_EQ(psRepo.count(), 1);
+    }
+
+    // DbSet and DbContext plug-and-play tests
+    class MockDbContext : public DAL::DbContextBase<TestDatabaseConnection>
+    {
+    public:
+        DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, TestDatabaseConnection> people;
+        DAL::DbSet<Core::Something, DAL::Schema::SomethingDTO, TestDatabaseConnection> somethings;
+
+        explicit MockDbContext(std::shared_ptr<TestDatabaseConnection> conn)
+            : DAL::DbContextBase<TestDatabaseConnection>(conn)
+            , people(conn)
+            , somethings(conn)
+        {
+        }
+    };
+
+    TEST_F(SqlgenExampleTest, DbSet_And_DbContext_PlugAndPlayOperations)
+    {
+        MockDbContext db(conn);
+        EXPECT_TRUE(db.is_connected());
+
+        // Find by ID via DbSet
+        const auto person = db.people.find(1);
+        ASSERT_TRUE(person.has_value());
+        EXPECT_EQ(person->getFirstName(), "test1");
+
+        // Insert new entity via DbSet::add
+        Core::Person newPerson(Core::PersonId{ 50 }, "Plug", "Play");
+        auto addRes = db.people.add(newPerson);
+        ASSERT_TRUE(addRes.has_value()) << addRes.error().to_string();
+        EXPECT_TRUE(db.people.contains(50));
+        EXPECT_EQ(db.people.count(), 3);
+
+        // LINQ-style in-memory filtering via DbSet::where
+        auto playPeople = db.people.where([](const Core::Person& p) { return p.getLastName() == "Play"; });
+        ASSERT_EQ(playPeople.size(), 1);
+        EXPECT_EQ(playPeople[0].getFirstName(), "Plug");
+
+        // First or default
+        auto foundFirst = db.people.first_or_default([](const Core::Person& p) { return p.getId().get() == 50; });
+        ASSERT_TRUE(foundFirst.has_value());
+        EXPECT_EQ(foundFirst->getLastName(), "Play");
+
+        // Remove via DbSet::remove
+        auto removeRes = db.people.remove(50);
+        EXPECT_TRUE(removeRes.has_value());
+        EXPECT_FALSE(db.people.contains(50));
+        EXPECT_EQ(db.people.count(), 2);
+
+        // Save changes
+        auto saveRes = db.save_changes();
+        EXPECT_TRUE(saveRes.has_value());
+    }
+
+    // DbError structured error classification tests
+    TEST(DbErrorDiagnosticsTest, FactoryAndMappingTests)
+    {
+        auto notFound = Core::DbError::not_found("Custom not found");
+        EXPECT_EQ(notFound.code, Core::DbErrorCode::NotFound);
+        EXPECT_EQ(notFound.code_name(), "NotFound");
+
+        auto dup = Core::DbError::duplicate_key("Primary key collision");
+        EXPECT_EQ(dup.code, Core::DbErrorCode::DuplicateKey);
+        EXPECT_EQ(dup.code_name(), "DuplicateKey");
+
+        auto fk = Core::DbError::constraint_violation("FK missing");
+        EXPECT_EQ(fk.code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(fk.code_name(), "ConstraintViolation");
+
+        // Automated message parsing
+        auto parsedUnique = Core::DbError::map_from_message("UNIQUE constraint failed: Person.id");
+        EXPECT_EQ(parsedUnique.code, Core::DbErrorCode::DuplicateKey);
+
+        auto parsedFk = Core::DbError::map_from_message("FOREIGN KEY constraint failed on Person_Something");
+        EXPECT_EQ(parsedFk.code, Core::DbErrorCode::ConstraintViolation);
+
+        auto parsedNotFound = Core::DbError::map_from_message("Entity not found in collection");
+        EXPECT_EQ(parsedNotFound.code, Core::DbErrorCode::NotFound);
+
+        auto parsedBusy = Core::DbError::map_from_message("database connection is busy");
+        EXPECT_EQ(parsedBusy.code, Core::DbErrorCode::ConnectionError);
+
+        auto parsedUnknown = Core::DbError::map_from_message("Syntax error near SELECT");
+        EXPECT_EQ(parsedUnknown.code, Core::DbErrorCode::Unknown);
     }
 
 } // namespace

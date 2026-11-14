@@ -17,13 +17,10 @@ export namespace Core
         {
         }
 
+        // Immutable identity: Primary key can only be initialized, not mutated arbitrarily.
         [[nodiscard]] SomethingId getId() const noexcept
         {
             return id_;
-        }
-        void setId(SomethingId id) noexcept
-        {
-            id_ = id;
         }
 
         [[nodiscard]] const std::string& getName() const noexcept

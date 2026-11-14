@@ -64,6 +64,7 @@ compile_commands.json
 # !.vscode/launch.json
 # !.vscode/extensions.json
 *.code-workspace
+*.kdev4
 
 # Visual Studio
 .vs/

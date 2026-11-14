@@ -16,22 +16,15 @@ export namespace Core
         {
         }
 
+        // Composite key components (immutable identity)
         [[nodiscard]] PersonId getPersonId() const noexcept
         {
             return personId_;
-        }
-        void setPersonId(PersonId personId) noexcept
-        {
-            personId_ = personId;
         }
 
         [[nodiscard]] SomethingId getSomethingId() const noexcept
         {
             return somethingId_;
-        }
-        void setSomethingId(SomethingId somethingId) noexcept
-        {
-            somethingId_ = somethingId;
         }
 
         [[nodiscard]] const std::string& getAssociationType() const noexcept

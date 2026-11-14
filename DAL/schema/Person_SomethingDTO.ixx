@@ -19,6 +19,9 @@ export namespace DAL::Schema
     };
 
     static_assert(
-        !RelationalEntity<Person_SomethingDTO>,
-        "Person_SomethingDTO correctly fails RelationalEntity constraint as it uses a composite key.");
+        RelationalEntity<Person_SomethingDTO>,
+        "Person_SomethingDTO must satisfy RelationalEntity constraint as a composite-key entity.");
+    static_assert(
+        CompositePrimaryKey<Person_SomethingDTO>,
+        "Person_SomethingDTO must satisfy CompositePrimaryKey constraint.");
 } // namespace DAL::Schema

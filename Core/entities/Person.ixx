@@ -9,20 +9,17 @@ export namespace Core
     {
     public:
         Person() = default;
-        Person(PersonId id, const std::string& firstName, const std::string& lastName)
+        Person(PersonId id, std::string firstName, std::string lastName)
             : id_(id)
-            , firstName_(firstName)
-            , lastName_(lastName)
+            , firstName_(std::move(firstName))
+            , lastName_(std::move(lastName))
         {
         }
 
+        // Immutable identity: Primary key can only be initialized, not mutated arbitrarily.
         [[nodiscard]] PersonId getId() const noexcept
         {
             return id_;
-        }
-        void setId(PersonId id) noexcept
-        {
-            id_ = id;
         }
 
         [[nodiscard]] const std::string& getFirstName() const noexcept
