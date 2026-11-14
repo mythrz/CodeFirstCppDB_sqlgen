@@ -502,8 +502,8 @@ flowchart LR
   - **`DAL/tests/test_DAL.cpp`:**
     - Add unit tests covering generic `CompositePrimaryKey` on custom DTOs, `EntityMetadata` reflection queries, `SchemaOf_t`, `Set<Core::Person_Something>` composite CRUD via `DbContext`, and `try_to_vector()` / `try_find()` error propagation when the connection is closed or fails.
 
-### Phase 5: SQL Query Pushdown — Eliminating Full-Table Scans & Raw SQL *(Next Up — Detailed Spec)*
-- [ ] **Task 5.1: Compile-Time Reflection Bridge to `sqlgen::Col` (`DAL/schema/SchemaTraits.ixx`)**
+### Phase 5: SQL Query Pushdown — Eliminating Full-Table Scans & Raw SQL *(Completed)*
+- [x] **Task 5.1: Compile-Time Reflection Bridge to `sqlgen::Col` (`DAL/schema/SchemaTraits.ixx`)**
   - **Problem:** `SQLiteConnection` currently hardcodes `item.id.value()`, `"DELETE FROM {} WHERE id = {};"`, and `"DELETE FROM Person_Something WHERE person_id = {} AND something_id = {};"`. Meanwhile, `sqlgen` requires compile-time `sqlgen::Col<StringLiteral>` objects to build type-safe `WHERE` and `SET` clauses.
   - **Design:** Bridge C++26 `std::meta::info` directly to `sqlgen::Col` at compile time (`consteval`):
     - `col_literal_of<Member>()`: Converts `std::meta::identifier_of(Member)` (`std::string_view`) into `rfl::internal::StringLiteral<N + 1>`.
@@ -512,7 +512,7 @@ flowchart LR
     - `key_members_of<DTO>()` & `non_key_members_of<DTO>()`: `consteval` helpers returning `std::array<std::meta::info, K>` of all key fields (`PrimaryKey` or `ForeignKey`) and non-key fields of `DTO` without requiring a `Domain` type parameter.
     - `make_pk_where<DTO>(id)`: Constructs `col_of<primary_key_member<DTO>()> == id`.
     - `make_composite_where<DTO>(parts...)`: Fold-combines `(col_of<km[Is]> == static_cast<...>(parts)) && ...` into a strongly-typed `sqlgen` `Condition` AST for any composite key arity $K \ge 2$.
-- [ ] **Task 5.2: Single-Key SQL Pushdown & True SQL `UPDATE` in `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
+- [x] **Task 5.2: Single-Key SQL Pushdown & True SQL `UPDATE` in `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
   - **`try_get_by_id<DTO>(id)` & `get_by_id<DTO>(id)`:**
     - Replace `try_fetch_all<DTO>()` + C++ linear scan with:
       ```cpp
@@ -540,7 +540,7 @@ flowchart LR
           | sqlgen::where(make_dto_key_where<DTO>(item)))(conn_)
       ```
     - Check row existence beforehand so updating a non-existent record returns `sqlgen::error("Update failed: item not found")`, mapping cleanly to `Core::DbErrorCode::NotFound`.
-- [ ] **Task 5.3: Generic Reflection-Driven Composite-Key & Column Pushdown (`SQLiteConnection.ixx`, `GenericRepository.ixx`, `SQLitePerson_SomethingRepo.ixx`)**
+- [x] **Task 5.3: Generic Reflection-Driven Composite-Key & Column Pushdown (`SQLiteConnection.ixx`, `GenericRepository.ixx`, `SQLitePerson_SomethingRepo.ixx`)**
   - **`SQLiteConnection` Composite-Key Operations:**
     - Add `try_get_by_composite_id<DTO>(Parts... parts)` and `get_by_composite_id<DTO>(Parts... parts)` executing `sqlgen::read<std::vector<DTO>> | sqlgen::where(make_composite_where<DTO>(parts...)) | sqlgen::limit(1)`.
     - Generalize `delete_by_composite_id<DTO = DAL::Schema::Person_SomethingDTO>(Parts... parts)` using `(sqlgen::delete_from<DTO> | sqlgen::where(make_composite_where<DTO>(parts...)))(conn_)`, removing the hardcoded `"DELETE FROM Person_Something ..."` string while keeping default `DTO = Person_SomethingDTO` for backward compatibility.
@@ -548,7 +548,7 @@ flowchart LR
   - **`GenericRepository` & `SQLitePerson_SomethingRepo` Integration:**
     - In `GenericRepository::get_by_id`, `try_get_by_id`, `delete_by_id`, and `exists_by_id` (for `CompositeKeyType<KeyType>`), dispatch to `conn_->template try_get_by_composite_id<DTO>(parts...)`, `conn_->template get_by_composite_id<DTO>(parts...)`, and `conn_->template delete_by_composite_id<DTO>(parts...)` when supported by `ConnectionHandle` (retaining the `EntityMetadata::matches_key` fallback for minimal mock connections).
     - In `SQLitePerson_SomethingRepo`, route `get_by_composite_id`, `find_by_person_id`, and `find_by_something_id` through the pushdown methods.
-- [ ] **Task 5.4: Real SQLite (`":memory:"`) Pushdown Unit Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 5.4: Real SQLite (`":memory:"`) Pushdown Unit Tests (`DAL/tests/test_DAL.cpp`)**
   - Upgrade `TestDatabaseConnection` to support `get_by_composite_id<DTO>`, `try_get_by_composite_id<DTO>`, generic `delete_by_composite_id<DTO>`, and composite-key `update<DTO>`.
   - Add `Phase5SqlPushdownTest` suite in `DAL/tests/test_DAL.cpp` using a live in-memory `SQLiteConnection` (`":memory:"`) to verify:
     - Single-key `try_get_by_id`, `count`, `exists`, `update` (including `DbErrorCode::NotFound` on missing rows), and `delete_by_id`.

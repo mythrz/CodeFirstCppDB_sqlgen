@@ -1,8 +1,6 @@
 #include <gtest/gtest.h>
-// #include "../extern/sqlgen/include/sqlgen/Result.hpp"
-#include "../../extern/sqlgen/include/sqlgen/Result.hpp"
-#include <sqlgen/PrimaryKey.hpp>
-#include <sqlgen/ForeignKey.hpp>
+#include <sqlgen.hpp>
+#include <sqlgen/sqlite.hpp>
 
 import std;
 import core;
@@ -103,6 +101,43 @@ namespace
             return std::nullopt;
         }
 
+        template<typename DTO, typename... Parts>
+        std::expected<std::optional<DTO>, Core::DbError> try_get_by_composite_id(const Parts&... parts) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TestDatabaseConnection is closed")
+                };
+            }
+            return std::optional<DTO>{ get_by_composite_id<DTO>(parts...) };
+        }
+
+        template<typename DTO, typename... Parts>
+        std::optional<DTO> get_by_composite_id(const Parts&... parts) const
+        {
+            const auto& storage = get_storage<DTO>();
+            auto key_tuple = std::make_tuple(static_cast<std::int32_t>(parts)...);
+            for (const auto& item : storage)
+            {
+                if constexpr (std::is_same_v<DTO, DAL::Schema::Person_SomethingDTO>)
+                {
+                    if (item.person_id.value() == std::get<0>(key_tuple)
+                        && item.something_id.value() == std::get<1>(key_tuple))
+                    {
+                        return item;
+                    }
+                }
+            }
+            return std::nullopt;
+        }
+
+        template<typename DTO, typename... Parts>
+        bool exists_by_composite_id(const Parts&... parts) const
+        {
+            return get_by_composite_id<DTO>(parts...).has_value();
+        }
+
         // Updated to return sqlgen::Result<sqlgen::Nothing> preserving error information
 
         template<typename DTO>
@@ -135,6 +170,15 @@ namespace
                         return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
                     }
                 }
+                else if constexpr (std::is_same_v<DTO, DAL::Schema::Person_SomethingDTO>)
+                {
+                    if (elem.person_id.value() == item.person_id.value()
+                        && elem.something_id.value() == item.something_id.value())
+                    {
+                        elem = item;
+                        return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
+                    }
+                }
             }
             // Return an error if the item was not found
             return sqlgen::error("Update failed: item not found");
@@ -157,14 +201,21 @@ namespace
             return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
         }
 
-        sqlgen::Result<sqlgen::Nothing> delete_by_composite_id(std::int32_t personId, std::int32_t somethingId)
+        template<typename DTO = DAL::Schema::Person_SomethingDTO, typename... Parts>
+        sqlgen::Result<sqlgen::Nothing> delete_by_composite_id(const Parts&... parts)
         {
-            auto& storage = person_somethings_;
+            auto& storage = get_storage<DTO>();
+            auto key_tuple = std::make_tuple(static_cast<std::int32_t>(parts)...);
             std::erase_if(
                 storage,
-                [personId, somethingId](const DAL::Schema::Person_SomethingDTO& item)
+                [&key_tuple](const DTO& item)
                 {
-                    return item.person_id.value() == personId && item.something_id.value() == somethingId;
+                    if constexpr (std::is_same_v<DTO, DAL::Schema::Person_SomethingDTO>)
+                    {
+                        return item.person_id.value() == std::get<0>(key_tuple)
+                            && item.something_id.value() == std::get<1>(key_tuple);
+                    }
+                    return false;
                 });
             return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
         }
@@ -960,6 +1011,127 @@ namespace
         auto closedLinkFind = links.try_find(Core::PersonId{ 1 }, Core::SomethingId{ 1 });
         ASSERT_FALSE(closedLinkFind.has_value());
         EXPECT_EQ(closedLinkFind.error().code, Core::DbErrorCode::ConnectionError);
+    }
+
+    // =========================================================================
+    // Phase 5 Tests: Live In-Memory SQLite Pushdown & True SQL UPDATE
+    // =========================================================================
+
+    class Phase5SqlPushdownTest : public ::testing::Test
+    {
+    protected:
+        std::shared_ptr<DAL::SQLiteConnection> conn;
+
+        void SetUp() override
+        {
+            auto rawConnRes = sqlgen::sqlite::connect(":memory:");
+            ASSERT_TRUE(rawConnRes.has_value());
+
+            auto ddlResult = rawConnRes.and_then(sqlgen::create_table<DAL::Schema::PersonDTO> | sqlgen::if_not_exists)
+                                       .and_then(sqlgen::create_table<DAL::Schema::SomethingDTO> | sqlgen::if_not_exists)
+                                       .and_then(sqlgen::create_table<DAL::Schema::Person_SomethingDTO> | sqlgen::if_not_exists);
+            ASSERT_TRUE(ddlResult.has_value());
+
+            auto rawConn = rawConnRes.value();
+            ASSERT_TRUE(rawConn->execute("PRAGMA foreign_keys = ON;").has_value());
+            conn = std::make_shared<DAL::SQLiteConnection>(rawConn);
+        }
+    };
+
+    TEST_F(Phase5SqlPushdownTest, SingleKeyPushdown_GetCountExistsUpdateDelete)
+    {
+        DAL::DbSet<Core::Person> people(conn);
+
+        Core::Person p1(Core::PersonId{ 1 }, "Ada", "Lovelace");
+        Core::Person p2(Core::PersonId{ 2 }, "Alan", "Turing");
+        ASSERT_TRUE(people.add(p1).has_value());
+        ASSERT_TRUE(people.add(p2).has_value());
+
+        // Server-side COUNT(*)
+        EXPECT_EQ(people.count(), 2u);
+        auto countRes = conn->try_count<DAL::Schema::PersonDTO>();
+        ASSERT_TRUE(countRes.has_value());
+        EXPECT_EQ(countRes.value(), 2u);
+
+        // Pushdown WHERE + LIMIT 1
+        auto found = people.try_find(1);
+        ASSERT_TRUE(found.has_value());
+        ASSERT_TRUE(found->has_value());
+        EXPECT_EQ(found->value().getFirstName(), "Ada");
+        EXPECT_EQ(found->value().getLastName(), "Lovelace");
+
+        EXPECT_TRUE(people.contains(2));
+        EXPECT_FALSE(people.contains(999));
+
+        // True SQL UPDATE on existing row
+        Core::Person p1Updated(Core::PersonId{ 1 }, "Augusta Ada", "King");
+        auto updRes = people.update(p1Updated);
+        ASSERT_TRUE(updRes.has_value()) << updRes.error().to_string();
+
+        auto reloaded = people.find(1);
+        ASSERT_TRUE(reloaded.has_value());
+        EXPECT_EQ(reloaded->getFirstName(), "Augusta Ada");
+        EXPECT_EQ(reloaded->getLastName(), "King");
+
+        // UPDATE on missing row returns DbErrorCode::NotFound
+        Core::Person missing(Core::PersonId{ 999 }, "Ghost", "User");
+        auto missingUpd = people.update(missing);
+        ASSERT_FALSE(missingUpd.has_value());
+        EXPECT_EQ(missingUpd.error().code, Core::DbErrorCode::NotFound);
+
+        // Pushdown DELETE
+        ASSERT_TRUE(people.remove(2).has_value());
+        EXPECT_FALSE(people.contains(2));
+        EXPECT_EQ(people.count(), 1u);
+    }
+
+    TEST_F(Phase5SqlPushdownTest, CompositeKeyPushdown_DbSetAndRepository)
+    {
+        DAL::DbSet<Core::Person> people(conn);
+        DAL::DbSet<Core::Something> somethings(conn);
+        DAL::DbSet<Core::Person_Something> links(conn);
+        DAL::Repositories::SQLitePerson_SomethingRepo<DAL::SQLiteConnection> linkRepo(conn);
+
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 1 }, "Grace", "Hopper")).has_value());
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 2 }, "Edsger", "Dijkstra")).has_value());
+        ASSERT_TRUE(somethings.add(Core::Something(Core::SomethingId{ 1 }, "Compiler", "Software")).has_value());
+        ASSERT_TRUE(somethings.add(Core::Something(Core::SomethingId{ 2 }, "Graph", "Algorithm")).has_value());
+
+        ASSERT_TRUE(links.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Creator")).has_value());
+        ASSERT_TRUE(links.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 2 }, "Reader")).has_value());
+        ASSERT_TRUE(links.add(Core::Person_Something(Core::PersonId{ 2 }, Core::SomethingId{ 2 }, "Author")).has_value());
+
+        EXPECT_EQ(links.count(), 3u);
+
+        // Composite-key try_find & find
+        auto linkRes = links.try_find(Core::PersonId{ 1 }, Core::SomethingId{ 1 });
+        ASSERT_TRUE(linkRes.has_value());
+        ASSERT_TRUE(linkRes->has_value());
+        EXPECT_EQ(linkRes->value().getAssociationType(), "Creator");
+
+        EXPECT_TRUE(links.contains(Core::PersonId{ 2 }, Core::SomethingId{ 2 }));
+        EXPECT_FALSE(links.contains(Core::PersonId{ 2 }, Core::SomethingId{ 1 }));
+
+        // Composite-key SQL UPDATE
+        Core::Person_Something updatedLink(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Pioneer");
+        auto updRes = links.update(updatedLink);
+        ASSERT_TRUE(updRes.has_value()) << updRes.error().to_string();
+
+        auto reloadedLink = links.find(Core::PersonId{ 1 }, Core::SomethingId{ 1 });
+        ASSERT_TRUE(reloadedLink.has_value());
+        EXPECT_EQ(reloadedLink->getAssociationType(), "Pioneer");
+
+        // Foreign-key pushdown via SQLitePerson_SomethingRepo
+        auto byPerson1 = linkRepo.find_by_person_id(Core::PersonId{ 1 });
+        EXPECT_EQ(byPerson1.size(), 2u);
+
+        auto bySomething2 = linkRepo.find_by_something_id(Core::SomethingId{ 2 });
+        EXPECT_EQ(bySomething2.size(), 2u);
+
+        // Composite-key SQL DELETE
+        ASSERT_TRUE(links.remove(Core::PersonId{ 1 }, Core::SomethingId{ 2 }).has_value());
+        EXPECT_FALSE(links.contains(Core::PersonId{ 1 }, Core::SomethingId{ 2 }));
+        EXPECT_EQ(links.count(), 2u);
     }
 
 } // namespace

@@ -83,45 +83,86 @@ export namespace DAL::Repositories
         [[nodiscard]] std::optional<Core::Person_Something> get_by_composite_id(
             Core::PersonId personId, Core::SomethingId somethingId) const override
         {
-            auto dtos = conn_->template fetch_all<DAL::Schema::Person_SomethingDTO>();
-            for (const auto& dto : dtos)
+            if constexpr (requires {
+                              conn_->template get_by_composite_id<DAL::Schema::Person_SomethingDTO>(
+                                  personId.get(), somethingId.get());
+                          })
             {
-                if (dto.person_id.value() == personId.get() && dto.something_id.value() == somethingId.get())
-                {
-                    return DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain(dto);
-                }
+                return conn_->template get_by_composite_id<DAL::Schema::Person_SomethingDTO>(
+                                personId.get(), somethingId.get())
+                    .transform(
+                        DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain);
             }
-            return std::nullopt;
+            else
+            {
+                auto dtos = conn_->template fetch_all<DAL::Schema::Person_SomethingDTO>();
+                for (const auto& dto : dtos)
+                {
+                    if (dto.person_id.value() == personId.get() && dto.something_id.value() == somethingId.get())
+                    {
+                        return DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain(dto);
+                    }
+                }
+                return std::nullopt;
+            }
         }
 
         [[nodiscard]] std::vector<Core::Person_Something> find_by_person_id(Core::PersonId personId) const override
         {
-            auto dtos = conn_->template fetch_all<DAL::Schema::Person_SomethingDTO>();
-            std::vector<Core::Person_Something> results;
-            for (const auto& dto : dtos)
+            if constexpr (requires {
+                              conn_->template fetch_where_equal<DAL::Schema::Person_SomethingDTO, "person_id">(
+                                  personId.get());
+                          })
             {
-                if (dto.person_id.value() == personId.get())
-                {
-                    results.push_back(
-                        DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain(dto));
-                }
+                auto dtos = conn_->template fetch_where_equal<DAL::Schema::Person_SomethingDTO, "person_id">(
+                    personId.get());
+                auto domain_view = dtos | std::views::transform(
+                    DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain);
+                return std::vector<Core::Person_Something>(domain_view.begin(), domain_view.end());
             }
-            return results;
+            else
+            {
+                auto dtos = conn_->template fetch_all<DAL::Schema::Person_SomethingDTO>();
+                std::vector<Core::Person_Something> results;
+                for (const auto& dto : dtos)
+                {
+                    if (dto.person_id.value() == personId.get())
+                    {
+                        results.push_back(
+                            DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain(dto));
+                    }
+                }
+                return results;
+            }
         }
 
         [[nodiscard]] std::vector<Core::Person_Something> find_by_something_id(Core::SomethingId somethingId) const override
         {
-            auto dtos = conn_->template fetch_all<DAL::Schema::Person_SomethingDTO>();
-            std::vector<Core::Person_Something> results;
-            for (const auto& dto : dtos)
+            if constexpr (requires {
+                              conn_->template fetch_where_equal<DAL::Schema::Person_SomethingDTO, "something_id">(
+                                  somethingId.get());
+                          })
             {
-                if (dto.something_id.value() == somethingId.get())
-                {
-                    results.push_back(
-                        DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain(dto));
-                }
+                auto dtos = conn_->template fetch_where_equal<DAL::Schema::Person_SomethingDTO, "something_id">(
+                    somethingId.get());
+                auto domain_view = dtos | std::views::transform(
+                    DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain);
+                return std::vector<Core::Person_Something>(domain_view.begin(), domain_view.end());
             }
-            return results;
+            else
+            {
+                auto dtos = conn_->template fetch_all<DAL::Schema::Person_SomethingDTO>();
+                std::vector<Core::Person_Something> results;
+                for (const auto& dto : dtos)
+                {
+                    if (dto.something_id.value() == somethingId.get())
+                    {
+                        results.push_back(
+                            DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain(dto));
+                    }
+                }
+                return results;
+            }
         }
 
         std::expected<void, Core::DbError> delete_by_composite_id(

@@ -2,6 +2,7 @@ module;
 #include <meta>
 #include <sqlgen/PrimaryKey.hpp>
 #include <sqlgen/ForeignKey.hpp>
+#include <sqlgen/col.hpp>
 
 export module dal:schema_traits;
 
@@ -94,5 +95,170 @@ export namespace DAL::Schema
 
     template<typename Domain>
     concept HasSchema = RelationalEntity<SchemaOf_t<Domain>>;
+
+    // =========================================================================
+    // Phase 5: Compile-Time Reflection Bridge to sqlgen::Col & WHERE ASTs
+    // =========================================================================
+
+    namespace detail
+    {
+        template<typename>
+        inline constexpr bool is_optional_v = false;
+        template<typename T>
+        inline constexpr bool is_optional_v<std::optional<T>> = true;
+
+        template<std::meta::info Member>
+        struct member_reflection_value_type
+        {
+            using raw_type = [:std::meta::type_of(Member):];
+            using type = typename std::remove_cvref_t<raw_type>::ReflectionType;
+        };
+    } // namespace detail
+
+    // Unwraps sqlgen::PrimaryKey / sqlgen::ForeignKey to their underlying value,
+    // preserving std::optional<T> and plain fields unchanged.
+    template<typename T>
+    [[nodiscard]] constexpr auto unwrap_field(const T& val)
+    {
+        if constexpr (detail::is_optional_v<std::remove_cvref_t<T>>)
+        {
+            return val;
+        }
+        else if constexpr (requires { val.value(); })
+        {
+            return val.value();
+        }
+        else
+        {
+            return val;
+        }
+    }
+
+    template<std::meta::info Member>
+    consteval auto col_literal_of()
+    {
+        constexpr std::string_view name = std::meta::identifier_of(Member);
+        std::array<char, name.size() + 1> buf{};
+        for (std::size_t i = 0; i < name.size(); ++i)
+        {
+            buf[i] = name[i];
+        }
+        buf[name.size()] = '\0';
+        return rfl::internal::StringLiteral<name.size() + 1>{ buf };
+    }
+
+    template<std::meta::info Member>
+    inline constexpr auto col_of = sqlgen::Col<col_literal_of<Member>()>{};
+
+    template<typename DTO>
+    consteval std::size_t total_member_count()
+    {
+        static constexpr auto members = std::define_static_array(
+            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
+        return members.size();
+    }
+
+    template<typename DTO>
+    consteval std::size_t key_member_count()
+    {
+        constexpr std::size_t pk_count = primary_key_count<DTO>();
+        return pk_count > 0 ? pk_count : foreign_key_count<DTO>();
+    }
+
+    template<typename DTO>
+        requires SinglePrimaryKey<DTO>
+    consteval std::meta::info primary_key_member()
+    {
+        static constexpr auto members = std::define_static_array(
+            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
+        template for (constexpr auto m : members)
+        {
+            using RawFieldType = [:std::meta::type_of(m):];
+            using FieldType = std::remove_cvref_t<RawFieldType>;
+            if constexpr (SqlgenPrimaryKeyField<FieldType>)
+            {
+                return m;
+            }
+        }
+        throw std::invalid_argument("primary_key_member: no PrimaryKey field found");
+    }
+
+    template<typename DTO>
+        requires RelationalEntity<DTO>
+    consteval auto key_members_of()
+    {
+        static constexpr auto members = std::define_static_array(
+            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
+        constexpr std::size_t k_count = key_member_count<DTO>();
+        constexpr bool use_pk = (primary_key_count<DTO>() > 0);
+        std::array<std::meta::info, k_count> result{};
+        std::size_t idx = 0;
+
+        template for (constexpr auto m : members)
+        {
+            using RawFieldType = [:std::meta::type_of(m):];
+            using FieldType = std::remove_cvref_t<RawFieldType>;
+            if constexpr (use_pk ? SqlgenPrimaryKeyField<FieldType> : SqlgenForeignKeyField<FieldType>)
+            {
+                result[idx++] = m;
+            }
+        }
+        return result;
+    }
+
+    template<typename DTO>
+        requires RelationalEntity<DTO>
+    consteval auto non_key_members_of()
+    {
+        static constexpr auto members = std::define_static_array(
+            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
+        constexpr std::size_t nk_count = total_member_count<DTO>() - key_member_count<DTO>();
+        constexpr bool use_pk = (primary_key_count<DTO>() > 0);
+        std::array<std::meta::info, nk_count> result{};
+        std::size_t idx = 0;
+
+        template for (constexpr auto m : members)
+        {
+            using RawFieldType = [:std::meta::type_of(m):];
+            using FieldType = std::remove_cvref_t<RawFieldType>;
+            if constexpr (!(use_pk ? SqlgenPrimaryKeyField<FieldType> : SqlgenForeignKeyField<FieldType>))
+            {
+                result[idx++] = m;
+            }
+        }
+        return result;
+    }
+
+    template<typename DTO, typename IdType>
+        requires SinglePrimaryKey<DTO>
+    [[nodiscard]] constexpr auto make_pk_where(const IdType& id)
+    {
+        constexpr auto pk_m = primary_key_member<DTO>();
+        using ValueType = typename detail::member_reflection_value_type<pk_m>::type;
+        return col_of<pk_m> == static_cast<ValueType>(id);
+    }
+
+    template<typename DTO, typename... Parts>
+        requires RelationalEntity<DTO> && (sizeof...(Parts) == key_member_count<DTO>()) && (sizeof...(Parts) >= 2)
+    [[nodiscard]] constexpr auto make_composite_where(const Parts&... parts)
+    {
+        static constexpr auto km = key_members_of<DTO>();
+        auto tuple_parts = std::forward_as_tuple(parts...);
+        return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return ((col_of<km[Is]> ==
+                     static_cast<typename detail::member_reflection_value_type<km[Is]>::type>(
+                         std::get<Is>(tuple_parts))) && ...);
+        }(std::make_index_sequence<sizeof...(Parts)>{});
+    }
+
+    template<typename DTO>
+        requires RelationalEntity<DTO>
+    [[nodiscard]] constexpr auto make_dto_key_where(const DTO& item)
+    {
+        static constexpr auto km = key_members_of<DTO>();
+        return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return ((col_of<km[Is]> == unwrap_field(item.[:km[Is]:])) && ...);
+        }(std::make_index_sequence<km.size()>{});
+    }
 
 } // namespace DAL::Schema
