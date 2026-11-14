@@ -272,82 +272,51 @@ To plan the next engineering phases effectively, we must distinguish between wha
 ### What Works Well Today
 - **Clean Module Compilation:** Builds cleanly with GCC 16.1+ using C++26 `-freflection` and CMake 4.4 `import std;`.
 - **Zero-Setter Reflection Mapping:** Domain entities (`Person`, `Something`, `Person_Something`) have immutable primary keys (no `setId`), yet `MapperTraits` populates them effortlessly via C++26 member splicing.
-- **Fast Unit Test Suite:** 27 unit tests in `test_DAL.cpp` verify round-trip reflection mapping, optional fields, CRUD operations, `DbError` classification, `SingleKey`/`CompositeKey` semantics, and `DbSet` usage.
+- **Reflection-Driven Metadata & Unified `Set<Domain>`:** `SchemaTraits`, `SchemaOf<Domain>`, and `EntityMetadata<Domain, DTO>` introspect primary/foreign keys via `<meta>`, allowing `DbContextBase::Set<T>` to handle both single-key (`Person`, `Something`) and composite-key (`Person_Something`) entities with monadic `try_to_vector()` / `try_find()` error propagation.
+- **Fast Unit Test Suite:** 35 unit tests across 5 test suites in `test_DAL.cpp` verify round-trip reflection mapping, optional fields, CRUD operations, `DbError` classification, `SingleKey`/`CompositeKey` semantics, `EntityMetadata`, and `DbSet` usage.
 
-### Resolved Issues (Completed in Recent Sprints)
+### Resolved Issues (Completed in Phases 1–4)
 - [x] **Entity ID Immutability:** Removed `setId`, `setPersonId`, and `setSomethingId` from domain entities.
 - [x] **Key Type Abstractions:** Implemented `SingleKey<K>` and `CompositeKey<K...>` with concepts (`SingleKeyType`, `CompositeKeyType`, `Key`) and structured bindings.
 - [x] **Base Repository Split:** Split `IRepository<T>` (common operations) from `IGenericRepository<T, KeyType>` (single-key operations) so junction tables are not forced to implement `get_by_id(int32_t)`.
-- [x] **Error Message Classification:** Added `DbError::map_from_message` and factory methods to classify `DuplicateKey`, `ConstraintViolation`, `NotFound`, and `ConnectionError`.
-- [x] **Initial `DbContext` / `DbSet` Façade:** Created `DbContextBase`, `DbSet`, and `SQLiteConnection`, removing direct `MapperTraits` calls from `Startup/main.cpp`.
+- [x] **Error Message Classification & Monadic Reads:** Added `DbError::map_from_message` and `try_fetch_all` / `try_get_all` / `try_to_vector` / `try_find` returning `std::expected<..., Core::DbError>`.
+- [x] **Reflection-Based `CompositePrimaryKey` & `EntityMetadata`:** Replaced hardcoded `person_id`/`something_id` concept checks with `consteval` `<meta>` member introspection (`primary_key_count<T>()`, `foreign_key_count<T>()`).
+- [x] **Unified `DbSet` (`Set<Domain>`) via `SchemaOf<Domain>`:** `AppDbContext` now manages `Set<Core::Person>`, `Set<Core::Something>`, and `Set<Core::Person_Something>` uniformly without external repository boilerplate.
 
 ---
 
-### Critical Remaining Gaps & Hidden Bottlenecks
+### Critical Remaining Gaps & Hidden Bottlenecks (Targeted in Phases 5 & 6)
 
-A close inspection of the current implementation reveals **7 important architectural gaps** that prevent the library from being truly reusable and plug-and-play like EF Core:
+A close inspection of `SQLiteConnection` and `DbContextBase` reveals **4 critical bottlenecks** to resolve in Phases 5 and 6:
 
-#### Gap 1: Full-Table Scans in `SQLiteConnection` & `DbSet` (Performance & Scalability Flaw)
+#### Gap 1: Full-Table Scans in `SQLiteConnection` & Composite-Key Lookups (Phase 5)
 - **What the code currently does:**
-  - In [SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx), `get_by_id(id)` calls `fetch_all<DTO>()`—which executes `SELECT * FROM Table`, loads the **entire table** into a `std::vector<DTO>`, and loops over it in C++!
+  - In [SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L66-L95), `try_get_by_id(id)` calls `try_fetch_all<DTO>()`—which executes `SELECT * FROM Table`, loads the **entire table** into a `std::vector<DTO>`, and loops over it in C++!
   - `count<DTO>()` calls `fetch_all<DTO>().size()`, pulling every row from SQLite just to count them!
-  - `SQLitePerson_SomethingRepo` calls `fetch_all<Person_SomethingDTO>()` for `get_by_composite_id`, `find_by_person_id`, and `find_by_something_id`.
-  - `DbSet::where(pred)` calls `to_vector()` and filters in C++ memory (equivalent to LINQ-to-Objects `IEnumerable`), rather than pushing a `WHERE` clause to SQLite.
-- **What needs to change:**
-  - Push `get_by_id`, `count`, `exists`, and composite-key queries down to `sqlgen` SQL queries (`sqlgen::select_from<DTO> | sqlgen::where(...)`) so SQLite uses its B-tree indexes in $O(\log N)$ time instead of $O(N)$ full-table deserialization.
+  - `GenericRepository` (for `CompositeKey`) and `SQLitePerson_SomethingRepo` call `fetch_all<DTO>()` for composite-key and foreign-key lookups.
+- **What needs to change (Phase 5):**
+  - Push `try_get_by_id`, `count`, `exists`, and composite-key queries down to `sqlgen` SQL queries (`sqlgen::read<std::vector<DTO>> | sqlgen::where(...) | sqlgen::limit(1)` and `sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">)`) so SQLite uses its B-tree indexes in $O(\log N)$ time instead of $O(N)$ full-table deserialization.
 
-#### Gap 2: Raw String SQL Formatting in `SQLiteConnection` Delete Operations
+#### Gap 2: Raw String SQL Formatting in `SQLiteConnection` Delete Operations (Phase 5)
 - **What the code currently does:**
   - `SQLiteConnection::delete_by_id` constructs raw SQL via `std::format("DELETE FROM {} WHERE id = {};", DTO::tablename, id);`.
-  - `SQLiteConnection::delete_by_composite_id` hardcodes the table and column names: `"DELETE FROM Person_Something WHERE person_id = {} AND something_id = {};"`.
-- **What needs to change:**
-  - Use `sqlgen::delete_from<DTO> | sqlgen::where(...)` or reflection-driven column names so delete operations are type-safe, parameterized, and work for *any* entity or composite-key table, not just `Person_Something`.
+  - `SQLiteConnection::delete_by_composite_id` hardcodes the table and column names: `"DELETE FROM Person_Something WHERE person_id = {} AND something_id = {};"`. Calling `remove(...)` on any other composite-key `DbSet` would delete from `Person_Something`!
+- **What needs to change (Phase 5):**
+  - Use C++26 reflection (`col_of<Member>`) with `sqlgen::delete_from<DTO> | sqlgen::where(...)` so delete operations are type-safe and work for *any* single-key or composite-key DTO.
 
-#### Gap 3: Hardcoded Field Names in `CompositePrimaryKey` Concept
+#### Gap 3: `SQLiteConnection::update(const DTO&)` Calls `sqlgen::write` Instead of SQL `UPDATE` (Phase 5)
 - **What the code currently does:**
-  - In [SchemaTraits.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/schema/SchemaTraits.ixx):
-    ```cpp
-    template<typename T>
-    concept CompositePrimaryKey = !SinglePrimaryKey<T> && requires(T dto) {
-        { dto.person_id.value() } -> std::convertible_to<std::int32_t>;
-        { dto.something_id.value() } -> std::convertible_to<std::int32_t>;
-    };
-    ```
-  - This concept is hardcoded to `person_id` and `something_id`! If a user creates an `Order_ProductDTO` with `order_id` and `product_id`, it will fail `CompositePrimaryKey` and `RelationalEntity`.
-- **What needs to change:**
-  - Generalize `CompositePrimaryKey<T>` using C++26 reflection (`std::meta`) or a declarative `using KeyColumns = ...` / `CompositeKey` trait so *any* multi-key DTO satisfies the concept.
+  - In [SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L110-L115), `update(const DTO& item)` calls `sqlgen::write(conn_, vec)`.
+  - Inside `extern/sqlgen/include/sqlgen/write.hpp`, `sqlgen::write` executes `CREATE TABLE "Table"` (without `IF NOT EXISTS`) followed by `INSERT INTO "Table"`, which fails on existing SQLite tables/rows instead of executing an `UPDATE ... SET ... WHERE ...` statement!
+- **What needs to change (Phase 5):**
+  - Replace `sqlgen::write` inside `SQLiteConnection::update<DTO>` with a reflection-generated `sqlgen::update<DTO>(col_of<non_key_m>.set(...)...) | sqlgen::where(make_dto_key_where<DTO>(item))` statement, plus an existence check returning `NotFound` when the target key does not exist.
 
-#### Gap 4: `DbSet` Does Not Yet Support Composite-Key Entities or Auto-Mapped DTOs
+#### Gap 4: `DbContextBase::save_changes()` is Currently a No-Op & Manual DDL in `main.cpp` (Phase 6)
 - **What the code currently does:**
-  - In `Startup/main.cpp`, `AppDbContext` has `DbSet`s for `people` and `somethings`, but `Person_Something` had to be managed via a separate `SQLitePerson_SomethingRepo linkRepo` outside `AppDbContext` because `DbSet` assumes a single `KeyType = std::int32_t`!
-  - Furthermore, declaring a `DbSet` requires repeating the DTO and Connection type:
-    `DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection> people;`
-- **What needs to change:**
-  - Make `DbSet` inspect `Domain::Key` (supporting both `SingleKey<K>` and `CompositeKey<K...>`) so `db.personSomethings.find(CompositeKey{...})` or `db.personSomethings.find(PersonId{1}, SomethingId{1})` works directly inside `AppDbContext`!
-  - Provide a `SchemaOf<Domain>` trait (or default reflection DTO generator) so users only write `DbSet<Core::Person> people;`.
-
-#### Gap 5: `DbContextBase::save_changes()` is Currently a No-Op
-- **What the code currently does:**
-  - `db.people.add(p)` executes `INSERT` immediately against SQLite.
-  - `db.save_changes()` in [DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx) only checks `if (!is_connected()) return error; return {};`.
-  - If inserting 3 related entities fails on the 3rd entity, the first 2 remain permanently written to the database.
-- **What needs to change:**
-  - Implement true transaction boundaries (`begin_transaction()`, `commit()`, `rollback()`) on `SQLiteConnection` (wrapping `sqlgen`'s transaction support) and either stage changes in `DbContext` or provide an explicit `db.transaction([&]{ ... })` / unit-of-work commit pipeline.
-
-#### Gap 6: Read Operations Still Mask Database Errors
-- **What the code currently does:**
-  - `SQLiteConnection::fetch_all<DTO>()` ignores `res.error()` and returns `{}` when a query fails (e.g. missing table, locked DB, corrupt schema).
-  - `IRepository::get_all()` and `IGenericRepository::get_by_id()` return `std::vector<T>` and `std::optional<T>` instead of `std::expected<..., DbError>`.
-- **What needs to change:**
-  - Propagate `std::expected<std::vector<Domain>, DbError>` and `std::expected<std::optional<Domain>, DbError>` (or provide try-read methods alongside convenience accessors) so database errors are never silently mistaken for empty tables.
-
-#### Gap 7: Dual Boilerplate (Manual DTO + Manual Repo per Entity)
-- **What the code currently does:**
-  - Even with `GenericRepository` and `DbSet`, adding a new entity still requires defining a separate `DTO` struct in `DAL/schema/` and exporting partitions in multiple CMake/module files.
-- **What needs to change:**
-  - Allow users to either:
-    1. Use a single reflected entity struct directly when strict Core/DAL separation isn't needed, **or**
-    2. Use a lightweight `RegisterEntity<Domain, DTO>` trait so `DbContext` wires everything with zero bespoke repository classes.
+  - `db.people.add(p)` executes `INSERT` immediately against SQLite, and `db.save_changes()` in [DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx) only checks `if (!is_connected()) return error; return {};`.
+  - `Startup/main.cpp` still chains `sqlgen::create_table<DTO>` manually for each table.
+- **What needs to change (Phase 6):**
+  - Implement true transaction boundaries (`begin_transaction()`, `commit()`, `rollback()`) on `SQLiteConnection`, transactional unit-of-work execution in `DbContextBase`, and `db.ensure_created()` over registered context entities.
 
 ---
 
@@ -472,9 +441,8 @@ This eliminates the manual `rawConnRes.and_then(sqlgen::create_table<...>...)` b
 
 ```mermaid
 flowchart LR
-    P1["Phase 1 & 2 (Done)<br/>Strong IDs, Single/CompositeKey,<br/>DbError, Initial DbSet"] --> P3["Phase 3 (Next)<br/>Generalize CompositeKey Concept<br/>& SchemaOf&lt;Domain&gt; Trait"]
-    P3 --> P4["Phase 4<br/>Unified DbSet&lt;Domain&gt;<br/>Supporting CompositeKey &amp; Monadic Reads"]
-    P4 --> P5["Phase 5<br/>SQL Pushdown in SQLiteConnection<br/>(Eliminate fetch_all Scans)"]
+    P12["Phase 1 & 2 (Done)<br/>Strong IDs, Single/CompositeKey,<br/>DbError, Initial DbSet"] --> P34["Phase 3 & 4 (Done)<br/>Reflection SchemaTraits, EntityMetadata,<br/>Unified DbSet&lt;Domain&gt; &amp; Monadic Reads"]
+    P34 --> P5["Phase 5 (Next)<br/>SQL Pushdown in SQLiteConnection<br/>(Eliminate fetch_all Scans &amp; Raw SQL)"]
     P5 --> P6["Phase 6<br/>Real Transactions, Staged Unit of Work<br/>&amp; db.ensure_created()"]
 ```
 
@@ -534,9 +502,57 @@ flowchart LR
   - **`DAL/tests/test_DAL.cpp`:**
     - Add unit tests covering generic `CompositePrimaryKey` on custom DTOs, `EntityMetadata` reflection queries, `SchemaOf_t`, `Set<Core::Person_Something>` composite CRUD via `DbContext`, and `try_to_vector()` / `try_find()` error propagation when the connection is closed or fails.
 
-### Phase 5: SQL Query Pushdown (Eliminating Full-Table Scans)
-- [ ] **Task 5.1:** Refactor `SQLiteConnection::get_by_id`, `exists`, `count`, and `delete_by_id` to execute targeted `sqlgen` SQL statements (`WHERE`, `COUNT`, `DELETE`) instead of `fetch_all<DTO>()` in-memory loops and raw string formatting.
-- [ ] **Task 5.2:** Implement generic reflection-driven composite key lookup and deletion in `SQLiteConnection` (`get_by_composite_key<DTO>`, `delete_by_composite_key<DTO>`).
+### Phase 5: SQL Query Pushdown — Eliminating Full-Table Scans & Raw SQL *(Next Up — Detailed Spec)*
+- [ ] **Task 5.1: Compile-Time Reflection Bridge to `sqlgen::Col` (`DAL/schema/SchemaTraits.ixx`)**
+  - **Problem:** `SQLiteConnection` currently hardcodes `item.id.value()`, `"DELETE FROM {} WHERE id = {};"`, and `"DELETE FROM Person_Something WHERE person_id = {} AND something_id = {};"`. Meanwhile, `sqlgen` requires compile-time `sqlgen::Col<StringLiteral>` objects to build type-safe `WHERE` and `SET` clauses.
+  - **Design:** Bridge C++26 `std::meta::info` directly to `sqlgen::Col` at compile time (`consteval`):
+    - `col_literal_of<Member>()`: Converts `std::meta::identifier_of(Member)` (`std::string_view`) into `rfl::internal::StringLiteral<N + 1>`.
+    - `col_of<Member>`: `inline constexpr auto col_of = sqlgen::Col<col_literal_of<Member>()>{};`
+    - `primary_key_member<DTO>()`: `consteval` helper returning the `std::meta::info` of the single primary key field for `SinglePrimaryKey<DTO>`.
+    - `key_members_of<DTO>()` & `non_key_members_of<DTO>()`: `consteval` helpers returning `std::array<std::meta::info, K>` of all key fields (`PrimaryKey` or `ForeignKey`) and non-key fields of `DTO` without requiring a `Domain` type parameter.
+    - `make_pk_where<DTO>(id)`: Constructs `col_of<primary_key_member<DTO>()> == id`.
+    - `make_composite_where<DTO>(parts...)`: Fold-combines `(col_of<km[Is]> == static_cast<...>(parts)) && ...` into a strongly-typed `sqlgen` `Condition` AST for any composite key arity $K \ge 2$.
+- [ ] **Task 5.2: Single-Key SQL Pushdown & True SQL `UPDATE` in `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
+  - **`try_get_by_id<DTO>(id)` & `get_by_id<DTO>(id)`:**
+    - Replace `try_fetch_all<DTO>()` + C++ linear scan with:
+      ```cpp
+      auto query = sqlgen::read<std::vector<DTO>>
+                 | sqlgen::where(DAL::Schema::make_pk_where<DTO>(id))
+                 | sqlgen::limit(1);
+      auto res = query(conn_);
+      ```
+    - Executes `SELECT ... FROM "Table" WHERE "<pk>" = <id> LIMIT 1;` in $O(\log N)$ via SQLite's B-tree index.
+  - **`try_count<DTO>()` & `count<DTO>()`:**
+    - Replace `fetch_all<DTO>().size()` with server-side SQL aggregation:
+      ```cpp
+      struct RowCount { std::size_t count = 0; };
+      auto query = sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">)
+                 | sqlgen::to<RowCount>;
+      ```
+    - Executes `SELECT COUNT(*) AS "count" FROM "Table";` without reading or deserializing entity rows.
+  - **`delete_by_id<DTO>(id)`:**
+    - Replace `std::format("DELETE FROM {} WHERE id = {};", ...)` with `(sqlgen::delete_from<DTO> | sqlgen::where(DAL::Schema::make_pk_where<DTO>(id)))(conn_)`.
+  - **`update<DTO>(const DTO& item)`:**
+    - **Bug Fix:** `sqlgen::write(conn_, vec)` in `sqlgen` runs `CREATE TABLE` (without `IF NOT EXISTS`) followed by `INSERT INTO`, which fails on existing tables/rows instead of executing `UPDATE`!
+    - **Fix:** Use C++26 reflection over `non_key_members_of<DTO>()` and `key_members_of<DTO>()` to build:
+      ```cpp
+      (sqlgen::update<DTO>(col_of<non_key_m>.set(unwrap_field(item.[:non_key_m:]))...)
+          | sqlgen::where(make_dto_key_where<DTO>(item)))(conn_)
+      ```
+    - Check row existence beforehand so updating a non-existent record returns `sqlgen::error("Update failed: item not found")`, mapping cleanly to `Core::DbErrorCode::NotFound`.
+- [ ] **Task 5.3: Generic Reflection-Driven Composite-Key & Column Pushdown (`SQLiteConnection.ixx`, `GenericRepository.ixx`, `SQLitePerson_SomethingRepo.ixx`)**
+  - **`SQLiteConnection` Composite-Key Operations:**
+    - Add `try_get_by_composite_id<DTO>(Parts... parts)` and `get_by_composite_id<DTO>(Parts... parts)` executing `sqlgen::read<std::vector<DTO>> | sqlgen::where(make_composite_where<DTO>(parts...)) | sqlgen::limit(1)`.
+    - Generalize `delete_by_composite_id<DTO = DAL::Schema::Person_SomethingDTO>(Parts... parts)` using `(sqlgen::delete_from<DTO> | sqlgen::where(make_composite_where<DTO>(parts...)))(conn_)`, removing the hardcoded `"DELETE FROM Person_Something ..."` string while keeping default `DTO = Person_SomethingDTO` for backward compatibility.
+    - Add `exists_by_composite_id<DTO>(Parts... parts)` and `fetch_where_equal<DTO, ColLiteral>(Val)` for indexed foreign-key filtering.
+  - **`GenericRepository` & `SQLitePerson_SomethingRepo` Integration:**
+    - In `GenericRepository::get_by_id`, `try_get_by_id`, `delete_by_id`, and `exists_by_id` (for `CompositeKeyType<KeyType>`), dispatch to `conn_->template try_get_by_composite_id<DTO>(parts...)`, `conn_->template get_by_composite_id<DTO>(parts...)`, and `conn_->template delete_by_composite_id<DTO>(parts...)` when supported by `ConnectionHandle` (retaining the `EntityMetadata::matches_key` fallback for minimal mock connections).
+    - In `SQLitePerson_SomethingRepo`, route `get_by_composite_id`, `find_by_person_id`, and `find_by_something_id` through the pushdown methods.
+- [ ] **Task 5.4: Real SQLite (`":memory:"`) Pushdown Unit Tests (`DAL/tests/test_DAL.cpp`)**
+  - Upgrade `TestDatabaseConnection` to support `get_by_composite_id<DTO>`, `try_get_by_composite_id<DTO>`, generic `delete_by_composite_id<DTO>`, and composite-key `update<DTO>`.
+  - Add `Phase5SqlPushdownTest` suite in `DAL/tests/test_DAL.cpp` using a live in-memory `SQLiteConnection` (`":memory:"`) to verify:
+    - Single-key `try_get_by_id`, `count`, `exists`, `update` (including `DbErrorCode::NotFound` on missing rows), and `delete_by_id`.
+    - Composite-key `DbSet<Core::Person_Something>` (`find`, `try_find`, `update`, `remove`, `contains`) and `SQLitePerson_SomethingRepo` (`find_by_person_id`, `find_by_something_id`) against real SQLite tables.
 
 ### Phase 6: True Unit of Work (`save_changes`) & Automatic Schema (`ensure_created`)
 - [ ] **Task 6.1:** Add `begin_transaction()`, `commit()`, and `rollback()` to `SQLiteConnection` and `TestDatabaseConnection`.
