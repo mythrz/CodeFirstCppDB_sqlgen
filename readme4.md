@@ -482,14 +482,57 @@ flowchart LR
 - [x] **Task 1.1–1.5:** Clean up CMake target links, strengthen `DatabaseConnection` concepts (`ReadableConnection`, `WritableConnection`), implement `DbError::map_from_message`, enforce immutable entity IDs, and remove raw mapper loops from `Startup/main.cpp`.
 - [x] **Task 2.1–2.4:** Implement `SingleKey<KeyType>` and `CompositeKey<KeyTypes...>` in `Core/Key.ixx` with structured bindings, concepts, and unit tests; split `IRepository` from `IGenericRepository`; implement `SQLitePerson_SomethingRepo`.
 
-### Phase 3: Reflection-Driven Schema Concepts & Zero-Boilerplate Traits *(Next Up)*
-- [ ] **Task 3.1:** Replace the hardcoded `person_id`/`something_id` check in `DAL::Schema::CompositePrimaryKey<T>` with a reflection-based or generic key-trait check that works for any composite DTO.
-- [ ] **Task 3.2:** Introduce `DAL::Schema::SchemaOf<Domain>` trait so `Domain` types automatically map to their `DTO` (or to `Domain` itself for single-struct POCOs).
-- [ ] **Task 3.3:** Build `EntityMetadata<T>` using `std::meta::nonstatic_data_members_of` to inspect table names, column names, primary keys, and foreign keys at compile time.
+### Phase 3: Reflection-Driven Schema Concepts & Zero-Boilerplate Traits *(Next Up — Detailed Spec)*
+- [ ] **Task 3.1: Reflection-Based `SinglePrimaryKey<T>` & `CompositePrimaryKey<T>` (`DAL/schema/SchemaTraits.ixx`)**
+  - **Problem:** `SinglePrimaryKey<T>` currently hardcodes `dto.id.value()`, and `CompositePrimaryKey<T>` hardcodes `dto.person_id.value()` and `dto.something_id.value()`. Any custom entity (e.g., `Order_ProductDTO`) with different key column names fails `RelationalEntity<T>`.
+  - **Design:** Use C++26 static reflection (`#include <meta>`, `std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::current())`) to inspect field types at compile time:
+    - `SqlgenPrimaryKeyField<F>`: detects `sqlgen::PrimaryKey<V, auto_incr>` via `typename F::ReflectionType`, `F::auto_incr`, and `f.value()`.
+    - `SqlgenForeignKeyField<F>`: detects `sqlgen::ForeignKey<V, Table, Col>` via `typename F::ReflectionType`, `typename F::ForeignTableType`, `typename F::ColumnType`, and `f.value()`.
+    - `consteval std::size_t primary_key_count<T>()` and `consteval std::size_t foreign_key_count<T>()` count key fields across all non-static data members of `T`.
+    - `SinglePrimaryKey<T>`: `HasTableName<T> && (primary_key_count<T>() == 1)`.
+    - `CompositePrimaryKey<T>`: `HasTableName<T> && !SinglePrimaryKey<T> && ((primary_key_count<T>() >= 2) || (primary_key_count<T>() == 0 && foreign_key_count<T>() >= 2))`.
+- [ ] **Task 3.2: Zero-Boilerplate `SchemaOf<Domain>` Trait (`DAL/schema/SchemaTraits.ixx` & `*DTO.ixx`)**
+  - **Design:**
+    - Define `template<typename Domain> struct SchemaOf { using type = Domain; };` and `template<typename Domain> using SchemaOf_t = typename SchemaOf<Domain>::type;`.
+    - Define concept `template<typename Domain> concept HasSchema = RelationalEntity<SchemaOf_t<Domain>>;`.
+    - Specialize `SchemaOf<Core::Person>`, `SchemaOf<Core::Something>`, and `SchemaOf<Core::Person_Something>` in their respective DTO partitions (`PersonDTO.ixx`, `SomethingDTO.ixx`, `Person_SomethingDTO.ixx`).
+- [ ] **Task 3.3: Compile-Time `EntityMetadata<Domain, DTO>` (`DAL/schema/EntityMetadata.ixx`)**
+  - **Design:** Add new module partition `export module dal:entity_metadata;` (exported in `DAL/dal.ixx` and registered in `DAL/CMakeLists.txt`):
+    - `table_name`: `static constexpr std::string_view table_name = DTO::tablename;`
+    - `KeyType`: `using KeyType = typename Domain::Key;`
+    - `is_composite_key`: `static constexpr bool is_composite_key = Core::CompositeKeyType<KeyType>;`
+    - `key_arity`: `static constexpr std::size_t key_arity = KeyType::arity;`
+    - `column_names()`: `consteval` function returning `std::array<std::string_view, N>` of all DTO field names via `std::meta::identifier_of`.
+    - `key_column_names()`: `consteval` function returning `std::array<std::string_view, key_arity>` of key column names.
+    - `extract_key(const Domain&)` & `extract_dto_key(const DTO&)`: extracts `typename Domain::Key` from either a `Domain` instance or a `DTO` instance using `MapperTraits<Domain, DTO>`.
+    - `matches_key(const DTO& dto, const KeyType& key)`: compares `extract_dto_key(dto) == key` at runtime.
 
-### Phase 4: Unified `DbSet<Domain>` & Monadic Read Semantics
-- [ ] **Task 4.1:** Upgrade `DbSet` to use `Domain::Key` and `SchemaOf_t<Domain>` so `DbSet<Core::Person_Something>` works natively inside `AppDbContext` alongside `DbSet<Core::Person>` and `DbSet<Core::Something>`.
-- [ ] **Task 4.2:** Add `std::expected<..., Core::DbError>` read returns (`try_get_all()`, `try_find()`) so database read failures are never silently masked as empty results.
+### Phase 4: Unified `DbSet<Domain>` & Monadic Read Semantics *(Detailed Spec)*
+- [ ] **Task 4.1: Generalize `GenericRepository`, `DbSet`, and `DbContextBase` for Single & Composite Keys**
+  - **`DAL/repositories/GenericRepository.ixx`:**
+    - Support `KeyType` being a scalar (`std::int32_t`), strong ID (`Core::Id<Tag>`), `Core::SingleKey<K>`, or `Core::CompositeKey<K1, K2, ...>`.
+    - Use `if constexpr (Core::CompositeKeyType<KeyType>)` inside `get_by_id`, `delete_by_id`, and `exists_by_id`:
+      - Single-key path unwraps `SingleKey`/`Id` to `std::int32_t` and delegates to `conn_->get_by_id<DTO>(raw_id)` / `delete_by_id<DTO>(raw_id)` / `exists<DTO>(raw_id)`.
+      - Composite-key path matches DTOs via `Schema::EntityMetadata<Domain, DTO>::matches_key(dto, key)` for reads and unpacks key components into `conn_->delete_by_composite_id(...)` for deletes.
+  - **`DAL/context/DbSet.ixx` & `DAL/context/DbContext.ixx`:**
+    - Default `DTO = Schema::SchemaOf_t<Domain>` and `KeyType = typename Domain::Key` in `DbSet<Domain, DTO, ConnectionHandle, KeyType>`.
+    - Add `template<typename Domain, typename DTO = Schema::SchemaOf_t<Domain>, typename KeyType = typename Domain::Key> using Set = DbSet<Domain, DTO, ConnectionHandle, KeyType>;` inside `DbContextBase<ConnectionHandle>`.
+    - Add constructor overload on `DbSet` accepting `DbContextBase<ConnectionHandle>*` (or `std::shared_ptr<ConnectionHandle>`) so `Set<Core::Person> people{this};` works inline in `AppDbContext`.
+    - Provide ergonomic key overloads on `DbSet::find`, `DbSet::try_find`, `DbSet::remove`, and `DbSet::contains`:
+      - Direct `KeyType` (`SingleKey<K>` or `CompositeKey<K...>`)
+      - Unwrapped value/scalar for `SingleKeyType` (`PersonId{1}` or `1`)
+      - Variadic key components for `CompositeKeyType` (`db.personSomethings.find(Core::PersonId{1}, Core::SomethingId{1})`)
+  - **`Startup/main.cpp`:**
+    - Upgrade `AppDbContext` to declare `Set<Core::Person> people{this};`, `Set<Core::Something> somethings{this};`, and `Set<Core::Person_Something> personSomethings{this};`, removing the standalone `linkRepo` from `main.cpp`.
+- [ ] **Task 4.2: Monadic Read Semantics (`std::expected<..., Core::DbError>`)**
+  - **`DAL/context/SQLiteConnection.ixx` & `TestDatabaseConnection` (`DAL/tests/test_DAL.cpp`):**
+    - Add `try_fetch_all<DTO>() const -> std::expected<std::vector<DTO>, Core::DbError>` and `try_get_by_id<DTO>(std::int32_t) const -> std::expected<std::optional<DTO>, Core::DbError>`.
+  - **`Core/repositories/IGenericRepository.ixx` & `DAL/repositories/GenericRepository.ixx`:**
+    - Add `try_get_all() const -> std::expected<std::vector<Domain>, Core::DbError>` and `try_get_by_id(KeyType id) const -> std::expected<std::optional<Domain>, Core::DbError>` while preserving `get_all()` and `get_by_id()` for backward compatibility.
+  - **`DAL/context/DbSet.ixx`:**
+    - Expose `try_to_vector() const -> std::expected<std::vector<Domain>, Core::DbError>` and `try_find(...) const -> std::expected<std::optional<Domain>, Core::DbError>`.
+  - **`DAL/tests/test_DAL.cpp`:**
+    - Add unit tests covering generic `CompositePrimaryKey` on custom DTOs, `EntityMetadata` reflection queries, `SchemaOf_t`, `Set<Core::Person_Something>` composite CRUD via `DbContext`, and `try_to_vector()` / `try_find()` error propagation when the connection is closed or fails.
 
 ### Phase 5: SQL Query Pushdown (Eliminating Full-Table Scans)
 - [ ] **Task 5.1:** Refactor `SQLiteConnection::get_by_id`, `exists`, `count`, and `delete_by_id` to execute targeted `sqlgen` SQL statements (`WHERE`, `COUNT`, `DELETE`) instead of `fetch_all<DTO>()` in-memory loops and raw string formatting.
