@@ -4,6 +4,7 @@ module;
 export module dal:schema_person;
 
 import std;
+import core;
 import :schema_traits;
 
 export namespace DAL::Schema
@@ -16,5 +17,12 @@ export namespace DAL::Schema
         std::string last_name;
     };
 
+    template<>
+    struct SchemaOf<Core::Person>
+    {
+        using type = PersonDTO;
+    };
+
     static_assert(RelationalEntity<PersonDTO>, "PersonDTO fails RelationalEntity constraint.");
+    static_assert(HasSchema<Core::Person>, "Core::Person must satisfy HasSchema constraint.");
 } // namespace DAL::Schema

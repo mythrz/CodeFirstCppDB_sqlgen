@@ -26,6 +26,31 @@ export namespace DAL::Repositories
             return std::vector<Core::Person_Something>(domain_view.begin(), domain_view.end());
         }
 
+        [[nodiscard]] std::expected<std::vector<Core::Person_Something>, Core::DbError> try_get_all() const override
+        {
+            if constexpr (requires { conn_->template try_fetch_all<DAL::Schema::Person_SomethingDTO>(); })
+            {
+                auto res = conn_->template try_fetch_all<DAL::Schema::Person_SomethingDTO>();
+                if (!res)
+                {
+                    return std::unexpected<Core::DbError>{ res.error() };
+                }
+                auto domain_view = res.value() | std::views::transform(
+                    DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_domain);
+                return std::vector<Core::Person_Something>(domain_view.begin(), domain_view.end());
+            }
+            else
+            {
+                if (!conn_->is_open())
+                {
+                    return std::unexpected<Core::DbError>{
+                        Core::DbError::connection_error("Database connection is closed")
+                    };
+                }
+                return get_all();
+            }
+        }
+
         std::expected<void, Core::DbError> insert_one(const Core::Person_Something& item) override
         {
             auto dto = DAL::Mappers::MapperTraits<Core::Person_Something, DAL::Schema::Person_SomethingDTO>::to_dto(item);

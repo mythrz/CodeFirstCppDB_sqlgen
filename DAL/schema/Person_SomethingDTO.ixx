@@ -4,6 +4,7 @@ module;
 export module dal:schema_person_something;
 
 import std;
+import core;
 import :schema_traits;
 import :schema_person;
 import :schema_something;
@@ -18,10 +19,17 @@ export namespace DAL::Schema
         std::string association_type;
     };
 
+    template<>
+    struct SchemaOf<Core::Person_Something>
+    {
+        using type = Person_SomethingDTO;
+    };
+
     static_assert(
         RelationalEntity<Person_SomethingDTO>,
         "Person_SomethingDTO must satisfy RelationalEntity constraint as a composite-key entity.");
     static_assert(
         CompositePrimaryKey<Person_SomethingDTO>,
         "Person_SomethingDTO must satisfy CompositePrimaryKey constraint.");
+    static_assert(HasSchema<Core::Person_Something>, "Core::Person_Something must satisfy HasSchema constraint.");
 } // namespace DAL::Schema

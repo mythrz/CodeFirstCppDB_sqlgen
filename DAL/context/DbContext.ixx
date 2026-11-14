@@ -2,6 +2,7 @@ export module dal:db_context;
 
 import std;
 import core;
+import :schema_traits;
 import :generic_repo;
 import :db_set;
 
@@ -42,11 +43,19 @@ export namespace DAL
             return conn_ && conn_->is_open();
         }
 
+        // Type alias for zero-boilerplate DbSet declarations inside derived DbContext classes
+        template<typename Domain,
+                 typename DTO = Schema::SchemaOf_t<Domain>,
+                 typename KeyType = typename Domain::Key>
+        using Set = DbSet<Domain, DTO, ConnectionHandle, KeyType>;
+
         // Factory helper to construct a DbSet bound to this context's connection
-        template<typename Domain, typename DTO, typename KeyType = std::int32_t>
-        [[nodiscard]] DbSet<Domain, DTO, ConnectionHandle, KeyType> create_set() const
+        template<typename Domain,
+                 typename DTO = Schema::SchemaOf_t<Domain>,
+                 typename KeyType = typename Domain::Key>
+        [[nodiscard]] Set<Domain, DTO, KeyType> create_set() const
         {
-            return DbSet<Domain, DTO, ConnectionHandle, KeyType>(conn_);
+            return Set<Domain, DTO, KeyType>(conn_);
         }
 
         // Unit of Work save_changes: commits pending state and verifies connection health

@@ -3,6 +3,8 @@ export module dal:generic_repo;
 import std;
 import core;
 import :mappers;
+import :schema_traits;
+import :entity_metadata;
 
 export namespace DAL::Repositories
 {
@@ -44,10 +46,110 @@ export namespace DAL::Repositories
             return std::vector<Domain>(domain_view.begin(), domain_view.end());
         }
 
+        [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> try_get_all() const override
+        {
+            if constexpr (requires { conn_->template try_fetch_all<DTO>(); })
+            {
+                auto res = conn_->template try_fetch_all<DTO>();
+                if (!res)
+                {
+                    return std::unexpected<Core::DbError>{ res.error() };
+                }
+                auto domain_view = res.value() | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+                return std::vector<Domain>(domain_view.begin(), domain_view.end());
+            }
+            else
+            {
+                if (!conn_->is_open())
+                {
+                    return std::unexpected<Core::DbError>{
+                        Core::DbError::connection_error("Database connection is closed")
+                    };
+                }
+                return get_all();
+            }
+        }
+
         [[nodiscard]] std::optional<Domain> get_by_id(KeyType id) const override
         {
-            return conn_->template get_by_id<DTO>(static_cast<std::int32_t>(id)).transform(
-                DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+            if constexpr (Core::CompositeKeyType<KeyType>)
+            {
+                auto dtos = conn_->template fetch_all<DTO>();
+                for (const auto& dto : dtos)
+                {
+                    if (DAL::Schema::EntityMetadata<Domain, DTO>::matches_key(dto, id))
+                    {
+                        return DAL::Mappers::MapperTraits<Domain, DTO>::to_domain(dto);
+                    }
+                }
+                return std::nullopt;
+            }
+            else
+            {
+                return conn_->template get_by_id<DTO>(unwrap_single_key(id)).transform(
+                    DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+            }
+        }
+
+        [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_get_by_id(KeyType id) const override
+        {
+            if constexpr (Core::CompositeKeyType<KeyType>)
+            {
+                auto dtos_res = [this]() -> std::expected<std::vector<DTO>, Core::DbError> {
+                    if constexpr (requires { conn_->template try_fetch_all<DTO>(); })
+                    {
+                        return conn_->template try_fetch_all<DTO>();
+                    }
+                    else
+                    {
+                        if (!conn_->is_open())
+                        {
+                            return std::unexpected<Core::DbError>{
+                                Core::DbError::connection_error("Database connection is closed")
+                            };
+                        }
+                        return conn_->template fetch_all<DTO>();
+                    }
+                }();
+
+                if (!dtos_res)
+                {
+                    return std::unexpected<Core::DbError>{ dtos_res.error() };
+                }
+
+                for (const auto& dto : dtos_res.value())
+                {
+                    if (DAL::Schema::EntityMetadata<Domain, DTO>::matches_key(dto, id))
+                    {
+                        return std::optional<Domain>{
+                            DAL::Mappers::MapperTraits<Domain, DTO>::to_domain(dto)
+                        };
+                    }
+                }
+                return std::optional<Domain>{ std::nullopt };
+            }
+            else
+            {
+                if constexpr (requires { conn_->template try_get_by_id<DTO>(std::int32_t{}); })
+                {
+                    auto res = conn_->template try_get_by_id<DTO>(unwrap_single_key(id));
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ res.error() };
+                    }
+                    return res.value().transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+                }
+                else
+                {
+                    if (!conn_->is_open())
+                    {
+                        return std::unexpected<Core::DbError>{
+                            Core::DbError::connection_error("Database connection is closed")
+                        };
+                    }
+                    return get_by_id(id);
+                }
+            }
         }
 
         std::expected<void, Core::DbError> insert_one(const Domain& item) override
@@ -86,17 +188,40 @@ export namespace DAL::Repositories
 
         std::expected<void, Core::DbError> delete_by_id(KeyType id) override
         {
-            auto res = conn_->template delete_by_id<DTO>(static_cast<std::int32_t>(id));
-            if (!res)
+            if constexpr (Core::CompositeKeyType<KeyType>)
             {
-                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+                auto res = std::apply(
+                    [this](const auto&... parts) {
+                        return conn_->delete_by_composite_id(static_cast<std::int32_t>(parts)...);
+                    },
+                    id.tuple());
+                if (!res)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+                }
+                return {};
             }
-            return {};
+            else
+            {
+                auto res = conn_->template delete_by_id<DTO>(unwrap_single_key(id));
+                if (!res)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+                }
+                return {};
+            }
         }
 
         [[nodiscard]] bool exists_by_id(KeyType id) const override
         {
-            return conn_->template exists<DTO>(static_cast<std::int32_t>(id));
+            if constexpr (Core::CompositeKeyType<KeyType>)
+            {
+                return get_by_id(id).has_value();
+            }
+            else
+            {
+                return conn_->template exists<DTO>(unwrap_single_key(id));
+            }
         }
 
         [[nodiscard]] std::size_t count() const override
@@ -105,6 +230,18 @@ export namespace DAL::Repositories
         }
 
     protected:
+        [[nodiscard]] static constexpr std::int32_t unwrap_single_key(const KeyType& id) noexcept
+        {
+            if constexpr (Core::SingleKeyType<KeyType>)
+            {
+                return static_cast<std::int32_t>(id.get());
+            }
+            else
+            {
+                return static_cast<std::int32_t>(id);
+            }
+        }
+
         std::shared_ptr<ConnectionHandle> conn_;
     };
 

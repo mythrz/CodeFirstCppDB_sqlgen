@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 // #include "../extern/sqlgen/include/sqlgen/Result.hpp"
 #include "../../extern/sqlgen/include/sqlgen/Result.hpp"
+#include <sqlgen/PrimaryKey.hpp>
+#include <sqlgen/ForeignKey.hpp>
 
 import std;
 import core;
@@ -14,7 +16,12 @@ namespace
     public:
         [[nodiscard]] bool is_open() const noexcept
         {
-            return true;
+            return open_;
+        }
+
+        void set_open(bool open) noexcept
+        {
+            open_ = open;
         }
 
         template<typename DTO>
@@ -52,9 +59,33 @@ namespace
         }
 
         template<typename DTO>
+        std::expected<std::vector<DTO>, Core::DbError> try_fetch_all() const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TestDatabaseConnection is closed")
+                };
+            }
+            return get_storage<DTO>();
+        }
+
+        template<typename DTO>
         std::vector<DTO> fetch_all() const
         {
             return get_storage<DTO>();
+        }
+
+        template<typename DTO>
+        std::expected<std::optional<DTO>, Core::DbError> try_get_by_id(std::int32_t id) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TestDatabaseConnection is closed")
+                };
+            }
+            return std::optional<DTO>{ get_by_id<DTO>(id) };
         }
 
         template<typename DTO>
@@ -189,6 +220,7 @@ namespace
         }
 
     private:
+        bool open_{ true };
         std::vector<DAL::Schema::PersonDTO> persons_;
         std::vector<DAL::Schema::SomethingDTO> somethings_;
         std::vector<DAL::Schema::Person_SomethingDTO> person_somethings_;
@@ -731,6 +763,203 @@ namespace
         // 7. std::formatter support
         std::string formatted = std::format("{}", key);
         EXPECT_EQ(formatted, "CompositeKey(1, 99)");
+    }
+
+    // =========================================================================
+    // Phase 3 & 4 Tests: Reflection Schema Concepts, EntityMetadata,
+    // Unified Composite-Key DbSet, and Monadic Read Semantics
+    // =========================================================================
+
+    struct CustomOrderDTO
+    {
+        static constexpr auto tablename = "Orders";
+        sqlgen::PrimaryKey<std::int32_t, true> order_id{ 0 };
+        std::string code;
+    };
+
+    struct CustomProductDTO
+    {
+        static constexpr auto tablename = "Products";
+        sqlgen::PrimaryKey<std::int32_t, true> product_id{ 0 };
+        std::string sku;
+    };
+
+    struct Order_ProductDTO
+    {
+        static constexpr auto tablename = "Order_Product";
+        sqlgen::ForeignKey<std::int32_t, CustomOrderDTO, "order_id"> order_fk{ 0 };
+        sqlgen::ForeignKey<std::int32_t, CustomProductDTO, "product_id"> product_fk{ 0 };
+        std::int32_t quantity{ 1 };
+    };
+
+    struct MultiPrimaryKeyDTO
+    {
+        static constexpr auto tablename = "Tenant_Users";
+        sqlgen::PrimaryKey<std::int32_t, false> tenant_id{ 0 };
+        sqlgen::PrimaryKey<std::int32_t, false> user_id{ 0 };
+        std::string role;
+    };
+
+    struct PlainNonEntityDTO
+    {
+        static constexpr auto tablename = "Logs";
+        std::string message;
+    };
+
+    TEST(ReflectionSchemaTest, SingleAndCompositePrimaryKeyDetection)
+    {
+        static_assert(DAL::Schema::SinglePrimaryKey<CustomOrderDTO>);
+        static_assert(!DAL::Schema::CompositePrimaryKey<CustomOrderDTO>);
+        static_assert(DAL::Schema::RelationalEntity<CustomOrderDTO>);
+
+        static_assert(DAL::Schema::CompositePrimaryKey<Order_ProductDTO>);
+        static_assert(!DAL::Schema::SinglePrimaryKey<Order_ProductDTO>);
+        static_assert(DAL::Schema::RelationalEntity<Order_ProductDTO>);
+
+        static_assert(DAL::Schema::CompositePrimaryKey<MultiPrimaryKeyDTO>);
+        static_assert(!DAL::Schema::SinglePrimaryKey<MultiPrimaryKeyDTO>);
+        static_assert(DAL::Schema::RelationalEntity<MultiPrimaryKeyDTO>);
+
+        static_assert(!DAL::Schema::SinglePrimaryKey<PlainNonEntityDTO>);
+        static_assert(!DAL::Schema::CompositePrimaryKey<PlainNonEntityDTO>);
+        static_assert(!DAL::Schema::RelationalEntity<PlainNonEntityDTO>);
+
+        static_assert(std::same_as<DAL::Schema::SchemaOf_t<Core::Person>, DAL::Schema::PersonDTO>);
+        static_assert(std::same_as<DAL::Schema::SchemaOf_t<Core::Something>, DAL::Schema::SomethingDTO>);
+        static_assert(std::same_as<DAL::Schema::SchemaOf_t<Core::Person_Something>, DAL::Schema::Person_SomethingDTO>);
+        static_assert(DAL::Schema::HasSchema<Core::Person>);
+        static_assert(DAL::Schema::HasSchema<Core::Something>);
+        static_assert(DAL::Schema::HasSchema<Core::Person_Something>);
+        SUCCEED();
+    }
+
+    TEST(ReflectionSchemaTest, EntityMetadataQueriesAndKeyMatching)
+    {
+        using PersonMeta = DAL::Schema::EntityMetadata<Core::Person>;
+        static_assert(PersonMeta::table_name == "Person");
+        static_assert(!PersonMeta::is_composite_key);
+        static_assert(PersonMeta::key_arity == 1);
+        constexpr auto personCols = PersonMeta::column_names();
+        static_assert(personCols.size() == 3);
+        static_assert(personCols[0] == "id");
+        static_assert(personCols[1] == "first_name");
+        static_assert(personCols[2] == "last_name");
+        constexpr auto personKeyCols = PersonMeta::key_column_names();
+        static_assert(personKeyCols.size() == 1);
+        static_assert(personKeyCols[0] == "id");
+
+        using LinkMeta = DAL::Schema::EntityMetadata<Core::Person_Something>;
+        static_assert(LinkMeta::table_name == "Person_Something");
+        static_assert(LinkMeta::is_composite_key);
+        static_assert(LinkMeta::key_arity == 2);
+        constexpr auto linkCols = LinkMeta::column_names();
+        static_assert(linkCols.size() == 3);
+        static_assert(linkCols[0] == "person_id");
+        static_assert(linkCols[1] == "something_id");
+        static_assert(linkCols[2] == "association_type");
+        constexpr auto linkKeyCols = LinkMeta::key_column_names();
+        static_assert(linkKeyCols.size() == 2);
+        static_assert(linkKeyCols[0] == "person_id");
+        static_assert(linkKeyCols[1] == "something_id");
+
+        Core::Person_Something link(Core::PersonId{ 7 }, Core::SomethingId{ 11 }, "Maintainer");
+        auto extracted = LinkMeta::extract_key(link);
+        EXPECT_EQ(extracted, (Core::CompositeKey<Core::PersonId, Core::SomethingId>{ Core::PersonId{ 7 }, Core::SomethingId{ 11 } }));
+
+        DAL::Schema::Person_SomethingDTO dto{ .person_id = 7, .something_id = 11, .association_type = "Maintainer" };
+        EXPECT_TRUE(LinkMeta::matches_key(dto, extracted));
+        EXPECT_FALSE(LinkMeta::matches_key(dto, Core::CompositeKey{ Core::PersonId{ 7 }, Core::SomethingId{ 12 } }));
+    }
+
+    TEST_F(SqlgenExampleTest, UnifiedDbContextSetWithSingleAndCompositeKeys)
+    {
+        struct TestAppDbContext : public DAL::DbContextBase<TestDatabaseConnection>
+        {
+            Set<Core::Person> people{ this };
+            Set<Core::Something> somethings{ this };
+            Set<Core::Person_Something> personSomethings{ this };
+
+            explicit TestAppDbContext(std::shared_ptr<TestDatabaseConnection> c)
+                : DAL::DbContextBase<TestDatabaseConnection>(std::move(c))
+            {
+            }
+        };
+
+        TestAppDbContext db(conn);
+
+        // Single-key ergonomic find/contains/remove (scalar, strong ID, and SingleKey)
+        auto pByInt = db.people.find(1);
+        ASSERT_TRUE(pByInt.has_value());
+        EXPECT_EQ(pByInt->getFirstName(), "test1");
+
+        auto pById = db.people.find(Core::PersonId{ 2 });
+        ASSERT_TRUE(pById.has_value());
+        EXPECT_EQ(pById->getFirstName(), "test2");
+
+        EXPECT_TRUE(db.people.contains(Core::SingleKey{ Core::PersonId{ 1 } }));
+
+        // Composite-key CRUD via Set<Core::Person_Something>
+        const std::size_t initialCount = db.personSomethings.count();
+        Core::Person_Something link1(Core::PersonId{ 10 }, Core::SomethingId{ 10 }, "Owner");
+        Core::Person_Something link2(Core::PersonId{ 20 }, Core::SomethingId{ 20 }, "Viewer");
+        ASSERT_TRUE(db.personSomethings.add(link1).has_value());
+        ASSERT_TRUE(db.personSomethings.add(link2).has_value());
+        EXPECT_EQ(db.personSomethings.count(), initialCount + 2);
+
+        // Find via variadic composite key components
+        auto foundVariadic = db.personSomethings.find(Core::PersonId{ 10 }, Core::SomethingId{ 10 });
+        ASSERT_TRUE(foundVariadic.has_value());
+        EXPECT_EQ(foundVariadic->getAssociationType(), "Owner");
+
+        // Find via explicit CompositeKey
+        Core::Person_Something::Key key2(Core::PersonId{ 20 }, Core::SomethingId{ 20 });
+        auto foundKey = db.personSomethings.find(key2);
+        ASSERT_TRUE(foundKey.has_value());
+        EXPECT_EQ(foundKey->getAssociationType(), "Viewer");
+
+        EXPECT_TRUE(db.personSomethings.contains(Core::PersonId{ 10 }, Core::SomethingId{ 10 }));
+        EXPECT_FALSE(db.personSomethings.contains(Core::PersonId{ 10 }, Core::SomethingId{ 99 }));
+
+        // Remove via variadic composite key components
+        ASSERT_TRUE(db.personSomethings.remove(Core::PersonId{ 10 }, Core::SomethingId{ 10 }).has_value());
+        EXPECT_FALSE(db.personSomethings.contains(Core::PersonId{ 10 }, Core::SomethingId{ 10 }));
+        EXPECT_EQ(db.personSomethings.count(), initialCount + 1);
+    }
+
+    TEST_F(SqlgenExampleTest, MonadicReadErrorPropagationWhenConnectionClosed)
+    {
+        DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, TestDatabaseConnection> people(conn);
+        DAL::DbSet<Core::Person_Something, DAL::Schema::Person_SomethingDTO, TestDatabaseConnection> links(conn);
+
+        ASSERT_TRUE(links.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner")).has_value());
+
+        // Succeeds while open
+        auto allPeople = people.try_to_vector();
+        ASSERT_TRUE(allPeople.has_value());
+        EXPECT_EQ(allPeople->size(), 2u);
+
+        auto foundPerson = people.try_find(1);
+        ASSERT_TRUE(foundPerson.has_value());
+        EXPECT_TRUE(foundPerson->has_value());
+
+        auto foundLink = links.try_find(Core::PersonId{ 1 }, Core::SomethingId{ 1 });
+        ASSERT_TRUE(foundLink.has_value());
+        EXPECT_TRUE(foundLink->has_value());
+
+        // Fails with ConnectionError when connection is closed
+        conn->set_open(false);
+
+        auto closedAll = people.try_to_vector();
+        ASSERT_FALSE(closedAll.has_value());
+        EXPECT_EQ(closedAll.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto closedFind = people.try_find(1);
+        ASSERT_FALSE(closedFind.has_value());
+        EXPECT_EQ(closedFind.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto closedLinkFind = links.try_find(Core::PersonId{ 1 }, Core::SomethingId{ 1 });
+        ASSERT_FALSE(closedLinkFind.has_value());
+        EXPECT_EQ(closedLinkFind.error().code, Core::DbErrorCode::ConnectionError);
     }
 
 } // namespace

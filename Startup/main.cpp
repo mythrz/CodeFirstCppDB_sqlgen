@@ -9,13 +9,12 @@ import dal;
 class AppDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
 {
 public:
-    DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection> people;
-    DAL::DbSet<Core::Something, DAL::Schema::SomethingDTO, DAL::SQLiteConnection> somethings;
+    Set<Core::Person> people{ this };
+    Set<Core::Something> somethings{ this };
+    Set<Core::Person_Something> personSomethings{ this };
 
     explicit AppDbContext(std::shared_ptr<DAL::SQLiteConnection> conn)
-        : DAL::DbContextBase<DAL::SQLiteConnection>(conn)
-        , people(conn)
-        , somethings(conn)
+        : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(conn))
     {
     }
 };
@@ -69,9 +68,8 @@ int main(int argc, char* argv[])
     // 2. Wrap the SQLite connection in DAL's connection adapter
     auto connAdapter = std::make_shared<DAL::SQLiteConnection>(rawConn);
 
-    // 3. Initialize DbContext and junction repository
+    // 3. Initialize DbContext (unified single & composite key DbSets)
     AppDbContext db(connAdapter);
-    DAL::Repositories::SQLitePerson_SomethingRepo<DAL::SQLiteConnection> linkRepo(connAdapter);
 
     // 4. Seed database via clean entity and repository abstractions
     std::println("Inserting initial entities via DbContext / Repositories...");
@@ -98,11 +96,12 @@ int main(int argc, char* argv[])
 
     Core::Person_Something link1(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner");
     Core::Person_Something link2(Core::PersonId{ 2 }, Core::SomethingId{ 2 }, "User");
-    auto l1 = linkRepo.insert_one(link1);
-    auto l2 = linkRepo.insert_one(link2);
+    auto l1 = db.personSomethings.add(link1);
+    auto l2 = db.personSomethings.add(link2);
     if (!l1 || !l2)
     {
-        std::println(stderr, "Failed to insert junction entities.");
+        if (!l1) std::println(stderr, "Failed to insert junction entity 1: {}", l1.error().to_string());
+        if (!l2) std::println(stderr, "Failed to insert junction entity 2: {}", l2.error().to_string());
         return 1;
     }
 
@@ -129,8 +128,8 @@ int main(int argc, char* argv[])
         std::println("Something [ID: {}]: {} ({}) - {}", s.getId(), s.getName(), s.getCategory(), s.getDescription().value_or("N/A"));
     }
 
-    std::println("--- Person_Something Junction Entities (via linkRepo) ---");
-    for (const auto& link : linkRepo.get_all())
+    std::println("--- Person_Something Junction Entities (via db.personSomethings) ---");
+    for (const auto& link : db.personSomethings.to_vector())
     {
         std::println("Person_Something: PersonID {} <-> SomethingID {} ({})",
                      link.getPersonId(), link.getSomethingId(), link.getAssociationType());

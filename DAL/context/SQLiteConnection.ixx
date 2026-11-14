@@ -35,29 +35,61 @@ export namespace DAL
         }
 
         template<typename DTO>
+        [[nodiscard]] std::expected<std::vector<DTO>, Core::DbError> try_fetch_all() const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto res = sqlgen::read<std::vector<DTO>>(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return res.value();
+        }
+
+        template<typename DTO>
         [[nodiscard]] std::vector<DTO> fetch_all() const
         {
-            auto res = sqlgen::read<std::vector<DTO>>(conn_);
+            auto res = try_fetch_all<DTO>();
             if (res)
             {
-                return res.value();
+                return std::move(res.value());
             }
             return {};
         }
 
         template<typename DTO>
-        [[nodiscard]] std::optional<DTO> get_by_id(std::int32_t id) const
+        [[nodiscard]] std::expected<std::optional<DTO>, Core::DbError> try_get_by_id(std::int32_t id) const
         {
-            auto all = fetch_all<DTO>();
-            for (const auto& item : all)
+            auto all_res = try_fetch_all<DTO>();
+            if (!all_res)
+            {
+                return std::unexpected<Core::DbError>{ all_res.error() };
+            }
+            for (const auto& item : all_res.value())
             {
                 if constexpr (requires { item.id; })
                 {
                     if (item.id.value() == id)
                     {
-                        return item;
+                        return std::optional<DTO>{ item };
                     }
                 }
+            }
+            return std::optional<DTO>{ std::nullopt };
+        }
+
+        template<typename DTO>
+        [[nodiscard]] std::optional<DTO> get_by_id(std::int32_t id) const
+        {
+            auto res = try_get_by_id<DTO>(id);
+            if (res)
+            {
+                return std::move(res.value());
             }
             return std::nullopt;
         }
