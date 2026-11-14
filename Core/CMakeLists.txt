@@ -4,6 +4,7 @@ target_sources(Core
     PUBLIC
     FILE_SET CXX_MODULES FILES
     Id.ixx
+    Key.ixx
     entities/Person.ixx
     entities/Something.ixx
     entities/Person_Something.ixx

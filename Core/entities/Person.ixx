@@ -2,12 +2,15 @@ export module core:person;
 
 import std;
 import :id;
+import :key;
 
 export namespace Core
 {
     class Person
     {
     public:
+        using Key = SingleKey<PersonId>;
+
         Person() = default;
         Person(PersonId id, std::string firstName, std::string lastName)
             : id_(id)
@@ -20,6 +23,11 @@ export namespace Core
         [[nodiscard]] PersonId getId() const noexcept
         {
             return id_;
+        }
+
+        [[nodiscard]] Key getKey() const noexcept
+        {
+            return Key{ id_ };
         }
 
         [[nodiscard]] const std::string& getFirstName() const noexcept

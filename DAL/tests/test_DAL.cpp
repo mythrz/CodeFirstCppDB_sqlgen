@@ -640,4 +640,97 @@ namespace
         EXPECT_EQ(parsedUnknown.code, Core::DbErrorCode::Unknown);
     }
 
+    // Task 2.1: Compile-time SingleKey and CompositeKey tests
+    TEST(CompileTimeKeysTest, SingleKey_PropertiesAndOperations)
+    {
+        // 1. Compile-time concepts and traits
+        static_assert(Core::SingleKeyType<Core::SingleKey<Core::PersonId>>);
+        static_assert(Core::Key<Core::SingleKey<Core::PersonId>>);
+        static_assert(!Core::CompositeKeyType<Core::SingleKey<Core::PersonId>>);
+        static_assert(Core::SingleKey<Core::PersonId>::arity == 1);
+        static_assert(!Core::SingleKey<Core::PersonId>::is_composite);
+
+        // 2. Construction and value access
+        Core::SingleKey<Core::PersonId> key(Core::PersonId{ 42 });
+        EXPECT_EQ(key.value.get(), 42);
+        EXPECT_EQ(key.get().get(), 42);
+
+        // Implicit conversion to underlying key type
+        Core::PersonId rawId = key;
+        EXPECT_EQ(rawId.get(), 42);
+
+        // 3. Helper factory deduction
+        auto deducedKey = Core::make_single_key(Core::SomethingId{ 100 });
+        static_assert(std::is_same_v<decltype(deducedKey), Core::SingleKey<Core::SomethingId>>);
+        EXPECT_EQ(deducedKey.get().get(), 100);
+
+        // 4. Comparison
+        Core::SingleKey<int> k1(5);
+        Core::SingleKey<int> k2(5);
+        Core::SingleKey<int> k3(10);
+        EXPECT_EQ(k1, k2);
+        EXPECT_LT(k1, k3);
+
+        // 5. Entity integration
+        Core::Person person(Core::PersonId{ 7 }, "Ada", "Lovelace");
+        auto personKey = person.getKey();
+        static_assert(std::is_same_v<decltype(personKey), Core::Person::Key>);
+        EXPECT_EQ(personKey.get().get(), 7);
+
+        // 6. std::formatter support
+        std::string formatted = std::format("{}", k1);
+        EXPECT_EQ(formatted, "SingleKey(5)");
+    }
+
+    TEST(CompileTimeKeysTest, CompositeKey_PropertiesAndOperations)
+    {
+        // 1. Compile-time concepts and traits
+        using TwoPartKey = Core::CompositeKey<Core::PersonId, Core::SomethingId>;
+        static_assert(Core::CompositeKeyType<TwoPartKey>);
+        static_assert(Core::Key<TwoPartKey>);
+        static_assert(!Core::SingleKeyType<TwoPartKey>);
+        static_assert(TwoPartKey::arity == 2);
+        static_assert(TwoPartKey::is_composite);
+
+        // 2. Construction
+        TwoPartKey key(Core::PersonId{ 1 }, Core::SomethingId{ 99 });
+        EXPECT_EQ(key.get<0>().get(), 1);
+        EXPECT_EQ(key.get<1>().get(), 99);
+
+        // Type-based element access
+        EXPECT_EQ(key.get<Core::PersonId>().get(), 1);
+        EXPECT_EQ(key.get<Core::SomethingId>().get(), 99);
+
+        // 3. Structured binding support
+        auto [pid, sid] = key;
+        EXPECT_EQ(pid.get(), 1);
+        EXPECT_EQ(sid.get(), 99);
+
+        // 4. Factory helper and 3-column composite key
+        auto tripleKey = Core::make_composite_key(std::string("tenant_A"), 42, true);
+        static_assert(decltype(tripleKey)::arity == 3);
+        static_assert(decltype(tripleKey)::is_composite);
+        auto [tenant, idVal, flag] = tripleKey;
+        EXPECT_EQ(tenant, "tenant_A");
+        EXPECT_EQ(idVal, 42);
+        EXPECT_TRUE(flag);
+
+        // 5. Comparison
+        TwoPartKey otherKey(Core::PersonId{ 1 }, Core::SomethingId{ 99 });
+        TwoPartKey diffKey(Core::PersonId{ 1 }, Core::SomethingId{ 100 });
+        EXPECT_EQ(key, otherKey);
+        EXPECT_LT(key, diffKey);
+
+        // 6. Entity integration (Person_Something junction entity)
+        Core::Person_Something link(Core::PersonId{ 3 }, Core::SomethingId{ 4 }, "Admin");
+        auto linkKey = link.getKey();
+        static_assert(std::is_same_v<decltype(linkKey), Core::Person_Something::Key>);
+        EXPECT_EQ(linkKey.get<0>().get(), 3);
+        EXPECT_EQ(linkKey.get<1>().get(), 4);
+
+        // 7. std::formatter support
+        std::string formatted = std::format("{}", key);
+        EXPECT_EQ(formatted, "CompositeKey(1, 99)");
+    }
+
 } // namespace

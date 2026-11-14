@@ -2,12 +2,15 @@ export module core:person_something;
 
 import std;
 import :id;
+import :key;
 
 export namespace Core
 {
     class Person_Something
     {
     public:
+        using Key = CompositeKey<PersonId, SomethingId>;
+
         Person_Something() = default;
         Person_Something(PersonId personId, SomethingId somethingId, std::string associationType)
             : personId_(personId)
@@ -25,6 +28,11 @@ export namespace Core
         [[nodiscard]] SomethingId getSomethingId() const noexcept
         {
             return somethingId_;
+        }
+
+        [[nodiscard]] Key getKey() const noexcept
+        {
+            return Key{ personId_, somethingId_ };
         }
 
         [[nodiscard]] const std::string& getAssociationType() const noexcept

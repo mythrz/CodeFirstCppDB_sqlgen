@@ -2,12 +2,15 @@ export module core:something;
 
 import std;
 import :id;
+import :key;
 
 export namespace Core
 {
     class Something
     {
     public:
+        using Key = SingleKey<SomethingId>;
+
         Something() = default;
         Something(SomethingId id, std::string name, std::string category, std::optional<std::string> description = std::nullopt)
             : id_(id)
@@ -21,6 +24,11 @@ export namespace Core
         [[nodiscard]] SomethingId getId() const noexcept
         {
             return id_;
+        }
+
+        [[nodiscard]] Key getKey() const noexcept
+        {
+            return Key{ id_ };
         }
 
         [[nodiscard]] const std::string& getName() const noexcept

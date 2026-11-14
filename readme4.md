@@ -690,7 +690,7 @@ gantt
 - [x] **Task 1.5:** Refactor `Startup/main.cpp` to consume repositories and `DbContext` polymorphically, eliminating leaky DTO mapper calls.
 
 ### Phase 2: Generalized Key Model & Composite Key Junction Support
-- [ ] **Task 2.1:** Implement compile-time `SingleKey<KeyType>` and `CompositeKey<KeyTypes...>`.
+- [x] **Task 2.1:** Implement compile-time `SingleKey<KeyType>` and `CompositeKey<KeyTypes...>`.
 - [x] **Task 2.2:** Update `IGenericRepository` with `IRepository` base and parameterized `KeyType`.
 - [x] **Task 2.3:** Redesign `Person_Something` and `Person_SomethingDTO` to satisfy `RelationalEntity` and `CompositePrimaryKey`.
 - [x] **Task 2.4:** Implement composite-key lookup (`get_by_composite_id`, `delete_by_composite_id`, `find_by_person_id`, `find_by_something_id`).
