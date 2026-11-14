@@ -310,4 +310,116 @@ export namespace DAL::Schema
         requires RelationalEntity<DTO>
     using EntityKey_t = typename EntityKey<Domain, DTO>::type;
 
+    // =========================================================================
+    // Phase 9: Compile-Time Topological Foreign-Key Sorting
+    // =========================================================================
+
+    template<typename DTO>
+    consteval auto foreign_table_types_of()
+    {
+        static constexpr auto members = std::define_static_array(
+            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
+        std::array<std::meta::info, foreign_key_count<DTO>()> targets{};
+        std::size_t idx = 0;
+
+        template for (constexpr auto m : members)
+        {
+            using RawFieldType = [:std::meta::type_of(m):];
+            using FieldType = std::remove_cvref_t<RawFieldType>;
+            if constexpr (SqlgenForeignKeyField<FieldType>)
+            {
+                targets[idx++] = std::meta::dealias(^^typename FieldType::ForeignTableType);
+            }
+        }
+        return targets;
+    }
+
+    // Computes a topological ordering (parents before children) from a dependency matrix
+    // where depends_on[child][parent] == true. Preserves declaration order for ties.
+    template<std::size_t N>
+    consteval std::array<std::size_t, N> kahn_topological_sort(
+        const std::array<std::array<bool, N>, N>& depends_on)
+    {
+        std::array<std::size_t, N> in_degree{};
+        for (std::size_t c = 0; c < N; ++c)
+        {
+            for (std::size_t p = 0; p < N; ++p)
+            {
+                if (depends_on[c][p])
+                {
+                    ++in_degree[c];
+                }
+            }
+        }
+
+        std::array<std::size_t, N> order{};
+        std::array<bool, N> visited{};
+        std::size_t out_idx = 0;
+
+        for (std::size_t step = 0; step < N; ++step)
+        {
+            bool found = false;
+            for (std::size_t i = 0; i < N; ++i)
+            {
+                if (!visited[i] && in_degree[i] == 0)
+                {
+                    visited[i] = true;
+                    order[out_idx++] = i;
+                    for (std::size_t c = 0; c < N; ++c)
+                    {
+                        if (depends_on[c][i])
+                        {
+                            --in_degree[c];
+                        }
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                throw std::invalid_argument("Cyclic foreign-key dependency detected among DTOs");
+            }
+        }
+
+        return order;
+    }
+
+    template<std::size_t N>
+    consteval std::array<std::size_t, N> reverse_index_array(const std::array<std::size_t, N>& arr)
+    {
+        std::array<std::size_t, N> rev{};
+        for (std::size_t i = 0; i < N; ++i)
+        {
+            rev[i] = arr[N - 1 - i];
+        }
+        return rev;
+    }
+
+    template<typename... DTOs>
+    consteval std::array<std::size_t, sizeof...(DTOs)> topological_dto_order()
+    {
+        constexpr std::size_t N = sizeof...(DTOs);
+        constexpr std::array<std::meta::info, N> types{ std::meta::dealias(^^DTOs)... };
+        std::array<std::array<bool, N>, N> depends_on{};
+
+        std::size_t child_idx = 0;
+        (([&]() {
+            constexpr auto targets = foreign_table_types_of<DTOs>();
+            for (std::meta::info target : targets)
+            {
+                for (std::size_t parent_idx = 0; parent_idx < N; ++parent_idx)
+                {
+                    if (parent_idx != child_idx && types[parent_idx] == target)
+                    {
+                        depends_on[child_idx][parent_idx] = true;
+                    }
+                }
+            }
+            ++child_idx;
+        }()), ...);
+
+        return kahn_topological_sort<N>(depends_on);
+    }
+
 } // namespace DAL::Schema

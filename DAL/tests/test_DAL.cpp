@@ -1665,4 +1665,65 @@ namespace
         ASSERT_TRUE(db.ensure_deleted().has_value());
     }
 
+    // =========================================================================
+    // Phase 9 Tests: Compile-Time Topological Foreign-Key Sorting
+    // =========================================================================
+
+    class ReversedOrderPocoDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+    public:
+        // Child junction table intentionally declared FIRST, parents AFTER
+        Set<PocoUserRole> userRoles{ this };
+        Set<PocoRole> roles{ this };
+        Set<PocoUser> users{ this };
+
+        explicit ReversedOrderPocoDbContext(std::shared_ptr<DAL::SQLiteConnection> conn)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(conn))
+        {
+        }
+    };
+
+    TEST(Phase9TopologicalFkSortTest, CompileTimeTopologicalOrder_ParentsBeforeChildren)
+    {
+        // Input order: 0 = PocoUserRole (child), 1 = PocoRole (parent), 2 = PocoUser (parent)
+        constexpr auto order = DAL::Schema::topological_dto_order<PocoUserRole, PocoRole, PocoUser>();
+        static_assert(order[0] == 1); // PocoRole
+        static_assert(order[1] == 2); // PocoUser
+        static_assert(order[2] == 0); // PocoUserRole (after both parents)
+
+        constexpr auto rev = DAL::Schema::reverse_index_array(order);
+        static_assert(rev[0] == 0); // PocoUserRole dropped first
+        static_assert(rev[1] == 2); // PocoUser
+        static_assert(rev[2] == 1); // PocoRole
+        SUCCEED();
+    }
+
+    TEST(Phase9TopologicalFkSortTest, EnsureCreatedAndDeleted_IndependentOfMemberDeclarationOrder)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        ReversedOrderPocoDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.users.add(PocoUser{ .username = "bob" }).has_value());
+        ASSERT_TRUE(db.roles.add(PocoRole{ .role_name = "Editor" }).has_value());
+        ASSERT_TRUE(db.userRoles.add(PocoUserRole{ .user_id = 1, .role_id = 1, .assigned_by = "admin" }).has_value());
+
+        EXPECT_EQ(db.users.count(), 1u);
+        EXPECT_EQ(db.roles.count(), 1u);
+        EXPECT_EQ(db.userRoles.count(), 1u);
+
+        // Even with PRAGMA foreign_keys = ON and child declared first, ensure_deleted()
+        // drops PocoUserRoles before PocoUsers and PocoRoles without FK errors.
+        auto dropRes = db.ensure_deleted();
+        ASSERT_TRUE(dropRes.has_value()) << dropRes.error().to_string();
+
+        // Recreate cleanly
+        ASSERT_TRUE(db.ensure_created().has_value());
+        EXPECT_EQ(db.users.count(), 0u);
+        EXPECT_EQ(db.roles.count(), 0u);
+        EXPECT_EQ(db.userRoles.count(), 0u);
+    }
+
 } // namespace

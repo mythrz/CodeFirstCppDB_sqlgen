@@ -269,8 +269,8 @@ flowchart LR
 - [x] **Task 8.2: Automatic `InferredKey_t<DTO>` Fallback (`DAL/schema/SchemaTraits.ixx` & `EntityMetadata.ixx`)**
   - Use C++26 `<meta>` over `key_members_of<DTO>()` to synthesize `Core::SingleKey<V>` or `Core::CompositeKey<V1, V2, ...>` automatically when `Domain::Key` is not manually defined on a POCO struct.
 
-### Phase 9: Compile-Time Topological Foreign-Key Sorting
-- [ ] **Task 9.1: `consteval` Foreign-Key Dependency Graph (`DAL/schema/SchemaTraits.ixx`)**
+### Phase 9: Compile-Time Topological Foreign-Key Sorting *(Completed)*
+- [x] **Task 9.1: `consteval` Foreign-Key Dependency Graph (`DAL/schema/SchemaTraits.ixx`)**
   - Inspect `SqlgenForeignKeyField<F>::ForeignTableType` across all reflected `Set<T>` DTOs in a `DbContext` at compile time (`consteval`) to compute a topological creation order (parents before children) and reverse deletion order (children before parents), making `db.ensure_created()` and `db.ensure_deleted()` completely independent of member declaration order in `AppDbContext`.
 
 ### Phase 10: Server-Side Query Builder (`where_col`, `order_by`, `page`) & Dirty-Checking `ChangeTracker`

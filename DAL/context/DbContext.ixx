@@ -66,8 +66,90 @@ export namespace DAL
         }
 
         // =====================================================================
-        // Reflection-Driven Schema Creation (db.ensure_created())
+        // Reflection-Driven Schema Creation & Deletion (Topologically Sorted)
         // =====================================================================
+
+        template<typename DerivedType>
+        static consteval std::size_t dbset_member_count()
+        {
+            static constexpr auto members = std::define_static_array(
+                std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
+            std::size_t count = 0;
+            template for (constexpr auto m : members)
+            {
+                using RawMemberType = [:std::meta::type_of(m):];
+                using MemberType = std::remove_cvref_t<RawMemberType>;
+                if constexpr (IsDbSetMember<MemberType>)
+                {
+                    ++count;
+                }
+            }
+            return count;
+        }
+
+        template<typename DerivedType>
+        static consteval auto dbset_members_of()
+        {
+            static constexpr auto members = std::define_static_array(
+                std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
+            constexpr std::size_t K = dbset_member_count<DerivedType>();
+            std::array<std::meta::info, K> result{};
+            std::size_t idx = 0;
+            template for (constexpr auto m : members)
+            {
+                using RawMemberType = [:std::meta::type_of(m):];
+                using MemberType = std::remove_cvref_t<RawMemberType>;
+                if constexpr (IsDbSetMember<MemberType>)
+                {
+                    result[idx++] = m;
+                }
+            }
+            return result;
+        }
+
+        template<typename DerivedType>
+        static consteval auto topological_dbset_order()
+        {
+            constexpr std::size_t K = dbset_member_count<DerivedType>();
+            static constexpr auto dbset_members = dbset_members_of<DerivedType>();
+
+            std::array<std::meta::info, K> dto_types{};
+            for (std::size_t i = 0; i < K; ++i)
+            {
+                dto_types[i] = dbset_members[i];
+            }
+
+            std::array<std::meta::info, K> resolved_dtos{};
+            std::size_t idx = 0;
+            template for (constexpr auto m : dbset_members)
+            {
+                using RawMemberType = [:std::meta::type_of(m):];
+                using MemberType = std::remove_cvref_t<RawMemberType>;
+                resolved_dtos[idx++] = std::meta::dealias(^^typename MemberType::DTOType);
+            }
+
+            std::array<std::array<bool, K>, K> depends_on{};
+            std::size_t child_idx = 0;
+            template for (constexpr auto m : dbset_members)
+            {
+                using RawMemberType = [:std::meta::type_of(m):];
+                using MemberType = std::remove_cvref_t<RawMemberType>;
+                constexpr auto targets = Schema::foreign_table_types_of<typename MemberType::DTOType>();
+                for (std::meta::info target : targets)
+                {
+                    for (std::size_t parent_idx = 0; parent_idx < K; ++parent_idx)
+                    {
+                        if (parent_idx != child_idx && resolved_dtos[parent_idx] == target)
+                        {
+                            depends_on[child_idx][parent_idx] = true;
+                        }
+                    }
+                }
+                ++child_idx;
+            }
+
+            return Schema::kahn_topological_sort<K>(depends_on);
+        }
 
         template<typename Self>
         std::expected<void, Core::DbError> ensure_created(this Self&& self)
@@ -80,20 +162,18 @@ export namespace DAL
             }
 
             using DerivedType = std::remove_cvref_t<Self>;
-            static constexpr auto members = std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
+            static constexpr auto dbset_members = dbset_members_of<DerivedType>();
+            static constexpr auto order = topological_dbset_order<DerivedType>();
 
             std::expected<void, Core::DbError> result{};
-            template for (constexpr auto m : members)
+            template for (constexpr std::size_t idx : order)
             {
+                constexpr auto m = dbset_members[idx];
                 using RawMemberType = [:std::meta::type_of(m):];
                 using MemberType = std::remove_cvref_t<RawMemberType>;
-                if constexpr (IsDbSetMember<MemberType>)
+                if (result)
                 {
-                    if (result)
-                    {
-                        result = self.conn_->template ensure_table_created<typename MemberType::DTOType>();
-                    }
+                    result = self.conn_->template ensure_table_created<typename MemberType::DTOType>();
                 }
             }
 
@@ -115,25 +195,22 @@ export namespace DAL
                 };
             }
 
-            std::expected<void, Core::DbError> result{};
-            (([&] {
-                if (result)
-                {
-                    result = conn_->template ensure_table_created<Schema::SchemaOf_t<Domains>>();
-                }
-            }()), ...);
+            static constexpr auto order = Schema::topological_dto_order<Schema::SchemaOf_t<Domains>...>();
+            std::array<std::function<std::expected<void, Core::DbError>()>, sizeof...(Domains)> creators{
+                [this]() { return conn_->template ensure_table_created<Schema::SchemaOf_t<Domains>>(); }...
+            };
 
-            if (!result)
+            for (std::size_t idx : order)
             {
-                return result;
+                auto res = creators[idx]();
+                if (!res)
+                {
+                    return res;
+                }
             }
 
             return conn_->enable_foreign_keys();
         }
-
-        // =====================================================================
-        // Reflection-Driven Schema Deletion (db.ensure_deleted())
-        // =====================================================================
 
         template<typename Self>
         std::expected<void, Core::DbError> ensure_deleted(this Self&& self)
@@ -146,28 +223,18 @@ export namespace DAL
             }
 
             using DerivedType = std::remove_cvref_t<Self>;
-            static constexpr auto members = std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
-            static constexpr auto reversed_members = []() consteval {
-                std::array<std::meta::info, members.size()> rev{};
-                for (std::size_t i = 0; i < members.size(); ++i)
-                {
-                    rev[i] = members[members.size() - 1 - i];
-                }
-                return rev;
-            }();
+            static constexpr auto dbset_members = dbset_members_of<DerivedType>();
+            static constexpr auto order = Schema::reverse_index_array(topological_dbset_order<DerivedType>());
 
             std::expected<void, Core::DbError> result{};
-            template for (constexpr auto m : reversed_members)
+            template for (constexpr std::size_t idx : order)
             {
+                constexpr auto m = dbset_members[idx];
                 using RawMemberType = [:std::meta::type_of(m):];
                 using MemberType = std::remove_cvref_t<RawMemberType>;
-                if constexpr (IsDbSetMember<MemberType>)
+                if (result)
                 {
-                    if (result)
-                    {
-                        result = self.conn_->template ensure_table_dropped<typename MemberType::DTOType>();
-                    }
+                    result = self.conn_->template ensure_table_dropped<typename MemberType::DTOType>();
                 }
             }
 
@@ -184,14 +251,15 @@ export namespace DAL
                 };
             }
 
-            static constexpr std::size_t count = sizeof...(Domains);
-            std::array<std::function<std::expected<void, Core::DbError>()>, count> droppers{
+            static constexpr auto order = Schema::reverse_index_array(
+                Schema::topological_dto_order<Schema::SchemaOf_t<Domains>...>());
+            std::array<std::function<std::expected<void, Core::DbError>()>, sizeof...(Domains)> droppers{
                 [this]() { return conn_->template ensure_table_dropped<Schema::SchemaOf_t<Domains>>(); }...
             };
 
-            for (std::size_t i = count; i > 0; --i)
+            for (std::size_t idx : order)
             {
-                auto res = droppers[i - 1]();
+                auto res = droppers[idx]();
                 if (!res)
                 {
                     return res;
