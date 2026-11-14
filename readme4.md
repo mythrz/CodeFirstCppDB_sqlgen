@@ -274,9 +274,9 @@ flowchart LR
   - Inspect `SqlgenForeignKeyField<F>::ForeignTableType` across all reflected `Set<T>` DTOs in a `DbContext` at compile time (`consteval`) to compute a topological creation order (parents before children) and reverse deletion order (children before parents), making `db.ensure_created()` and `db.ensure_deleted()` completely independent of member declaration order in `AppDbContext`.
 
 ### Phase 10: Server-Side Query Builder (`where_col`, `order_by`, `page`) & Dirty-Checking `ChangeTracker`
-- [ ] **Task 10.1: Fluent Server-Side Query Pushdown on `DbSet` (`DAL/context/DbSet.ixx` & `SQLiteConnection.ixx`)**
+- [x] **Task 10.1: Fluent Server-Side Query Pushdown on `DbSet` (`DAL/context/DbSet.ixx` & `SQLiteConnection.ixx`)**
   - Add `where_sql(Condition)`, `where_equal<ColLiteral>(val)`, `order_by<ColLiteral>(desc)`, and `page(limit, offset)` on `DbSet` so filtering, sorting, and pagination translate directly into `sqlgen::read<std::vector<DTO>> | sqlgen::where(...) | sqlgen::order_by(...) | sqlgen::limit(...) | sqlgen::offset(...)`.
-- [ ] **Task 10.2: Optional Identity Map & Snapshot `ChangeTracker` (`DAL/context/DbContext.ixx`)**
+- [x] **Task 10.2: Optional Identity Map & Snapshot `ChangeTracker` (`DAL/context/DbContext.ixx`)**
   - Track entities loaded via `find()` / `to_vector()` by `Domain::Key`; on `save_changes()`, compare current domain state against the original snapshot (`MapperTraits::to_dto`) and automatically emit `UPDATE` statements for mutated entities without requiring explicit `db.set.update(entity)` calls.
 
 ---

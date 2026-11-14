@@ -298,6 +298,114 @@ export namespace DAL
             pending_ops_.clear();
         }
 
+        // =====================================================================
+        // Optional Identity Map & Snapshot ChangeTracker (Task 10.2)
+        // =====================================================================
+
+        struct TrackedEntityEntry
+        {
+            std::string snapshot{};
+            std::shared_ptr<void> owned_instance{};
+            const void* borrowed_instance{ nullptr };
+            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
+                const std::shared_ptr<void>&, const void*, std::string&)> detect_fn{};
+        };
+
+        void enable_change_tracking(bool enabled = true) noexcept
+        {
+            change_tracking_enabled_ = enabled;
+        }
+
+        [[nodiscard]] bool is_change_tracking_enabled() const noexcept
+        {
+            return change_tracking_enabled_;
+        }
+
+        [[nodiscard]] std::size_t tracked_entities_count() const noexcept
+        {
+            return tracked_entries_.size();
+        }
+
+        void clear_change_tracker() noexcept
+        {
+            tracked_entries_.clear();
+        }
+
+        void upsert_tracked_entry(
+            std::type_index type,
+            std::string key_repr,
+            std::string snapshot,
+            std::shared_ptr<void> owned,
+            const void* borrowed,
+            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
+                const std::shared_ptr<void>&, const void*, std::string&)> detect_fn)
+        {
+            auto map_key = std::pair<std::type_index, std::string>{ type, std::move(key_repr) };
+            auto it = tracked_entries_.find(map_key);
+            if (it == tracked_entries_.end())
+            {
+                tracked_entries_.emplace(
+                    std::move(map_key),
+                    TrackedEntityEntry{
+                        std::move(snapshot),
+                        std::move(owned),
+                        borrowed,
+                        std::move(detect_fn)
+                    });
+                return;
+            }
+
+            if (owned)
+            {
+                it->second.snapshot = std::move(snapshot);
+                it->second.owned_instance = std::move(owned);
+            }
+            if (borrowed != nullptr)
+            {
+                // Preserve the original DB snapshot if one was already recorded by find()/to_vector()
+                it->second.borrowed_instance = borrowed;
+            }
+            if (!owned && borrowed == nullptr)
+            {
+                // Snapshot-only update from find()/to_vector()
+                it->second.snapshot = std::move(snapshot);
+            }
+            if (detect_fn)
+            {
+                it->second.detect_fn = std::move(detect_fn);
+            }
+        }
+
+        [[nodiscard]] std::shared_ptr<void> find_tracked_instance(
+            std::type_index type,
+            const std::string& key_repr) const
+        {
+            auto it = tracked_entries_.find(std::pair<std::type_index, std::string>{ type, key_repr });
+            if (it != tracked_entries_.end())
+            {
+                return it->second.owned_instance;
+            }
+            return nullptr;
+        }
+
+        std::size_t detect_changes()
+        {
+            std::size_t dirty_count = 0;
+            for (auto& [key, entry] : tracked_entries_)
+            {
+                if (!entry.detect_fn)
+                {
+                    continue;
+                }
+                if (auto op = entry.detect_fn(entry.owned_instance, entry.borrowed_instance, entry.snapshot))
+                {
+                    pending_ops_.push_back(std::move(*op));
+                    ++dirty_count;
+                }
+            }
+            return dirty_count;
+        }
+
         std::expected<void, Core::DbError> begin_transaction()
         {
             if (!is_connected())
@@ -346,6 +454,8 @@ export namespace DAL
                     Core::DbError::connection_error("Cannot save changes: database connection is closed")
                 };
             }
+
+            (void)detect_changes();
 
             if (!pending_ops_.empty())
             {
@@ -454,6 +564,8 @@ export namespace DAL
         std::shared_ptr<ConnectionHandle> conn_;
         std::vector<std::function<std::expected<void, Core::DbError>()>> pending_ops_;
         bool defer_changes_{ false };
+        bool change_tracking_enabled_{ false };
+        std::map<std::pair<std::type_index, std::string>, TrackedEntityEntry> tracked_entries_{};
     };
 
     // RAII transaction guard that automatically rolls back on scope exit if not committed

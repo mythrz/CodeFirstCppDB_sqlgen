@@ -1726,4 +1726,110 @@ namespace
         EXPECT_EQ(db.userRoles.count(), 0u);
     }
 
+    // =========================================================================
+    // Phase 10: Fluent Server-Side Query Pushdown & Snapshot ChangeTracker
+    // =========================================================================
+
+    TEST(Phase10QueryBuilderAndChangeTrackerTest, ServerSideQueryPushdown_WhereOrderByAndPagination)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        struct PersonQueryDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+        {
+            Set<Core::Person> people{ this };
+            explicit PersonQueryDbContext(std::shared_ptr<DAL::SQLiteConnection> c)
+                : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+            {}
+        };
+
+        PersonQueryDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Charlie", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 3 }, "Bob", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 4 }, "Diana", "Jones")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 5 }, "Eve", "Smith")).has_value());
+
+        // where_equal + ascending order_by
+        auto smithAsc = db.people
+            .where_equal<"last_name">("Smith")
+            .order_by<"first_name">(false)
+            .to_vector();
+        ASSERT_EQ(smithAsc.size(), 4u);
+        EXPECT_EQ(smithAsc[0].getFirstName(), "Alice");
+        EXPECT_EQ(smithAsc[1].getFirstName(), "Bob");
+        EXPECT_EQ(smithAsc[2].getFirstName(), "Charlie");
+        EXPECT_EQ(smithAsc[3].getFirstName(), "Eve");
+
+        // where_equal + descending order_by + page(limit=2, offset=1)
+        auto smithDescPage = db.people
+            .where_equal<"last_name">("Smith")
+            .order_by<"first_name">(true)
+            .page(2, 1)
+            .to_vector();
+        ASSERT_EQ(smithDescPage.size(), 2u);
+        EXPECT_EQ(smithDescPage[0].getFirstName(), "Charlie");
+        EXPECT_EQ(smithDescPage[1].getFirstName(), "Bob");
+
+        // where_sql with raw sqlgen condition + first_or_default()
+        auto firstJones = db.people
+            .where_sql(sqlgen::Col<"last_name">{} == std::string("Jones"))
+            .first_or_default();
+        ASSERT_TRUE(firstJones.has_value());
+        EXPECT_EQ(firstJones->getFirstName(), "Diana");
+
+        // Chained order_by + page regardless of filtering
+        auto pagedAll = db.people
+            .order_by<"id">(true)
+            .page(2, 2)
+            .to_vector();
+        ASSERT_EQ(pagedAll.size(), 2u);
+        EXPECT_EQ(pagedAll[0].getFirstName(), "Bob");
+        EXPECT_EQ(pagedAll[1].getFirstName(), "Alice");
+    }
+
+    TEST(Phase10QueryBuilderAndChangeTrackerTest, ChangeTracker_IdentityMapAndSnapshotDirtyChecking)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        PocoDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        db.enable_change_tracking(true);
+
+        ASSERT_TRUE(db.users.add(PocoUser{ .username = "alice" }).has_value());
+        ASSERT_TRUE(db.users.add(PocoUser{ .username = "bob" }).has_value());
+
+        // 1. Identity Map via find_tracked(): same key returns exact same shared_ptr instance
+        auto alice1 = db.users.find_tracked(1);
+        auto alice2 = db.users.find_tracked(1);
+        ASSERT_NE(alice1, nullptr);
+        EXPECT_EQ(alice1.get(), alice2.get());
+        EXPECT_EQ(db.tracked_entities_count(), 1u);
+
+        // Mutate in-memory tracked entity without calling db.users.update()
+        alice1->username = "alice.updated";
+        ASSERT_TRUE(db.save_changes().has_value());
+
+        // Verify persisted to SQLite
+        auto aliceReloaded = db.users.find(1);
+        ASSERT_TRUE(aliceReloaded.has_value());
+        EXPECT_EQ(aliceReloaded->username, "alice.updated");
+
+        // 2. find() snapshots original DB state; mutating local copy and calling track()
+        //    preserves the original snapshot and emits UPDATE on save_changes().
+        auto bobLocal = db.users.find(2);
+        ASSERT_TRUE(bobLocal.has_value());
+        bobLocal->username = "bob_v2";
+        db.users.track(*bobLocal);
+
+        ASSERT_TRUE(db.save_changes().has_value());
+
+        auto bobReloaded = db.users.find(2);
+        ASSERT_TRUE(bobReloaded.has_value());
+        EXPECT_EQ(bobReloaded->username, "bob_v2");
+    }
+
 } // namespace

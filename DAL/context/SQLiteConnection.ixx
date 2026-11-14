@@ -315,6 +315,34 @@ export namespace DAL
             return {};
         }
 
+        template<typename DTO, typename Query>
+        [[nodiscard]] std::expected<std::vector<DTO>, Core::DbError> try_execute_read(Query&& query) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto res = std::forward<Query>(query)(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return std::move(res.value());
+        }
+
+        template<typename DTO, typename Query>
+        [[nodiscard]] std::vector<DTO> execute_read(Query&& query) const
+        {
+            auto res = try_execute_read<DTO>(std::forward<Query>(query));
+            if (res)
+            {
+                return std::move(res.value());
+            }
+            return {};
+        }
+
         template<typename DTO>
         auto insert(const DTO& item)
         {
