@@ -19,6 +19,9 @@ export namespace DAL
     class DbSet
     {
     public:
+        using DomainType = Domain;
+        using DTOType = DTO;
+        using KeyValueType = KeyType;
         using RepoType = Repositories::GenericRepository<Domain, DTO, ConnectionHandle, KeyType>;
 
         explicit DbSet(std::shared_ptr<ConnectionHandle> conn)
@@ -27,9 +30,24 @@ export namespace DAL
         }
 
         template<typename Ctx>
+            requires requires(Ctx& ctx, std::function<std::expected<void, Core::DbError>()> op) {
+                { ctx.connection() } -> std::convertible_to<std::shared_ptr<ConnectionHandle>>;
+                { ctx.is_deferred() } -> std::same_as<bool>;
+                ctx.enqueue_op(std::move(op));
+            }
+        explicit DbSet(Ctx* ctx)
+            : repo_(std::make_shared<RepoType>(ctx->connection()))
+            , is_deferred_fn_([ctx]() { return ctx->is_deferred(); })
+            , enqueue_op_fn_([ctx](std::function<std::expected<void, Core::DbError>()> op) {
+                ctx->enqueue_op(std::move(op));
+            })
+        {
+        }
+
+        template<typename Ctx>
             requires requires(const Ctx& ctx) {
                 { ctx.connection() } -> std::convertible_to<std::shared_ptr<ConnectionHandle>>;
-            }
+            } && (!requires(Ctx& ctx) { ctx.is_deferred(); })
         explicit DbSet(const Ctx* ctx)
             : repo_(std::make_shared<RepoType>(ctx->connection()))
         {
@@ -95,28 +113,111 @@ export namespace DAL
             return try_find(KeyType{ std::forward<Ks>(parts)... });
         }
 
-        // Inserts a single entity into the database table
+        // Inserts a single entity into the database table (or stages if deferred)
         std::expected<void, Core::DbError> add(const Domain& item)
         {
+            if (should_defer())
+            {
+                return stage_add(item);
+            }
             return repo_->insert_one(item);
         }
 
-        // Inserts multiple entities into the database table
+        // Inserts multiple entities into the database table (or stages if deferred)
         std::expected<void, Core::DbError> add_range(const std::vector<Domain>& items)
         {
+            if (should_defer())
+            {
+                return stage_add_range(items);
+            }
             return repo_->insert_many(items);
         }
 
-        // Updates an existing entity
+        // Updates an existing entity (or stages if deferred)
         std::expected<void, Core::DbError> update(const Domain& item)
         {
+            if (should_defer())
+            {
+                return stage_update(item);
+            }
             return repo_->update_one(item);
         }
 
-        // Removes an entity by primary key
+        // Removes an entity by primary key (or stages if deferred)
         std::expected<void, Core::DbError> remove(const KeyType& id)
         {
+            if (should_defer())
+            {
+                return stage_remove(id);
+            }
             return repo_->delete_by_id(id);
+        }
+
+        // Explicit Unit of Work staging methods (always enqueue into DbContext)
+        std::expected<void, Core::DbError> stage_add(const Domain& item)
+        {
+            if (!enqueue_op_fn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
+                };
+            }
+            enqueue_op_fn_([repo = repo_, item]() { return repo->insert_one(item); });
+            return {};
+        }
+
+        std::expected<void, Core::DbError> stage_add_range(const std::vector<Domain>& items)
+        {
+            if (!enqueue_op_fn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
+                };
+            }
+            enqueue_op_fn_([repo = repo_, items]() { return repo->insert_many(items); });
+            return {};
+        }
+
+        std::expected<void, Core::DbError> stage_update(const Domain& item)
+        {
+            if (!enqueue_op_fn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
+                };
+            }
+            enqueue_op_fn_([repo = repo_, item]() { return repo->update_one(item); });
+            return {};
+        }
+
+        std::expected<void, Core::DbError> stage_remove(const KeyType& id)
+        {
+            if (!enqueue_op_fn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
+                };
+            }
+            enqueue_op_fn_([repo = repo_, id]() { return repo->delete_by_id(id); });
+            return {};
+        }
+
+        template<typename K>
+            requires Core::SingleKeyType<KeyType>
+                  && std::constructible_from<typename KeyType::key_type, K>
+                  && (!std::same_as<std::remove_cvref_t<K>, KeyType>)
+        std::expected<void, Core::DbError> stage_remove(const K& raw_or_id)
+        {
+            return stage_remove(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
+        }
+
+        template<typename... Ks>
+            requires Core::CompositeKeyType<KeyType>
+                  && (sizeof...(Ks) == KeyType::arity)
+                  && std::constructible_from<KeyType, Ks...>
+        std::expected<void, Core::DbError> stage_remove(Ks&&... parts)
+        {
+            return stage_remove(KeyType{ std::forward<Ks>(parts)... });
         }
 
         template<typename K>
@@ -205,7 +306,14 @@ export namespace DAL
         }
 
     private:
+        [[nodiscard]] bool should_defer() const noexcept
+        {
+            return is_deferred_fn_ && is_deferred_fn_();
+        }
+
         std::shared_ptr<RepoType> repo_;
+        std::function<bool()> is_deferred_fn_{};
+        std::function<void(std::function<std::expected<void, Core::DbError>()>)> enqueue_op_fn_{};
     };
 
 } // namespace DAL

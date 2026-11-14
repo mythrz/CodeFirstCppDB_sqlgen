@@ -23,6 +23,92 @@ namespace
         }
 
         template<typename DTO>
+        std::expected<void, Core::DbError> ensure_table_created()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TestDatabaseConnection is closed")
+                };
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> enable_foreign_keys()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TestDatabaseConnection is closed")
+                };
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> begin_transaction()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TestDatabaseConnection is closed")
+                };
+            }
+            if (in_transaction_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Transaction is already active")
+                };
+            }
+            snapshot_ = std::make_tuple(persons_, somethings_, person_somethings_);
+            in_transaction_ = true;
+            return {};
+        }
+
+        std::expected<void, Core::DbError> commit()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TestDatabaseConnection is closed")
+                };
+            }
+            if (!in_transaction_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("No active transaction to commit")
+                };
+            }
+            in_transaction_ = false;
+            return {};
+        }
+
+        std::expected<void, Core::DbError> rollback()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("TestDatabaseConnection is closed")
+                };
+            }
+            if (!in_transaction_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("No active transaction to rollback")
+                };
+            }
+            persons_ = std::move(std::get<0>(snapshot_));
+            somethings_ = std::move(std::get<1>(snapshot_));
+            person_somethings_ = std::move(std::get<2>(snapshot_));
+            in_transaction_ = false;
+            return {};
+        }
+
+        [[nodiscard]] bool in_transaction() const noexcept
+        {
+            return in_transaction_;
+        }
+
+        template<typename DTO>
         std::vector<DTO>& get_storage()
         {
             if constexpr (std::is_same_v<DTO, DAL::Schema::PersonDTO>)
@@ -143,7 +229,29 @@ namespace
         template<typename DTO>
         sqlgen::Result<sqlgen::Nothing> insert(const DTO& item)
         {
-            get_storage<DTO>().push_back(item);
+            auto& storage = get_storage<DTO>();
+            if constexpr (requires { item.id; })
+            {
+                for (const auto& existing : storage)
+                {
+                    if (existing.id.value() == item.id.value())
+                    {
+                        return sqlgen::error("UNIQUE constraint failed: duplicate primary key");
+                    }
+                }
+            }
+            else if constexpr (std::is_same_v<DTO, DAL::Schema::Person_SomethingDTO>)
+            {
+                for (const auto& existing : storage)
+                {
+                    if (existing.person_id.value() == item.person_id.value()
+                        && existing.something_id.value() == item.something_id.value())
+                    {
+                        return sqlgen::error("UNIQUE constraint failed: duplicate composite key");
+                    }
+                }
+            }
+            storage.push_back(item);
             // success -> default-constructed Result (has value)
             return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
         }
@@ -272,9 +380,15 @@ namespace
 
     private:
         bool open_{ true };
+        bool in_transaction_{ false };
         std::vector<DAL::Schema::PersonDTO> persons_;
         std::vector<DAL::Schema::SomethingDTO> somethings_;
         std::vector<DAL::Schema::Person_SomethingDTO> person_somethings_;
+        std::tuple<
+            std::vector<DAL::Schema::PersonDTO>,
+            std::vector<DAL::Schema::SomethingDTO>,
+            std::vector<DAL::Schema::Person_SomethingDTO>>
+            snapshot_;
     };
 
     class SqlgenExampleTest : public ::testing::Test
@@ -982,7 +1096,7 @@ namespace
         DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, TestDatabaseConnection> people(conn);
         DAL::DbSet<Core::Person_Something, DAL::Schema::Person_SomethingDTO, TestDatabaseConnection> links(conn);
 
-        ASSERT_TRUE(links.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner")).has_value());
+        ASSERT_TRUE(links.add(Core::Person_Something(Core::PersonId{ 10 }, Core::SomethingId{ 10 }, "Owner")).has_value());
 
         // Succeeds while open
         auto allPeople = people.try_to_vector();
@@ -993,7 +1107,7 @@ namespace
         ASSERT_TRUE(foundPerson.has_value());
         EXPECT_TRUE(foundPerson->has_value());
 
-        auto foundLink = links.try_find(Core::PersonId{ 1 }, Core::SomethingId{ 1 });
+        auto foundLink = links.try_find(Core::PersonId{ 10 }, Core::SomethingId{ 10 });
         ASSERT_TRUE(foundLink.has_value());
         EXPECT_TRUE(foundLink->has_value());
 
@@ -1008,7 +1122,7 @@ namespace
         ASSERT_FALSE(closedFind.has_value());
         EXPECT_EQ(closedFind.error().code, Core::DbErrorCode::ConnectionError);
 
-        auto closedLinkFind = links.try_find(Core::PersonId{ 1 }, Core::SomethingId{ 1 });
+        auto closedLinkFind = links.try_find(Core::PersonId{ 10 }, Core::SomethingId{ 10 });
         ASSERT_FALSE(closedLinkFind.has_value());
         EXPECT_EQ(closedLinkFind.error().code, Core::DbErrorCode::ConnectionError);
     }
@@ -1132,6 +1246,184 @@ namespace
         ASSERT_TRUE(links.remove(Core::PersonId{ 1 }, Core::SomethingId{ 2 }).has_value());
         EXPECT_FALSE(links.contains(Core::PersonId{ 1 }, Core::SomethingId{ 2 }));
         EXPECT_EQ(links.count(), 2u);
+    }
+
+    // =========================================================================
+    // Phase 6 Tests: Reflection-Driven ensure_created(), Staged Unit of Work,
+    // Atomic Rollback, and Scoped Transactions
+    // =========================================================================
+
+    class Phase6AppDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+    public:
+        Set<Core::Person> people{ this };
+        Set<Core::Something> somethings{ this };
+        Set<Core::Person_Something> personSomethings{ this };
+
+        explicit Phase6AppDbContext(std::shared_ptr<DAL::SQLiteConnection> conn)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(conn))
+        {
+        }
+    };
+
+    class Phase6MockDbContext : public DAL::DbContextBase<TestDatabaseConnection>
+    {
+    public:
+        Set<Core::Person> people{ this };
+        Set<Core::Something> somethings{ this };
+        Set<Core::Person_Something> personSomethings{ this };
+
+        explicit Phase6MockDbContext(std::shared_ptr<TestDatabaseConnection> conn)
+            : DAL::DbContextBase<TestDatabaseConnection>(std::move(conn))
+        {
+        }
+    };
+
+    TEST(Phase6UnitOfWorkAndSchemaTest, EnsureCreated_AutoCreatesTablesAndEnforcesForeignKeys)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        Phase6AppDbContext db(connRes.value());
+        auto schemaRes = db.ensure_created();
+        ASSERT_TRUE(schemaRes.has_value()) << schemaRes.error().to_string();
+
+        // All tables exist and are initially empty
+        EXPECT_EQ(db.people.count(), 0u);
+        EXPECT_EQ(db.somethings.count(), 0u);
+        EXPECT_EQ(db.personSomethings.count(), 0u);
+
+        // PRAGMA foreign_keys = ON is enforced: inserting orphan junction row fails
+        auto fkErr = db.personSomethings.add(
+            Core::Person_Something(Core::PersonId{ 99 }, Core::SomethingId{ 88 }, "Orphan"));
+        ASSERT_FALSE(fkErr.has_value());
+        EXPECT_EQ(fkErr.error().code, Core::DbErrorCode::ConstraintViolation);
+    }
+
+    TEST(Phase6UnitOfWorkAndSchemaTest, DeferredUnitOfWork_StagesUntilSaveChanges)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        Phase6AppDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        db.defer_changes(true);
+        EXPECT_TRUE(db.is_deferred());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Ada", "Lovelace")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Alan", "Turing")).has_value());
+        ASSERT_TRUE(db.people.update(Core::Person(Core::PersonId{ 1 }, "Augusta", "King")).has_value());
+        ASSERT_TRUE(db.people.remove(2).has_value());
+
+        // Not visible in DB prior to save_changes()
+        EXPECT_EQ(db.pending_changes_count(), 4u);
+        EXPECT_EQ(db.people.count(), 0u);
+
+        auto saveRes = db.save_changes();
+        ASSERT_TRUE(saveRes.has_value()) << saveRes.error().to_string();
+        EXPECT_EQ(db.pending_changes_count(), 0u);
+        EXPECT_FALSE(db.in_transaction());
+
+        // Visible after save_changes()
+        EXPECT_EQ(db.people.count(), 1u);
+        auto p1 = db.people.find(1);
+        ASSERT_TRUE(p1.has_value());
+        EXPECT_EQ(p1->getFirstName(), "Augusta");
+        EXPECT_EQ(p1->getLastName(), "King");
+    }
+
+    TEST(Phase6UnitOfWorkAndSchemaTest, SaveChanges_AtomicRollbackOnMidBatchFailure_SQLite)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        Phase6AppDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        db.defer_changes(true);
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Grace", "Hopper")).has_value());
+        ASSERT_TRUE(db.somethings.add(Core::Something(Core::SomethingId{ 1 }, "Compiler", "Software")).has_value());
+        // Invalid foreign key -> fails mid-batch
+        ASSERT_TRUE(db.personSomethings.add(
+            Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 999 }, "Broken")).has_value());
+
+        auto saveRes = db.save_changes();
+        ASSERT_FALSE(saveRes.has_value());
+        EXPECT_EQ(saveRes.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(db.pending_changes_count(), 0u);
+        EXPECT_FALSE(db.in_transaction());
+
+        // Zero partial writes left in SQLite
+        EXPECT_EQ(db.people.count(), 0u);
+        EXPECT_EQ(db.somethings.count(), 0u);
+        EXPECT_EQ(db.personSomethings.count(), 0u);
+    }
+
+    TEST(Phase6UnitOfWorkAndSchemaTest, SaveChanges_AtomicRollbackOnDuplicateKey_MockConnection)
+    {
+        auto mockConn = std::make_shared<TestDatabaseConnection>();
+        Phase6MockDbContext db(mockConn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // Seed 1 existing person
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Existing", "Person")).has_value());
+        EXPECT_EQ(db.people.count(), 1u);
+
+        db.defer_changes(true);
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "New", "Person")).has_value());
+        // Duplicate key (id = 1) -> fails mid-batch
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Dup", "Person")).has_value());
+
+        auto saveRes = db.save_changes();
+        ASSERT_FALSE(saveRes.has_value());
+        EXPECT_EQ(saveRes.error().code, Core::DbErrorCode::DuplicateKey);
+        EXPECT_EQ(db.pending_changes_count(), 0u);
+        EXPECT_FALSE(db.in_transaction());
+
+        // Rolled back cleanly to pre-batch state (only id=1 remains)
+        EXPECT_EQ(db.people.count(), 1u);
+        EXPECT_FALSE(db.people.contains(2));
+    }
+
+    TEST(Phase6UnitOfWorkAndSchemaTest, ScopedTransaction_CommitRollbackAndDiscardChanges)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        Phase6AppDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // 1. Successful scoped transaction commits
+        auto txOk = db.transaction([&]() -> std::expected<void, Core::DbError> {
+            auto r1 = db.people.add(Core::Person(Core::PersonId{ 1 }, "Linus", "Torvalds"));
+            if (!r1) return r1;
+            return db.somethings.add(Core::Something(Core::SomethingId{ 1 }, "Git", "VCS"));
+        });
+        ASSERT_TRUE(txOk.has_value());
+        EXPECT_FALSE(db.in_transaction());
+        EXPECT_EQ(db.people.count(), 1u);
+        EXPECT_EQ(db.somethings.count(), 1u);
+
+        // 2. Failing scoped transaction rolls back
+        auto txFail = db.transaction([&]() -> std::expected<void, Core::DbError> {
+            auto r = db.people.add(Core::Person(Core::PersonId{ 2 }, "Temp", "User"));
+            if (!r) return r;
+            return std::unexpected<Core::DbError>{ Core::DbError::unknown("Simulated business rule failure") };
+        });
+        ASSERT_FALSE(txFail.has_value());
+        EXPECT_FALSE(db.in_transaction());
+        EXPECT_EQ(db.people.count(), 1u);
+        EXPECT_FALSE(db.people.contains(2));
+
+        // 3. discard_changes() clears staged operations without executing them
+        db.defer_changes(true);
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 3 }, "Discarded", "User")).has_value());
+        EXPECT_EQ(db.pending_changes_count(), 1u);
+        db.discard_changes();
+        EXPECT_EQ(db.pending_changes_count(), 0u);
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.count(), 1u);
     }
 
 } // namespace

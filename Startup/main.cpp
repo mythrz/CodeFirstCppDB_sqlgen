@@ -1,6 +1,3 @@
-#include <sqlgen.hpp>
-#include <sqlgen/sqlite.hpp>
-
 import std;
 import core;
 import dal;
@@ -41,79 +38,53 @@ int main(int argc, char* argv[])
     }
 
     std::println("Connecting to SQLite database: {}", dbPath);
-    auto rawConnRes = sqlgen::sqlite::connect(dbPath);
-    if (!rawConnRes)
+    auto connRes = DAL::SQLiteConnection::connect(dbPath);
+    if (!connRes)
     {
-        std::println(stderr, "Failed to connect to SQLite: {}", rawConnRes.error().what());
+        std::println(std::cerr, "Failed to connect to SQLite: {}", connRes.error().to_string());
         return 1;
     }
 
-    // 1. DDL: Ensure tables exist
-    std::println("Creating tables if they do not exist...");
-    auto ddlResult = rawConnRes.and_then(sqlgen::create_table<DAL::Schema::PersonDTO> | sqlgen::if_not_exists)
-                               .and_then(sqlgen::create_table<DAL::Schema::SomethingDTO> | sqlgen::if_not_exists)
-                               .and_then(sqlgen::create_table<DAL::Schema::Person_SomethingDTO> | sqlgen::if_not_exists);
+    // 1. Initialize DbContext and auto-create schema from reflected DbSet members
+    AppDbContext db(connRes.value());
 
-    if (!ddlResult)
+    std::println("Ensuring database schema and foreign keys...");
+    auto schemaRes = db.ensure_created();
+    if (!schemaRes)
     {
-        std::println(stderr, "Failed to create database tables.");
+        std::println(std::cerr, "Failed to create database schema: {}", schemaRes.error().to_string());
         return 1;
     }
 
-    auto rawConn = rawConnRes.value();
-
-    // Enforce SQLite foreign key constraints
-    rawConn->execute("PRAGMA foreign_keys = ON;");
-
-    // 2. Wrap the SQLite connection in DAL's connection adapter
-    auto connAdapter = std::make_shared<DAL::SQLiteConnection>(rawConn);
-
-    // 3. Initialize DbContext (unified single & composite key DbSets)
-    AppDbContext db(connAdapter);
-
-    // 4. Seed database via clean entity and repository abstractions
-    std::println("Inserting initial entities via DbContext / Repositories...");
+    // 2. Stage seed entities via Unit of Work and commit atomically
+    std::println("Staging initial entities via Unit of Work...");
+    db.defer_changes(true);
 
     Core::Person person1(Core::PersonId{ 1 }, "Rz", "D");
     Core::Person person2(Core::PersonId{ 2 }, "R First", "D Last");
-    auto r1 = db.people.add(person1);
-    auto r2 = db.people.add(person2);
-    if (!r1 || !r2)
-    {
-        std::println(stderr, "Failed to insert person entities.");
-        return 1;
-    }
+    (void)db.people.add(person1);
+    (void)db.people.add(person2);
 
     Core::Something something1(Core::SomethingId{ 1 }, "Laptop", "Electronics", "Developer Workstation");
     Core::Something something2(Core::SomethingId{ 2 }, "Coffee Machine", "Appliances", "Espresso Maker");
-    auto s1 = db.somethings.add(something1);
-    auto s2 = db.somethings.add(something2);
-    if (!s1 || !s2)
-    {
-        std::println(stderr, "Failed to insert something entities.");
-        return 1;
-    }
+    (void)db.somethings.add(something1);
+    (void)db.somethings.add(something2);
 
     Core::Person_Something link1(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner");
     Core::Person_Something link2(Core::PersonId{ 2 }, Core::SomethingId{ 2 }, "User");
-    auto l1 = db.personSomethings.add(link1);
-    auto l2 = db.personSomethings.add(link2);
-    if (!l1 || !l2)
-    {
-        if (!l1) std::println(stderr, "Failed to insert junction entity 1: {}", l1.error().to_string());
-        if (!l2) std::println(stderr, "Failed to insert junction entity 2: {}", l2.error().to_string());
-        return 1;
-    }
+    (void)db.personSomethings.add(link1);
+    (void)db.personSomethings.add(link2);
 
     auto saveRes = db.save_changes();
     if (!saveRes)
     {
-        std::println(stderr, "Database save failed: {}", saveRes.error().to_string());
+        std::println(std::cerr, "Database save failed: {}", saveRes.error().to_string());
         return 1;
     }
+    db.defer_changes(false);
     std::println("Database setup complete. Created tables and persisted domain records.");
 
-    // 5. Query and verify persisted entities through clean domain layer (No DTO leaks!)
+    // 3. Query and verify persisted entities through clean domain layer (No DTO leaks!)
     std::println("\nVerifying persisted entities via DbContext / Core domain models:");
 
     std::println("--- Person Entities (via db.people) ---");
@@ -135,7 +106,7 @@ int main(int argc, char* argv[])
                      link.getPersonId(), link.getSomethingId(), link.getAssociationType());
     }
 
-    // 6. Demonstrate LINQ-style query
+    // 4. Demonstrate LINQ-style query
     auto devItems = db.somethings.where([](const Core::Something& item) {
         return item.getCategory() == "Electronics";
     });

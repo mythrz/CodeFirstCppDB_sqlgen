@@ -21,6 +21,124 @@ export namespace DAL
         {
         }
 
+        [[nodiscard]] static std::expected<std::shared_ptr<SQLiteConnection>, Core::DbError> connect(
+            const std::string& dbPath)
+        {
+            auto res = sqlgen::sqlite::connect(dbPath);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(res.error().what()) };
+            }
+            return std::make_shared<SQLiteConnection>(std::move(res.value()));
+        }
+
+        template<typename DTO>
+        std::expected<void, Core::DbError> ensure_table_created()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot create table: database connection is closed")
+                };
+            }
+            auto res = sqlgen::CreateTable<DTO>{ .if_not_exists_ = true }(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> enable_foreign_keys()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot enable foreign keys: database connection is closed")
+                };
+            }
+            auto res = conn_->execute("PRAGMA foreign_keys = ON;");
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> begin_transaction()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot begin transaction: database connection is closed")
+                };
+            }
+            if (in_transaction_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Transaction is already active")
+                };
+            }
+            auto res = conn_->begin_transaction();
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            in_transaction_ = true;
+            return {};
+        }
+
+        std::expected<void, Core::DbError> commit()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot commit transaction: database connection is closed")
+                };
+            }
+            if (!in_transaction_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("No active transaction to commit")
+                };
+            }
+            auto res = conn_->commit();
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            in_transaction_ = false;
+            return {};
+        }
+
+        std::expected<void, Core::DbError> rollback()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot rollback transaction: database connection is closed")
+                };
+            }
+            if (!in_transaction_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("No active transaction to rollback")
+                };
+            }
+            auto res = conn_->rollback();
+            in_transaction_ = false;
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        [[nodiscard]] bool in_transaction() const noexcept
+        {
+            return in_transaction_;
+        }
+
         [[nodiscard]] bool is_open() const noexcept
         {
             return true;
@@ -264,6 +382,7 @@ export namespace DAL
         };
 
         sqlgen::Ref<sqlgen::sqlite::Connection> conn_;
+        bool in_transaction_{ false };
     };
 
 } // namespace DAL

@@ -546,8 +546,8 @@ flowchart LR
     - Single-key `try_get_by_id`, `count`, `exists`, `update` (including `DbErrorCode::NotFound` on missing rows), and `delete_by_id`.
     - Composite-key `DbSet<Core::Person_Something>` (`find`, `try_find`, `update`, `remove`, `contains`) and `SQLitePerson_SomethingRepo` (`find_by_person_id`, `find_by_something_id`) against real SQLite tables.
 
-### Phase 6: True Unit of Work (`save_changes`), Transactions, & Automatic Schema (`ensure_created`) *(Next Up — Detailed Spec)*
-- [ ] **Task 6.1: Connection Factory, DDL Helpers, & Transaction Primitives (`DAL/context/SQLiteConnection.ixx` & `TestDatabaseConnection`)**
+### Phase 6: True Unit of Work (`save_changes`), Transactions, & Automatic Schema (`ensure_created`) *(Completed)*
+- [x] **Task 6.1: Connection Factory, DDL Helpers, & Transaction Primitives (`DAL/context/SQLiteConnection.ixx` & `TestDatabaseConnection`)**
   - **`DAL/context/SQLiteConnection.ixx`:**
     - Add `static std::expected<std::shared_ptr<SQLiteConnection>, Core::DbError> connect(const std::string& dbPath)` wrapping `sqlgen::sqlite::connect(dbPath)`.
     - Add `template<typename DTO> std::expected<void, Core::DbError> ensure_table_created()` executing `(sqlgen::create_table<DTO> | sqlgen::if_not_exists)(conn_)`.
@@ -560,7 +560,7 @@ flowchart LR
   - **`TestDatabaseConnection` (`DAL/tests/test_DAL.cpp`):**
     - Add snapshot-backed `begin_transaction()`, `commit()`, `rollback()`, `in_transaction()`, `ensure_table_created<DTO>()`, and `enable_foreign_keys()`:
       - `begin_transaction()` snapshots `(persons_, somethings_, person_somethings_)` so `rollback()` restores all in-memory tables to their exact pre-transaction state.
-- [ ] **Task 6.2: Staged Unit of Work (`save_changes`) & Scoped Transactions (`DAL/context/DbContext.ixx` & `DAL/context/DbSet.ixx`)**
+- [x] **Task 6.2: Staged Unit of Work (`save_changes`) & Scoped Transactions (`DAL/context/DbContext.ixx` & `DAL/context/DbSet.ixx`)**
   - **`DAL/context/DbContext.ixx`:**
     - Maintain a queue of staged operations: `std::vector<std::function<std::expected<void, Core::DbError>()>> pending_ops_;` and a `bool defer_changes_ = false;` mode flag.
     - Expose Unit-of-Work controls:
@@ -580,7 +580,7 @@ flowchart LR
     - When constructed with `Ctx* ctx`, bind optional callbacks to `ctx->is_deferred()` and `ctx->enqueue_op(...)` (avoiding circular module imports).
     - When `is_deferred()` is `true`, `add()`, `add_range()`, `update()`, and `remove()` automatically enqueue into `DbContextBase` and return `{}`.
     - Also provide explicit staging methods `stage_add(item)`, `stage_add_range(items)`, `stage_update(item)`, and `stage_remove(key_or_parts...)` that always stage into `DbContextBase` regardless of `is_deferred()`.
-- [ ] **Task 6.3: Reflection-Driven `db.ensure_created()` & Pure-Module `Startup/main.cpp` (`DAL/context/DbContext.ixx`, `Startup/main.cpp`)**
+- [x] **Task 6.3: Reflection-Driven `db.ensure_created()` & Pure-Module `Startup/main.cpp` (`DAL/context/DbContext.ixx`, `Startup/main.cpp`)**
   - **Compile-Time `DbSet` Discovery via Deducing `this` + C++26 `<meta>`:**
     - Define `concept IsDbSetMember` detecting `T::DomainType`, `T::DTOType`, and `Schema::RelationalEntity<typename T::DTOType>`.
     - Implement `template<typename Self> std::expected<void, Core::DbError> ensure_created(this Self&& self)` on `DbContextBase`:
@@ -590,7 +590,7 @@ flowchart LR
   - **`Startup/main.cpp` Cleanup:**
     - Remove `#include <sqlgen.hpp>`, `#include <sqlgen/sqlite.hpp>`, and manual `sqlgen::create_table<...>` chains from `Startup/main.cpp`.
     - Use pure C++ modules (`import std; import core; import dal;`), connect via `DAL::SQLiteConnection::connect(dbPath)`, initialize schema via `db.ensure_created()`, stage seed records with `db.defer_changes(true)`, and commit atomically via `db.save_changes()`.
-- [ ] **Task 6.4: Phase 6 Unit & Integration Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 6.4: Phase 6 Unit & Integration Tests (`DAL/tests/test_DAL.cpp`)**
   - Add `Phase6UnitOfWorkAndSchemaTest` suite verifying:
     1. Reflection-driven `db.ensure_created()` on a fresh `:memory:` `SQLiteConnection` automatically creates `Person`, `Something`, and `Person_Something` tables and enforces `PRAGMA foreign_keys = ON` (verifying foreign-key violation returns `DbErrorCode::ConstraintViolation`).
     2. Deferred Unit of Work (`db.defer_changes(true)` + `add` / `update` / `remove`): changes are not visible in the database before `db.save_changes()`, and become persisted after `db.save_changes()`.
