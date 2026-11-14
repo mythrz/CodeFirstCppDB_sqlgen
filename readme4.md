@@ -273,50 +273,32 @@ To plan the next engineering phases effectively, we must distinguish between wha
 - **Clean Module Compilation:** Builds cleanly with GCC 16.1+ using C++26 `-freflection` and CMake 4.4 `import std;`.
 - **Zero-Setter Reflection Mapping:** Domain entities (`Person`, `Something`, `Person_Something`) have immutable primary keys (no `setId`), yet `MapperTraits` populates them effortlessly via C++26 member splicing.
 - **Reflection-Driven Metadata & Unified `Set<Domain>`:** `SchemaTraits`, `SchemaOf<Domain>`, and `EntityMetadata<Domain, DTO>` introspect primary/foreign keys via `<meta>`, allowing `DbContextBase::Set<T>` to handle both single-key (`Person`, `Something`) and composite-key (`Person_Something`) entities with monadic `try_to_vector()` / `try_find()` error propagation.
-- **Fast Unit Test Suite:** 35 unit tests across 5 test suites in `test_DAL.cpp` verify round-trip reflection mapping, optional fields, CRUD operations, `DbError` classification, `SingleKey`/`CompositeKey` semantics, `EntityMetadata`, and `DbSet` usage.
+- **Targeted SQL Pushdown (`SQLiteConnection`):** Single-key and composite-key lookups (`WHERE ... LIMIT 1`), `SELECT COUNT(*)`, `DELETE FROM ... WHERE`, and true SQL `UPDATE ... SET ... WHERE` are generated at compile time via C++26 `<meta>` (`col_of<Member>`), eliminating full-table `fetch_all()` scans and raw SQL string formatting.
+- **Fast Unit Test Suite:** 37 unit tests across 6 test suites in `test_DAL.cpp` (including live `:memory:` SQLite pushdown tests) verify reflection mapping, optional fields, CRUD operations, `DbError` classification, `SingleKey`/`CompositeKey` semantics, `EntityMetadata`, and `DbSet` usage.
 
-### Resolved Issues (Completed in Phases 1–4)
+### Resolved Issues (Completed in Phases 1–5)
 - [x] **Entity ID Immutability:** Removed `setId`, `setPersonId`, and `setSomethingId` from domain entities.
 - [x] **Key Type Abstractions:** Implemented `SingleKey<K>` and `CompositeKey<K...>` with concepts (`SingleKeyType`, `CompositeKeyType`, `Key`) and structured bindings.
 - [x] **Base Repository Split:** Split `IRepository<T>` (common operations) from `IGenericRepository<T, KeyType>` (single-key operations) so junction tables are not forced to implement `get_by_id(int32_t)`.
 - [x] **Error Message Classification & Monadic Reads:** Added `DbError::map_from_message` and `try_fetch_all` / `try_get_all` / `try_to_vector` / `try_find` returning `std::expected<..., Core::DbError>`.
 - [x] **Reflection-Based `CompositePrimaryKey` & `EntityMetadata`:** Replaced hardcoded `person_id`/`something_id` concept checks with `consteval` `<meta>` member introspection (`primary_key_count<T>()`, `foreign_key_count<T>()`).
 - [x] **Unified `DbSet` (`Set<Domain>`) via `SchemaOf<Domain>`:** `AppDbContext` now manages `Set<Core::Person>`, `Set<Core::Something>`, and `Set<Core::Person_Something>` uniformly without external repository boilerplate.
+- [x] **SQL Pushdown & True SQL `UPDATE`:** Replaced `fetch_all()` loops, raw `DELETE` string formatting, and `sqlgen::write` in `SQLiteConnection` with reflection-generated `sqlgen` `WHERE`, `COUNT(*)`, `DELETE`, and `UPDATE` queries.
 
 ---
 
-### Critical Remaining Gaps & Hidden Bottlenecks (Targeted in Phases 5 & 6)
+### Remaining Final-Mile Gap (Targeted in Phase 6)
 
-A close inspection of `SQLiteConnection` and `DbContextBase` reveals **4 critical bottlenecks** to resolve in Phases 5 and 6:
+Only **1 architectural milestone** remains to complete the EF Core-style experience:
 
-#### Gap 1: Full-Table Scans in `SQLiteConnection` & Composite-Key Lookups (Phase 5)
-- **What the code currently does:**
-  - In [SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L66-L95), `try_get_by_id(id)` calls `try_fetch_all<DTO>()`—which executes `SELECT * FROM Table`, loads the **entire table** into a `std::vector<DTO>`, and loops over it in C++!
-  - `count<DTO>()` calls `fetch_all<DTO>().size()`, pulling every row from SQLite just to count them!
-  - `GenericRepository` (for `CompositeKey`) and `SQLitePerson_SomethingRepo` call `fetch_all<DTO>()` for composite-key and foreign-key lookups.
-- **What needs to change (Phase 5):**
-  - Push `try_get_by_id`, `count`, `exists`, and composite-key queries down to `sqlgen` SQL queries (`sqlgen::read<std::vector<DTO>> | sqlgen::where(...) | sqlgen::limit(1)` and `sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">)`) so SQLite uses its B-tree indexes in $O(\log N)$ time instead of $O(N)$ full-table deserialization.
-
-#### Gap 2: Raw String SQL Formatting in `SQLiteConnection` Delete Operations (Phase 5)
-- **What the code currently does:**
-  - `SQLiteConnection::delete_by_id` constructs raw SQL via `std::format("DELETE FROM {} WHERE id = {};", DTO::tablename, id);`.
-  - `SQLiteConnection::delete_by_composite_id` hardcodes the table and column names: `"DELETE FROM Person_Something WHERE person_id = {} AND something_id = {};"`. Calling `remove(...)` on any other composite-key `DbSet` would delete from `Person_Something`!
-- **What needs to change (Phase 5):**
-  - Use C++26 reflection (`col_of<Member>`) with `sqlgen::delete_from<DTO> | sqlgen::where(...)` so delete operations are type-safe and work for *any* single-key or composite-key DTO.
-
-#### Gap 3: `SQLiteConnection::update(const DTO&)` Calls `sqlgen::write` Instead of SQL `UPDATE` (Phase 5)
-- **What the code currently does:**
-  - In [SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L110-L115), `update(const DTO& item)` calls `sqlgen::write(conn_, vec)`.
-  - Inside `extern/sqlgen/include/sqlgen/write.hpp`, `sqlgen::write` executes `CREATE TABLE "Table"` (without `IF NOT EXISTS`) followed by `INSERT INTO "Table"`, which fails on existing SQLite tables/rows instead of executing an `UPDATE ... SET ... WHERE ...` statement!
-- **What needs to change (Phase 5):**
-  - Replace `sqlgen::write` inside `SQLiteConnection::update<DTO>` with a reflection-generated `sqlgen::update<DTO>(col_of<non_key_m>.set(...)...) | sqlgen::where(make_dto_key_where<DTO>(item))` statement, plus an existence check returning `NotFound` when the target key does not exist.
-
-#### Gap 4: `DbContextBase::save_changes()` is Currently a No-Op & Manual DDL in `main.cpp` (Phase 6)
+#### Gap 1: True Unit of Work (`save_changes`), Transactions, & Automatic Schema Creation (`ensure_created`)
 - **What the code currently does:**
   - `db.people.add(p)` executes `INSERT` immediately against SQLite, and `db.save_changes()` in [DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx) only checks `if (!is_connected()) return error; return {};`.
-  - `Startup/main.cpp` still chains `sqlgen::create_table<DTO>` manually for each table.
+  - `Startup/main.cpp` still includes `<sqlgen.hpp>` and `<sqlgen/sqlite.hpp>` to call `sqlgen::sqlite::connect` and manually chain `sqlgen::create_table<DTO> | sqlgen::if_not_exists` for each DTO.
 - **What needs to change (Phase 6):**
-  - Implement true transaction boundaries (`begin_transaction()`, `commit()`, `rollback()`) on `SQLiteConnection`, transactional unit-of-work execution in `DbContextBase`, and `db.ensure_created()` over registered context entities.
+  - Expose connection factory (`SQLiteConnection::connect`), DDL helpers (`ensure_table_created<DTO>()`, `enable_foreign_keys()`), and transaction primitives (`begin_transaction()`, `commit()`, `rollback()`) on `SQLiteConnection` and `TestDatabaseConnection`.
+  - Implement C++26 reflection-driven `db.ensure_created(this Self&& self)` on `DbContextBase` that inspects all `Set<T>` data members of the derived `DbContext` at compile time (`std::meta::nonstatic_data_members_of(^^Derived)`) and creates every table + enables foreign keys automatically.
+  - Implement both **staged Unit-of-Work execution** (`defer_changes(true)`, `stage_add` / `stage_update` / `stage_remove`, `pending_changes_count()`, `discard_changes()`, atomic `save_changes()`) and **scoped transactions** (`db.transaction(fn)`) with automatic rollback on failure.
 
 ---
 
@@ -423,17 +405,27 @@ sequenceDiagram
     end
 ```
 
-### Pillar 5: Compile-Time `EntityMetadata<T>` & `ensure_created()`
+### Pillar 5: Compile-Time Reflection `db.ensure_created()` (Deducing `this` + `<meta>`)
 
-When `AppDbContext` registers its entity sets (`DbContextBase<Conn, Person, Something, Person_Something>`), `db.ensure_created()` can iterate over a template parameter pack of entities at compile time:
+By combining C++23 **deducing `this`** (`this Self&& self`) with C++26 **static reflection** (`std::meta::nonstatic_data_members_of(^^Derived)`), `DbContextBase::ensure_created()` automatically discovers every `Set<Domain>` member declared on `AppDbContext` without requiring duplicate template arguments or macro registration:
 ```cpp
-template<typename... Entities>
-std::expected<void, Core::DbError> ensure_created() {
-    // 1. Enable foreign keys: PRAGMA foreign_keys = ON;
-    // 2. For each entity in topological order, run sqlgen::create_table<SchemaOf_t<Entities>> | sqlgen::if_not_exists
+template<typename Self>
+std::expected<void, Core::DbError> ensure_created(this Self&& self) {
+    using Derived = std::remove_cvref_t<Self>;
+    static constexpr auto members = std::define_static_array(
+        std::meta::nonstatic_data_members_of(^^Derived, std::meta::access_context::unchecked()));
+
+    template for (constexpr auto m : members) {
+        using MemberType = std::remove_cvref_t<[:std::meta::type_of(m):]>;
+        if constexpr (IsDbSetMember<MemberType>) {
+            auto res = self.conn_->template ensure_table_created<typename MemberType::DTOType>();
+            if (!res) return res;
+        }
+    }
+    return self.conn_->enable_foreign_keys(); // PRAGMA foreign_keys = ON;
 }
 ```
-This eliminates the manual `rawConnRes.and_then(sqlgen::create_table<...>...)` boilerplate in `main.cpp`!
+This eliminates the manual `rawConnRes.and_then(sqlgen::create_table<...>...)` boilerplate and `<sqlgen.hpp>` includes in `Startup/main.cpp`!
 
 ---
 
@@ -442,8 +434,8 @@ This eliminates the manual `rawConnRes.and_then(sqlgen::create_table<...>...)` b
 ```mermaid
 flowchart LR
     P12["Phase 1 & 2 (Done)<br/>Strong IDs, Single/CompositeKey,<br/>DbError, Initial DbSet"] --> P34["Phase 3 & 4 (Done)<br/>Reflection SchemaTraits, EntityMetadata,<br/>Unified DbSet&lt;Domain&gt; &amp; Monadic Reads"]
-    P34 --> P5["Phase 5 (Next)<br/>SQL Pushdown in SQLiteConnection<br/>(Eliminate fetch_all Scans &amp; Raw SQL)"]
-    P5 --> P6["Phase 6<br/>Real Transactions, Staged Unit of Work<br/>&amp; db.ensure_created()"]
+    P34 --> P5["Phase 5 (Done)<br/>SQL Pushdown in SQLiteConnection<br/>(Eliminate fetch_all Scans &amp; Raw SQL)"]
+    P5 --> P6["Phase 6 (Next)<br/>Real Transactions, Staged Unit of Work<br/>&amp; Reflection db.ensure_created()"]
 ```
 
 ### Phase 1 & Phase 2: Foundations & Key Model *(Completed)*
@@ -554,11 +546,56 @@ flowchart LR
     - Single-key `try_get_by_id`, `count`, `exists`, `update` (including `DbErrorCode::NotFound` on missing rows), and `delete_by_id`.
     - Composite-key `DbSet<Core::Person_Something>` (`find`, `try_find`, `update`, `remove`, `contains`) and `SQLitePerson_SomethingRepo` (`find_by_person_id`, `find_by_something_id`) against real SQLite tables.
 
-### Phase 6: True Unit of Work (`save_changes`) & Automatic Schema (`ensure_created`)
-- [ ] **Task 6.1:** Add `begin_transaction()`, `commit()`, and `rollback()` to `SQLiteConnection` and `TestDatabaseConnection`.
-- [ ] **Task 6.2:** Implement staged change tracking (or transactional execution) in `DbContextBase::save_changes()` with automatic rollback on failure.
-- [ ] **Task 6.3:** Implement `db.ensure_created()` on `DbContextBase<Conn, Entities...>` to automatically create all registered tables and enable `PRAGMA foreign_keys = ON;`.
-- [ ] **Task 6.4:** Add SQLite integration tests in `test_DAL.cpp` using `:memory:` SQLite databases alongside the mock connection tests.
+### Phase 6: True Unit of Work (`save_changes`), Transactions, & Automatic Schema (`ensure_created`) *(Next Up — Detailed Spec)*
+- [ ] **Task 6.1: Connection Factory, DDL Helpers, & Transaction Primitives (`DAL/context/SQLiteConnection.ixx` & `TestDatabaseConnection`)**
+  - **`DAL/context/SQLiteConnection.ixx`:**
+    - Add `static std::expected<std::shared_ptr<SQLiteConnection>, Core::DbError> connect(const std::string& dbPath)` wrapping `sqlgen::sqlite::connect(dbPath)`.
+    - Add `template<typename DTO> std::expected<void, Core::DbError> ensure_table_created()` executing `(sqlgen::create_table<DTO> | sqlgen::if_not_exists)(conn_)`.
+    - Add `std::expected<void, Core::DbError> enable_foreign_keys()` executing `conn_->execute("PRAGMA foreign_keys = ON;")`.
+    - Add transaction lifecycle methods wrapping `sqlgen::sqlite::Connection`:
+      - `std::expected<void, Core::DbError> begin_transaction()` (`conn_->begin_transaction()`, sets `in_transaction_ = true`)
+      - `std::expected<void, Core::DbError> commit()` (`conn_->commit()`, sets `in_transaction_ = false`)
+      - `std::expected<void, Core::DbError> rollback()` (`conn_->rollback()`, sets `in_transaction_ = false`)
+      - `[[nodiscard]] bool in_transaction() const noexcept`
+  - **`TestDatabaseConnection` (`DAL/tests/test_DAL.cpp`):**
+    - Add snapshot-backed `begin_transaction()`, `commit()`, `rollback()`, `in_transaction()`, `ensure_table_created<DTO>()`, and `enable_foreign_keys()`:
+      - `begin_transaction()` snapshots `(persons_, somethings_, person_somethings_)` so `rollback()` restores all in-memory tables to their exact pre-transaction state.
+- [ ] **Task 6.2: Staged Unit of Work (`save_changes`) & Scoped Transactions (`DAL/context/DbContext.ixx` & `DAL/context/DbSet.ixx`)**
+  - **`DAL/context/DbContext.ixx`:**
+    - Maintain a queue of staged operations: `std::vector<std::function<std::expected<void, Core::DbError>()>> pending_ops_;` and a `bool defer_changes_ = false;` mode flag.
+    - Expose Unit-of-Work controls:
+      - `void defer_changes(bool enabled = true) noexcept` and `[[nodiscard]] bool is_deferred() const noexcept`
+      - `void enqueue_op(std::function<std::expected<void, Core::DbError>()> op)`
+      - `[[nodiscard]] std::size_t pending_changes_count() const noexcept`
+      - `void discard_changes() noexcept` (clears `pending_ops_`)
+    - Expose connection transaction wrappers on `DbContextBase`: `begin_transaction()`, `commit()`, `rollback()`, and `in_transaction()`.
+    - Upgrade `save_changes()`:
+      1. Verifies `is_connected()`.
+      2. If `pending_ops_` is non-empty: starts a transaction (`begin_transaction()`), executes all staged operations in FIFO order, and if **any** operation fails, immediately calls `rollback()`, clears `pending_ops_`, and returns `std::unexpected(err)`. If all succeed, calls `commit()`, clears `pending_ops_`, and returns `{}`.
+      3. If an explicit transaction was already started via `db.begin_transaction()`, commits it.
+    - Add `template<typename Fn> std::expected<void, Core::DbError> transaction(Fn&& fn)`:
+      - Begins a transaction, invokes `fn()`, flushes any staged changes, and commits on success or automatically rolls back and returns the `DbError` on failure.
+  - **`DAL/context/DbSet.ixx`:**
+    - Expose `using DomainType = Domain; using DTOType = DTO; using KeyValueType = KeyType;`.
+    - When constructed with `Ctx* ctx`, bind optional callbacks to `ctx->is_deferred()` and `ctx->enqueue_op(...)` (avoiding circular module imports).
+    - When `is_deferred()` is `true`, `add()`, `add_range()`, `update()`, and `remove()` automatically enqueue into `DbContextBase` and return `{}`.
+    - Also provide explicit staging methods `stage_add(item)`, `stage_add_range(items)`, `stage_update(item)`, and `stage_remove(key_or_parts...)` that always stage into `DbContextBase` regardless of `is_deferred()`.
+- [ ] **Task 6.3: Reflection-Driven `db.ensure_created()` & Pure-Module `Startup/main.cpp` (`DAL/context/DbContext.ixx`, `Startup/main.cpp`)**
+  - **Compile-Time `DbSet` Discovery via Deducing `this` + C++26 `<meta>`:**
+    - Define `concept IsDbSetMember` detecting `T::DomainType`, `T::DTOType`, and `Schema::RelationalEntity<typename T::DTOType>`.
+    - Implement `template<typename Self> std::expected<void, Core::DbError> ensure_created(this Self&& self)` on `DbContextBase`:
+      - Reflects `std::meta::nonstatic_data_members_of(^^std::remove_cvref_t<Self>, std::meta::access_context::unchecked())` at compile time (`template for`).
+      - For every `DbSet` member declared on the derived `DbContext` (e.g., `people`, `somethings`, `personSomethings` on `AppDbContext`), calls `conn_->template ensure_table_created<typename MemberType::DTOType>()` in declaration order, followed by `conn_->enable_foreign_keys()`.
+    - Also provide `template<typename... Domains> std::expected<void, Core::DbError> ensure_created_for()` for base `DbContextBase` instances without derived members.
+  - **`Startup/main.cpp` Cleanup:**
+    - Remove `#include <sqlgen.hpp>`, `#include <sqlgen/sqlite.hpp>`, and manual `sqlgen::create_table<...>` chains from `Startup/main.cpp`.
+    - Use pure C++ modules (`import std; import core; import dal;`), connect via `DAL::SQLiteConnection::connect(dbPath)`, initialize schema via `db.ensure_created()`, stage seed records with `db.defer_changes(true)`, and commit atomically via `db.save_changes()`.
+- [ ] **Task 6.4: Phase 6 Unit & Integration Tests (`DAL/tests/test_DAL.cpp`)**
+  - Add `Phase6UnitOfWorkAndSchemaTest` suite verifying:
+    1. Reflection-driven `db.ensure_created()` on a fresh `:memory:` `SQLiteConnection` automatically creates `Person`, `Something`, and `Person_Something` tables and enforces `PRAGMA foreign_keys = ON` (verifying foreign-key violation returns `DbErrorCode::ConstraintViolation`).
+    2. Deferred Unit of Work (`db.defer_changes(true)` + `add` / `update` / `remove`): changes are not visible in the database before `db.save_changes()`, and become persisted after `db.save_changes()`.
+    3. Atomic rollback on mid-batch failure: when staging multiple valid inserts followed by a duplicate-key or foreign-key violation insert, `db.save_changes()` returns an error and rolls back all earlier inserts in the batch (leaving 0 partial writes in both `TestDatabaseConnection` and `:memory:` `SQLiteConnection`).
+    4. Scoped `db.transaction([&] { ... })` commit and rollback behavior, plus `db.discard_changes()`.
 
 ---
 
