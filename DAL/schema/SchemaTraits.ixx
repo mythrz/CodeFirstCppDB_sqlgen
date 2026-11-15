@@ -422,4 +422,108 @@ export namespace DAL::Schema
         return kahn_topological_sort<N>(depends_on);
     }
 
+    // =========================================================================
+    // Phase 11: Native C++26 Reflection DTO Equality (Zero-JSON)
+    // =========================================================================
+
+    template<typename DTO>
+    [[nodiscard]] constexpr bool dto_equals(const DTO& a, const DTO& b)
+    {
+        constexpr auto ctx = std::meta::access_context::unchecked();
+        template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, ctx)))
+        {
+            if (unwrap_field(a.[:m:]) != unwrap_field(b.[:m:]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // =========================================================================
+    // Phase 14: Compile-Time Foreign-Key Introspection Helpers
+    // =========================================================================
+
+    template<typename ChildDTO, typename ParentDTO>
+    consteval std::size_t count_fk_members_referencing()
+    {
+        constexpr auto ctx = std::meta::access_context::unchecked();
+        constexpr auto parent_target = std::meta::dealias(^^ParentDTO);
+        std::size_t count = 0;
+        template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^ChildDTO, ctx)))
+        {
+            using RawFieldT = [:std::meta::type_of(m):];
+            using FieldT = std::remove_cvref_t<RawFieldT>;
+            if constexpr (SqlgenForeignKeyField<FieldT>)
+            {
+                using TargetT = typename FieldT::ForeignTableType;
+                if (std::meta::dealias(^^TargetT) == parent_target)
+                {
+                    ++count;
+                }
+            }
+        }
+        return count;
+    }
+
+    template<typename ChildDTO, typename ParentDTO>
+        requires (count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
+    consteval std::meta::info find_fk_member_referencing()
+    {
+        constexpr auto ctx = std::meta::access_context::unchecked();
+        constexpr auto parent_target = std::meta::dealias(^^ParentDTO);
+        std::meta::info result{};
+        template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^ChildDTO, ctx)))
+        {
+            using RawFieldT = [:std::meta::type_of(m):];
+            using FieldT = std::remove_cvref_t<RawFieldT>;
+            if constexpr (SqlgenForeignKeyField<FieldT>)
+            {
+                using TargetT = typename FieldT::ForeignTableType;
+                if (std::meta::dealias(^^TargetT) == parent_target)
+                {
+                    result = m;
+                }
+            }
+        }
+        return result;
+    }
+
+    template<typename ChildDTO, typename ParentDTO, typename KeyValue>
+        requires (count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
+    [[nodiscard]] auto make_fk_where(const KeyValue& parent_pk_val)
+    {
+        constexpr auto fk_m = find_fk_member_referencing<ChildDTO, ParentDTO>();
+        using ValueType = typename detail::member_reflection_value_type<fk_m>::type;
+        return col_of<fk_m> == static_cast<ValueType>(parent_pk_val);
+    }
+
+    template<typename ChildDTO, typename ParentDTO>
+        requires (count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
+    [[nodiscard]] constexpr auto extract_fk_value(const ChildDTO& child_dto)
+    {
+        constexpr auto fk_m = find_fk_member_referencing<ChildDTO, ParentDTO>();
+        return unwrap_field(child_dto.[:fk_m:]);
+    }
+
+    template<typename DTO>
+    consteval bool has_auto_incr_primary_key()
+    {
+        constexpr auto ctx = std::meta::access_context::unchecked();
+        bool found = false;
+        template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, ctx)))
+        {
+            using RawFieldT = [:std::meta::type_of(m):];
+            using FieldT = std::remove_cvref_t<RawFieldT>;
+            if constexpr (requires { FieldT::auto_incr; })
+            {
+                if constexpr (FieldT::auto_incr)
+                {
+                    found = true;
+                }
+            }
+        }
+        return found;
+    }
+
 } // namespace DAL::Schema

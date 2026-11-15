@@ -479,6 +479,69 @@ export namespace DAL
             return 0;
         }
 
+        template<typename DTO, typename Condition>
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> try_count_where(const Condition& cond) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto query = sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">)
+                       | sqlgen::where(cond)
+                       | sqlgen::to<RowCount>;
+            auto res = query(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return res.value().count;
+        }
+
+        template<typename DTO>
+        auto upsert(const DTO& item)
+        {
+            if (!is_open())
+            {
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
+                    sqlgen::error("Database connection is closed")
+                };
+            }
+            std::vector<DTO> vec{ item };
+            return sqlgen::insert_or_replace(std::ref(vec))(conn_);
+        }
+
+        template<typename DTO>
+        auto upsert_many(const std::vector<DTO>& items)
+        {
+            if (!is_open())
+            {
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
+                    sqlgen::error("Database connection is closed")
+                };
+            }
+            return sqlgen::insert_or_replace(std::ref(items))(conn_);
+        }
+
+        template<typename DTO, typename Condition>
+        std::expected<void, Core::DbError> delete_where(const Condition& cond)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto query = sqlgen::delete_from<DTO> | sqlgen::where(cond);
+            auto res = query(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
     private:
         struct RowCount
         {

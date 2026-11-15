@@ -1832,4 +1832,260 @@ namespace
         EXPECT_EQ(bobReloaded->username, "bob_v2");
     }
 
+    // =========================================================================
+    // Phase 11: Zero-JSON Reflected ChangeTracker & remove() Lifecycle Sync
+    // =========================================================================
+
+    TEST(Phase11ZeroJsonChangeTrackerTest, DtoEquals_SingleAndCompositeKeyDTOs)
+    {
+        DAL::Schema::PersonDTO p1{ .id = 1, .first_name = "Alice", .last_name = "Smith" };
+        DAL::Schema::PersonDTO p2{ .id = 1, .first_name = "Alice", .last_name = "Smith" };
+        DAL::Schema::PersonDTO p3{ .id = 1, .first_name = "Bob", .last_name = "Smith" };
+
+        EXPECT_TRUE(DAL::Schema::dto_equals(p1, p2));
+        EXPECT_FALSE(DAL::Schema::dto_equals(p1, p3));
+
+        DAL::Schema::Person_SomethingDTO link1{ .person_id = 1, .something_id = 2, .association_type = "Owner" };
+        DAL::Schema::Person_SomethingDTO link2{ .person_id = 1, .something_id = 2, .association_type = "Owner" };
+        DAL::Schema::Person_SomethingDTO link3{ .person_id = 1, .something_id = 2, .association_type = "User" };
+
+        EXPECT_TRUE(DAL::Schema::dto_equals(link1, link2));
+        EXPECT_FALSE(DAL::Schema::dto_equals(link1, link3));
+    }
+
+    TEST(Phase11ZeroJsonChangeTrackerTest, RemoveEvictsTrackedEntity_NoPhantomUpdate)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        PocoDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        db.enable_change_tracking(true);
+
+        ASSERT_TRUE(db.users.add(PocoUser{ .username = "alice" }).has_value());
+        auto alice = db.users.find_tracked(1);
+        ASSERT_NE(alice, nullptr);
+        EXPECT_EQ(db.tracked_entities_count(), 1u);
+
+        // Mutate tracked entity and then remove it before save_changes()
+        alice->username = "alice_mutated";
+        ASSERT_TRUE(db.users.remove(1).has_value());
+        EXPECT_EQ(db.tracked_entities_count(), 0u);
+
+        // save_changes() should succeed without emitting a phantom UPDATE for deleted row
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_FALSE(db.users.find(1).has_value());
+        EXPECT_EQ(db.users.count(), 0u);
+    }
+
+    // =========================================================================
+    // Phase 12: Composable DbQuery, Rich Predicates & Server-Side Aggregations
+    // =========================================================================
+
+    TEST(Phase12ComposableQueryTest, ChainedAndOr_RichPredicates_CountAndAny)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        struct PersonQueryDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+        {
+            Set<Core::Person> people{ this };
+            explicit PersonQueryDbContext(std::shared_ptr<DAL::SQLiteConnection> c)
+                : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+            {}
+        };
+
+        PersonQueryDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Charlie", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 3 }, "Bob", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 4 }, "Diana", "Jones")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 5 }, "Alicia", "Smith")).has_value());
+
+        // Chained AND + > + LIKE
+        auto filtered = db.people
+            .where_equal<"last_name">("Smith")
+            .where_gt<"id">(1)
+            .where_like<"first_name">("%li%")
+            .order_by<"id">(false)
+            .to_vector();
+        ASSERT_EQ(filtered.size(), 2u);
+        EXPECT_EQ(filtered[0].getFirstName(), "Alice");
+        EXPECT_EQ(filtered[1].getFirstName(), "Alicia");
+
+        // OR chaining
+        auto orQuery = db.people
+            .where_equal<"first_name">("Bob")
+            .or_where_equal<"first_name">("Diana");
+        EXPECT_EQ(orQuery.count(), 2u);
+        EXPECT_TRUE(orQuery.any());
+
+        // where_in + count() + any()
+        auto inQuery = db.people.where_in<"id">(1, 3, 5);
+        auto inCount = inQuery.try_count();
+        ASSERT_TRUE(inCount.has_value());
+        EXPECT_EQ(inCount.value(), 3u);
+        EXPECT_TRUE(inQuery.any());
+        EXPECT_FALSE(db.people.where_equal<"last_name">("Unknown").any());
+
+        // where_le / where_not_equal
+        auto leNotEq = db.people
+            .where_le<"id">(3)
+            .where_not_equal<"first_name">("Bob")
+            .to_vector();
+        EXPECT_EQ(leNotEq.size(), 2u);
+    }
+
+    // =========================================================================
+    // Phase 13: Atomic Upsert & Bulk Server-Side remove_where
+    // =========================================================================
+
+    struct PocoSetting
+    {
+        static constexpr auto tablename = "PocoSettings";
+        sqlgen::PrimaryKey<std::int32_t, false> key_id{ 0 };
+        std::string val;
+    };
+
+    struct SettingDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<PocoSetting> settings{ this };
+        explicit SettingDbContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {}
+    };
+
+    TEST(Phase13UpsertAndBulkDeleteTest, UpsertImmediateAndDeferred_And_RemoveWhere)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        struct PersonUpsertDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+        {
+            Set<Core::Person> people{ this };
+            explicit PersonUpsertDbContext(std::shared_ptr<DAL::SQLiteConnection> c)
+                : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+            {}
+        };
+
+        PersonUpsertDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // Immediate upsert (insert)
+        auto upsert1 = db.people.upsert(Core::Person(Core::PersonId{ 1 }, "Alice", "Smith"));
+        ASSERT_TRUE(upsert1.has_value()) << upsert1.error().to_string();
+        EXPECT_EQ(db.people.count(), 1u);
+
+        // Immediate upsert (replace existing)
+        auto upsert2 = db.people.upsert(Core::Person(Core::PersonId{ 1 }, "AliceV2", "Smith"));
+        ASSERT_TRUE(upsert2.has_value()) << upsert2.error().to_string();
+        EXPECT_EQ(db.people.count(), 1u);
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "AliceV2");
+
+        // Deferred upsert inside save_changes()
+        db.defer_changes(true);
+        ASSERT_TRUE(db.people.upsert(Core::Person(Core::PersonId{ 2 }, "Bob", "Smith")).has_value());
+        ASSERT_TRUE(db.people.upsert(Core::Person(Core::PersonId{ 3 }, "Diana", "Jones")).has_value());
+        EXPECT_EQ(db.people.count(), 1u);
+        ASSERT_TRUE(db.save_changes().has_value());
+        db.defer_changes(false);
+        EXPECT_EQ(db.people.count(), 3u);
+
+        // Bulk server-side remove_where()
+        ASSERT_TRUE(db.people.where_equal<"last_name">("Smith").remove_where().has_value());
+        EXPECT_EQ(db.people.count(), 1u);
+        EXPECT_EQ(db.people.find(3)->getFirstName(), "Diana");
+
+        // Also test native sqlgen::insert_or_replace path on a non-auto-increment PK entity
+        SettingDbContext sdb(connRes.value());
+        ASSERT_TRUE(sdb.ensure_created().has_value());
+        ASSERT_TRUE(sdb.settings.upsert(PocoSetting{ .key_id = 42, .val = "v1" }).has_value());
+        ASSERT_TRUE(sdb.settings.upsert(PocoSetting{ .key_id = 42, .val = "v2" }).has_value());
+        EXPECT_EQ(sdb.settings.count(), 1u);
+        EXPECT_EQ(sdb.settings.find(42)->val, "v2");
+    }
+
+    // =========================================================================
+    // Phase 14: Compile-Time Foreign-Key Relationship Navigation
+    // =========================================================================
+
+    TEST(Phase14ForeignKeyNavigationTest, QueryChildren_QueryParent_QueryManyToMany_EncapsulatedAndPoco)
+    {
+        // 1. Encapsulated domain entities (Core::Person, Core::Something, Core::Person_Something)
+        {
+            auto connRes = DAL::SQLiteConnection::connect(":memory:");
+            ASSERT_TRUE(connRes.has_value());
+
+            struct NavDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+            {
+                Set<Core::Person> people{ this };
+                Set<Core::Something> somethings{ this };
+                Set<Core::Person_Something> personSomethings{ this };
+
+                explicit NavDbContext(std::shared_ptr<DAL::SQLiteConnection> c)
+                    : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+                {}
+            };
+
+            NavDbContext db(connRes.value());
+            ASSERT_TRUE(db.ensure_created().has_value());
+
+            Core::Person alice(Core::PersonId{ 1 }, "Alice", "Smith");
+            Core::Something laptop(Core::SomethingId{ 1 }, "Laptop", "Electronics", "Workstation");
+            Core::Something coffee(Core::SomethingId{ 2 }, "Coffee", "Appliances", "Espresso");
+            Core::Person_Something link1(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner");
+            Core::Person_Something link2(Core::PersonId{ 1 }, Core::SomethingId{ 2 }, "User");
+
+            ASSERT_TRUE(db.people.add(alice).has_value());
+            ASSERT_TRUE(db.somethings.add(laptop).has_value());
+            ASSERT_TRUE(db.somethings.add(coffee).has_value());
+            ASSERT_TRUE(db.personSomethings.add(link1).has_value());
+            ASSERT_TRUE(db.personSomethings.add(link2).has_value());
+
+            auto childrenRes = db.query_children<Core::Person_Something>(alice);
+            ASSERT_TRUE(childrenRes.has_value()) << childrenRes.error().to_string();
+            EXPECT_EQ(childrenRes->size(), 2u);
+
+            auto parentRes = db.query_parent<Core::Person>(link1);
+            ASSERT_TRUE(parentRes.has_value()) << parentRes.error().to_string();
+            ASSERT_TRUE(parentRes->has_value());
+            EXPECT_EQ((*parentRes)->getFirstName(), "Alice");
+
+            auto m2mRes = db.query_many_to_many<Core::Something, Core::Person_Something>(alice);
+            ASSERT_TRUE(m2mRes.has_value()) << m2mRes.error().to_string();
+            ASSERT_EQ(m2mRes->size(), 2u);
+        }
+
+        // 2. Zero-DTO POCO entities (PocoUser, PocoRole, PocoUserRole)
+        {
+            auto connRes = DAL::SQLiteConnection::connect(":memory:");
+            ASSERT_TRUE(connRes.has_value());
+
+            PocoDbContext db(connRes.value());
+            ASSERT_TRUE(db.ensure_created().has_value());
+
+            ASSERT_TRUE(db.users.add(PocoUser{ .username = "alice" }).has_value());
+            ASSERT_TRUE(db.roles.add(PocoRole{ .role_name = "Admin" }).has_value());
+            ASSERT_TRUE(db.roles.add(PocoRole{ .role_name = "Reviewer" }).has_value());
+            ASSERT_TRUE(db.userRoles.add(PocoUserRole{ .user_id = 1, .role_id = 1, .assigned_by = "sys" }).has_value());
+            ASSERT_TRUE(db.userRoles.add(PocoUserRole{ .user_id = 1, .role_id = 2, .assigned_by = "sys" }).has_value());
+
+            auto alice = db.users.find(1).value();
+            auto links = db.query_children<PocoUserRole>(alice);
+            ASSERT_TRUE(links.has_value());
+            EXPECT_EQ(links->size(), 2u);
+
+            auto parentUser = db.query_parent<PocoUser>(links->front());
+            ASSERT_TRUE(parentUser.has_value());
+            ASSERT_TRUE(parentUser->has_value());
+            EXPECT_EQ((*parentUser)->username, "alice");
+
+            auto roles = db.query_many_to_many<PocoRole, PocoUserRole>(alice);
+            ASSERT_TRUE(roles.has_value());
+            ASSERT_EQ(roles->size(), 2u);
+        }
+    }
+
 } // namespace

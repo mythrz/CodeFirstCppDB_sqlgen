@@ -300,7 +300,7 @@ Eliminate `#include <rfl/json.hpp>` and runtime JSON serialization from `ChangeT
 
 #### Detailed Tasks
 
-- [ ] **Task 11.1: Add `consteval`-Reflected `dto_equals<DTO>(a, b)` in `DAL/schema/SchemaTraits.ixx`**
+- [x] **Task 11.1: Add `consteval`-Reflected `dto_equals<DTO>(a, b)` in `DAL/schema/SchemaTraits.ixx`**
   - Implement a zero-allocation, compile-time reflected equality helper in [DAL/schema/SchemaTraits.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/schema/SchemaTraits.ixx) that compares all non-static data members of `DTO` (unwrapping `.value()` via `unwrap_sqlgen_value`):
     ```cpp
     template<typename DTO>
@@ -322,12 +322,12 @@ Eliminate `#include <rfl/json.hpp>` and runtime JSON serialization from `ChangeT
     - Replace `serialize_key_json(key)` with `std::format("{}", key)` (using the `std::formatter` specializations in [Core/Key.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/Core/Key.ixx#L208-L232)).
     - Store `DTO baseline_dto` directly inside `snapshot_dtos_` (`std::unordered_map<std::string, DTO>`) and inside the `detect_fn` closure, comparing `!DAL::Schema::dto_equals(current_dto, baseline_dto)` instead of `rfl::json::write`.
 
-- [ ] **Task 11.2: Evict Tracked Entities on `remove()` & Add `clear_change_tracker()` (`DAL/context/DbContext.ixx` & `DbSet.ixx`)**
+- [x] **Task 11.2: Evict Tracked Entities on `remove()` & Add `clear_change_tracker()` (`DAL/context/DbContext.ixx` & `DbSet.ixx`)**
   - Add `void untrack_key(const std::string& key) noexcept` and `void clear_change_tracker() noexcept` on `DbContextBase` in [DAL/context/DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L303-L386).
   - Wire an `untrack_fn_` callback into `DbSet` so that calling `remove(key)` or `remove(k1, k2, ...)` (both immediate and deferred) removes `table_key` from `snapshot_dtos_` and `tracked_entries_`, preventing `save_changes()` from emitting a phantom `UPDATE` for a deleted entity.
   - Remove the unused `std::array<std::meta::info, K> dto_types{};` in `DbContextBase::topological_dbset_order()` ([DAL/context/DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L116-L120)).
 
-- [ ] **Task 11.3: Phase 11 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 11.3: Phase 11 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Verify `DAL::Schema::dto_equals` on both single-key and composite-key DTOs.
   - Verify that mutating a `find_tracked` entity and then calling `remove()` before `save_changes()` deletes the entity cleanly without emitting a redundant `UPDATE` or leaving stale entries in `tracked_entities_count()`.
 
@@ -340,7 +340,7 @@ Make `DbQuery` fully composable when chaining multiple `.where_*` / `.or_where_*
 
 #### Detailed Tasks
 
-- [ ] **Task 12.1: Composable `AND` / `OR` Chaining on `DbQuery` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 12.1: Composable `AND` / `OR` Chaining on `DbQuery` (`DAL/context/DbSet.ixx`)**
   - Update `DbQuery::where_sql(NewCondition cond)` in [DAL/context/DbSet.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbSet.ixx#L42-L48) so that when `HasWhere == true`, it combines the existing condition and the new condition via `auto combined = condition_ && cond;`:
     ```cpp
     template<typename NewCondition>
@@ -364,14 +364,14 @@ Make `DbQuery` fully composable when chaining multiple `.where_*` / `.or_where_*
     ```
   - Add `or_where_sql(NewCondition cond)` and `or_where_equal<ColName>(val)` on `DbQuery` using `condition_ || cond` when `HasWhere == true`.
 
-- [ ] **Task 12.2: Rich Column Comparison Predicates on `DbSet` and `DbQuery` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 12.2: Rich Column Comparison Predicates on `DbSet` and `DbQuery` (`DAL/context/DbSet.ixx`)**
   - Add helper methods parameterized by `rfl::internal::StringLiteral ColName` on both `DbSet` and `DbQuery` (normalizing `const char*` / `std::string_view` to `std::string` and unwrapping `Core::Id<Tag>` via `unwrap_single_key` where appropriate):
     - `where_not_equal<ColName>(val)` (`sqlgen::Col<ColName>{} != val`)
     - `where_lt<ColName>(val)` (`<`), `where_le<ColName>(val)` (`<=`), `where_gt<ColName>(val)` (`>`), `where_ge<ColName>(val)` (`>=`)
     - `where_like<ColName>(std::string_view pattern)` (`sqlgen::Col<ColName>{}.like(std::string(pattern))`)
     - `where_in<ColName>(const Ts&... vals)` (`sqlgen::Col<ColName>{}.in(vals...)`)
 
-- [ ] **Task 12.3: Server-Side `.try_count()`, `.count()`, and `.any()` on `DbQuery` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
+- [x] **Task 12.3: Server-Side `.try_count()`, `.count()`, and `.any()` on `DbQuery` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L211-L230), add `try_count_where<DTO, Condition>(const Condition& cond)` executing:
     ```cpp
     const auto query = sqlgen::select_from<DTO>(sqlgen::count().as<"total">()) |
@@ -383,7 +383,7 @@ Make `DbQuery` fully composable when chaining multiple `.where_*` / `.or_where_*
     - `[[nodiscard]] std::size_t count() const` (returning `try_count().value_or(0)`).
     - `[[nodiscard]] bool any() const` (executing `this->limit(1).try_to_vector()` and checking `!res->empty()`).
 
-- [ ] **Task 12.4: Phase 12 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 12.4: Phase 12 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test chained `.where_equal<"last_name">("Smith").where_gt<"id">(1).where_like<"first_name">("%li%")`, `.or_where_equal(...)`, `.where_in<"id">(1, 3, 5)`, and server-side `.count()` / `.any()`.
 
 ---
@@ -395,7 +395,7 @@ Expose SQLite's atomic `INSERT OR REPLACE` (`sqlgen::insert_or_replace`) for sin
 
 #### Detailed Tasks
 
-- [ ] **Task 13.1: `upsert` and `upsert_many` in `SQLiteConnection` & `DbSet` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
+- [x] **Task 13.1: `upsert` and `upsert_many` in `SQLiteConnection` & `DbSet` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L317-L370), add:
     ```cpp
     template<DAL::Schema::RelationalEntity DTO>
@@ -419,7 +419,7 @@ Expose SQLite's atomic `INSERT OR REPLACE` (`sqlgen::insert_or_replace`) for sin
     - When `conn_` supports `conn_->upsert(dto)`, execute `sqlgen::insert_or_replace` atomically; otherwise (e.g., on mock connections without `upsert`), fall back to `contains(key) ? update_immediate(entity) : add_immediate(entity)`.
     - Automatically update the `ChangeTracker` snapshot for the upserted entity.
 
-- [ ] **Task 13.2: Server-Side Conditional Bulk Delete (`delete_where` / `remove_where`) (`SQLiteConnection.ixx` & `DbSet.ixx`)**
+- [x] **Task 13.2: Server-Side Conditional Bulk Delete (`delete_where` / `remove_where`) (`SQLiteConnection.ixx` & `DbSet.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx), add:
     ```cpp
     template<DAL::Schema::RelationalEntity DTO, typename Condition>
@@ -442,7 +442,7 @@ Expose SQLite's atomic `INSERT OR REPLACE` (`sqlgen::insert_or_replace`) for sin
     ```
   - Add `std::expected<void, Core::DbError> remove_where() const` on `DbQuery` (when `HasWhere == true`) and `remove_where_equal<ColName>(val)` on `DbSet`.
 
-- [ ] **Task 13.3: Phase 13 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 13.3: Phase 13 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `db.people.upsert(...)` inserting a new row and replacing an existing row (both immediate and deferred inside `save_changes()`), and test `db.people.where_equal<"last_name">("Smith").remove_where()`.
 
 ---
@@ -454,7 +454,7 @@ Leverage C++26 static reflection over `sqlgen::ForeignKey<ValueType, TargetTable
 
 #### Detailed Tasks
 
-- [ ] **Task 14.1: Compile-Time FK Introspection Helpers in `DAL/schema/SchemaTraits.ixx`**
+- [x] **Task 14.1: Compile-Time FK Introspection Helpers in `DAL/schema/SchemaTraits.ixx`**
   - Add `consteval` helpers that locate the unique `sqlgen::ForeignKey` member on `ChildDTO` whose `ForeignTableType` matches `ParentDTO` (`std::meta::dealias(^^ChildDTO)` -> `std::meta::dealias(^^ParentDTO)`):
     ```cpp
     template<typename ChildDTO, typename ParentDTO>
@@ -504,14 +504,14 @@ Leverage C++26 static reflection over `sqlgen::ForeignKey<ValueType, TargetTable
     }
     ```
 
-- [ ] **Task 14.2: Navigation Query Methods on `DbSet` and `DbContextBase` (`DbSet.ixx` & `DbContext.ixx`)**
+- [x] **Task 14.2: Navigation Query Methods on `DbSet` and `DbContextBase` (`DbSet.ixx` & `DbContext.ixx`)**
   - On `DbSet<ChildDomain, ChildDTO, ...>`, add `where_foreign_key<ParentDomain>(const ParentDomain& parent)` which extracts the parent's primary key (`EntityMetadata<ParentDomain>::extract_key(parent).get()`), unwraps any `Core::Id<Tag>`, and returns a `DbQuery` filtered by `make_fk_where<ChildDTO, ParentDTO>(raw_pk)`.
   - On `DbContextBase` ([DAL/context/DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx)), add deduced-`this` navigation helpers that discover the corresponding `Set<T>` members on the derived `DbContext`:
     - `db.query_children<ChildDomain>(this Self&& self, const ParentDomain& parent)` -> returns `std::expected<std::vector<ChildDomain>, Core::DbError>` of all `ChildDomain` rows referencing `parent`.
     - `db.query_parent<ParentDomain>(this Self&& self, const ChildDomain& child)` -> reads the FK value on `ChildDTO` referencing `ParentDTO` and calls `parent_set.try_find(fk_val)`.
     - `db.query_many_to_many<TargetDomain, JunctionDomain>(this Self&& self, const SourceDomain& source)` -> queries matching `JunctionDomain` rows via `query_children<JunctionDomain>(source)` and resolves the corresponding `TargetDomain` entities via a single `WHERE pk IN (...)` query (or key lookup).
 
-- [ ] **Task 14.3: Phase 14 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 14.3: Phase 14 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `db.query_children<Core::Person_Something>(person)`, `db.query_parent<Core::Person>(link)`, and `db.query_many_to_many<Core::Something, Core::Person_Something>(person)` on both encapsulated (`Core::Person` / `Core::Something`) and POCO (`PocoUser` / `PocoRole` / `PocoUserRole`) models.
 
 ---

@@ -1,6 +1,5 @@
 module;
 #include <sqlgen.hpp>
-#include <rfl/json.hpp>
 
 export module dal:db_set;
 
@@ -13,8 +12,33 @@ import :sqlite_connection;
 
 export namespace DAL
 {
-    // Fluent server-side query builder for DbSet (Task 10.1).
-    // Translates filtering, sorting, and pagination directly into sqlgen::read pipelines.
+    namespace detail
+    {
+        template<typename Val>
+        [[nodiscard]] constexpr auto normalize_query_val(const Val& val)
+        {
+            using T = std::remove_cvref_t<Val>;
+            if constexpr (Core::SingleKeyType<T>)
+            {
+                return normalize_query_val(val.value);
+            }
+            else if constexpr (requires { val.get(); })
+            {
+                return val.get();
+            }
+            else if constexpr (std::is_convertible_v<T, std::string_view> && !std::same_as<T, std::string>)
+            {
+                return std::string(val);
+            }
+            else
+            {
+                return val;
+            }
+        }
+    } // namespace detail
+
+    // Fluent server-side query builder for DbSet (Phases 10, 12, 13, 14).
+    // Translates filtering, sorting, pagination, aggregations, and bulk deletes into sqlgen pipelines.
     template<typename Domain,
              typename DTO,
              typename ConnectionHandle,
@@ -62,10 +86,75 @@ export namespace DAL
             }
         }
 
+        template<typename Condition>
+        [[nodiscard]] auto or_where_sql(Condition cond) const
+        {
+            if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
+            {
+                return where_sql(std::move(cond));
+            }
+            else
+            {
+                auto combined = where_cond_ || std::move(cond);
+                using CombinedT = decltype(combined);
+                return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
+                    repo_, conn_, std::move(combined), order_by_, limit_, offset_, track_fn_);
+            }
+        }
+
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
         [[nodiscard]] auto where_equal(const Val& val) const
         {
-            return where_sql(sqlgen::Col<ColLiteral>{} == val);
+            return where_sql(sqlgen::Col<ColLiteral>{} == detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto or_where_equal(const Val& val) const
+        {
+            return or_where_sql(sqlgen::Col<ColLiteral>{} == detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_not_equal(const Val& val) const
+        {
+            return where_sql(sqlgen::Col<ColLiteral>{} != detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_lt(const Val& val) const
+        {
+            return where_sql(sqlgen::Col<ColLiteral>{} < detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_le(const Val& val) const
+        {
+            return where_sql(sqlgen::Col<ColLiteral>{} <= detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_gt(const Val& val) const
+        {
+            return where_sql(sqlgen::Col<ColLiteral>{} > detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_ge(const Val& val) const
+        {
+            return where_sql(sqlgen::Col<ColLiteral>{} >= detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+        [[nodiscard]] auto where_like(std::string_view pattern) const
+        {
+            return where_sql(sqlgen::Col<ColLiteral>{}.like(std::string(pattern)));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
+            requires (sizeof...(Ts) > 0)
+        [[nodiscard]] auto where_in(const Ts&... vals) const
+        {
+            return where_sql(sqlgen::Col<ColLiteral>{}.in(detail::normalize_query_val(vals)...));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -150,6 +239,90 @@ export namespace DAL
                 return std::nullopt;
             }
             return std::move(items.front());
+        }
+
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> try_count() const
+        {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is null")
+                };
+            }
+
+            if (!limit_.has_value() && !offset_.has_value())
+            {
+                if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
+                {
+                    if constexpr (requires(const ConnectionHandle& c) { c.template try_count<DTO>(); })
+                    {
+                        return conn_->template try_count<DTO>();
+                    }
+                }
+                else
+                {
+                    if constexpr (requires(const ConnectionHandle& c) {
+                        c.template try_count_where<DTO>(where_cond_);
+                    })
+                    {
+                        return conn_->template try_count_where<DTO>(where_cond_);
+                    }
+                }
+            }
+
+            auto res = try_to_vector();
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ res.error() };
+            }
+            return res.value().size();
+        }
+
+        [[nodiscard]] std::size_t count() const
+        {
+            return try_count().value_or(0);
+        }
+
+        [[nodiscard]] bool any() const
+        {
+            auto res = limit(1).try_to_vector();
+            return res.has_value() && !res.value().empty();
+        }
+
+        std::expected<void, Core::DbError> remove_where() const
+            requires (!std::same_as<WhereCondT, rfl::Nothing>)
+        {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is null")
+                };
+            }
+
+            if constexpr (requires(ConnectionHandle& c) {
+                c.template delete_where<DTO>(where_cond_);
+            })
+            {
+                return conn_->template delete_where<DTO>(where_cond_);
+            }
+            else
+            {
+                auto res = try_to_vector();
+                if (!res)
+                {
+                    return std::unexpected<Core::DbError>{ res.error() };
+                }
+                for (const auto& item : res.value())
+                {
+                    auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(item);
+                    auto del_res = repo_->delete_by_id(key);
+                    if (!del_res)
+                    {
+                        return del_res;
+                    }
+                }
+                return {};
+            }
         }
 
     private:
@@ -258,19 +431,22 @@ export namespace DAL
                 upsert_tracked_fn_ = [ctx](
                     std::type_index type,
                     std::string key_repr,
-                    std::string snapshot,
+                    bool refresh_baseline,
                     std::shared_ptr<void> owned,
                     const void* borrowed,
                     std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                        const std::shared_ptr<void>&, const void*, std::string&)> detect_fn)
+                        const std::shared_ptr<void>&, const void*)> detect_fn)
                 {
                     ctx->upsert_tracked_entry(
                         type,
                         std::move(key_repr),
-                        std::move(snapshot),
+                        refresh_baseline,
                         std::move(owned),
                         borrowed,
                         std::move(detect_fn));
+                };
+                untrack_fn_ = [ctx](std::type_index type, const std::string& key_repr) {
+                    ctx->untrack_key(type, key_repr);
                 };
                 find_tracked_fn_ = [ctx](std::type_index type, const std::string& key_repr) {
                     return ctx->find_tracked_instance(type, key_repr);
@@ -407,11 +583,56 @@ export namespace DAL
         // Removes an entity by primary key (or stages if deferred)
         std::expected<void, Core::DbError> remove(const KeyType& id)
         {
+            untrack_key(id);
             if (should_defer())
             {
                 return stage_remove(id);
             }
             return repo_->delete_by_id(id);
+        }
+
+        // Atomic upsert (insert or replace) for a single entity (Phase 13.1)
+        std::expected<void, Core::DbError> upsert(const Domain& item)
+        {
+            if (should_defer())
+            {
+                return stage_upsert(item);
+            }
+            return upsert_immediate(item);
+        }
+
+        // Atomic batch upsert (insert or replace) for multiple entities (Phase 13.1)
+        std::expected<void, Core::DbError> upsert_range(const std::vector<Domain>& items)
+        {
+            if (should_defer())
+            {
+                return stage_upsert_range(items);
+            }
+            return upsert_many_immediate(items);
+        }
+
+        std::expected<void, Core::DbError> stage_upsert(const Domain& item)
+        {
+            if (!enqueue_op_fn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
+                };
+            }
+            enqueue_op_fn_([this, item]() { return upsert_immediate(item); });
+            return {};
+        }
+
+        std::expected<void, Core::DbError> stage_upsert_range(const std::vector<Domain>& items)
+        {
+            if (!enqueue_op_fn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
+                };
+            }
+            enqueue_op_fn_([this, items]() { return upsert_many_immediate(items); });
+            return {};
         }
 
         // Explicit Unit of Work staging methods (always enqueue into DbContext)
@@ -459,6 +680,7 @@ export namespace DAL
                     Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
                 };
             }
+            untrack_key(id);
             enqueue_op_fn_([repo = repo_, id]() { return repo->delete_by_id(id); });
             return {};
         }
@@ -587,6 +809,63 @@ export namespace DAL
             return query().template where_equal<ColLiteral>(val);
         }
 
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_not_equal(const Val& val) const
+        {
+            return query().template where_not_equal<ColLiteral>(val);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_lt(const Val& val) const
+        {
+            return query().template where_lt<ColLiteral>(val);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_le(const Val& val) const
+        {
+            return query().template where_le<ColLiteral>(val);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_gt(const Val& val) const
+        {
+            return query().template where_gt<ColLiteral>(val);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        [[nodiscard]] auto where_ge(const Val& val) const
+        {
+            return query().template where_ge<ColLiteral>(val);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+        [[nodiscard]] auto where_like(std::string_view pattern) const
+        {
+            return query().template where_like<ColLiteral>(pattern);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
+            requires (sizeof...(Ts) > 0)
+        [[nodiscard]] auto where_in(const Ts&... vals) const
+        {
+            return query().template where_in<ColLiteral>(vals...);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+        std::expected<void, Core::DbError> remove_where_equal(const Val& val) const
+        {
+            return where_equal<ColLiteral>(val).remove_where();
+        }
+
+        template<typename ParentDomain>
+        [[nodiscard]] auto where_foreign_key(const ParentDomain& parent) const
+        {
+            const auto parent_key = Schema::EntityMetadata<ParentDomain>::extract_key(parent);
+            const auto raw_pk = detail::normalize_query_val(parent_key);
+            return where_sql(Schema::make_fk_where<DTO, Schema::SchemaOf_t<ParentDomain>>(raw_pk));
+        }
+
         template<rfl::internal::StringLiteral ColLiteral>
         [[nodiscard]] auto order_by(bool desc = false) const
         {
@@ -612,21 +891,21 @@ export namespace DAL
                 return;
             }
             auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
-            auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity);
+            auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity));
             upsert_tracked_fn_(
                 std::type_index(typeid(Domain)),
-                rfl::json::write(key),
-                rfl::json::write(dto),
+                format_key(key),
+                false,
                 nullptr,
                 &entity,
-                make_detect_fn());
+                make_detect_fn(std::move(baseline)));
         }
 
         // Loads an entity into the identity map and returns a shared_ptr whose mutations
         // are automatically detected and persisted on ctx.save_changes().
         [[nodiscard]] std::shared_ptr<Domain> find_tracked(const KeyType& id) const
         {
-            const std::string key_repr = rfl::json::write(id);
+            const std::string key_repr = format_key(id);
             if (find_tracked_fn_)
             {
                 if (auto existing = find_tracked_fn_(std::type_index(typeid(Domain)), key_repr))
@@ -642,14 +921,14 @@ export namespace DAL
             auto shared = std::make_shared<Domain>(std::move(*loaded));
             if (upsert_tracked_fn_)
             {
-                auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*shared);
+                auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*shared));
                 upsert_tracked_fn_(
                     std::type_index(typeid(Domain)),
                     key_repr,
-                    rfl::json::write(dto),
+                    true,
                     shared,
                     nullptr,
-                    make_detect_fn());
+                    make_detect_fn(std::move(baseline)));
             }
             return shared;
         }
@@ -680,7 +959,7 @@ export namespace DAL
             for (auto& item : items)
             {
                 auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(item);
-                const std::string key_repr = rfl::json::write(key);
+                const std::string key_repr = format_key(key);
                 if (find_tracked_fn_)
                 {
                     if (auto existing = find_tracked_fn_(std::type_index(typeid(Domain)), key_repr))
@@ -692,14 +971,14 @@ export namespace DAL
                 auto shared = std::make_shared<Domain>(std::move(item));
                 if (upsert_tracked_fn_)
                 {
-                    auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*shared);
+                    auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*shared));
                     upsert_tracked_fn_(
                         std::type_index(typeid(Domain)),
                         key_repr,
-                        rfl::json::write(dto),
+                        true,
                         shared,
                         nullptr,
-                        make_detect_fn());
+                        make_detect_fn(std::move(baseline)));
                 }
                 result.push_back(std::move(shared));
             }
@@ -723,13 +1002,108 @@ export namespace DAL
             return is_tracking_enabled_fn_ && is_tracking_enabled_fn_();
         }
 
-        [[nodiscard]] auto make_detect_fn() const
+        [[nodiscard]] static std::string format_key(const KeyType& key)
+        {
+            return std::format("{}", key);
+        }
+
+        void untrack_key(const KeyType& key) const
+        {
+            if (untrack_fn_)
+            {
+                untrack_fn_(std::type_index(typeid(Domain)), format_key(key));
+            }
+        }
+
+        std::expected<void, Core::DbError> upsert_immediate(const Domain& item)
+        {
+            if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
+            {
+                if (conn_)
+                {
+                    if constexpr (requires(ConnectionHandle& c, const DTO& dto) { c.upsert(dto); })
+                    {
+                        const DTO dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
+                        auto res = conn_->upsert(dto);
+                        if (!res)
+                        {
+                            return std::unexpected<Core::DbError>{
+                                Core::DbError::map_from_message(res.error().what())
+                            };
+                        }
+                        if (is_tracking_enabled())
+                        {
+                            record_snapshot(item);
+                        }
+                        return {};
+                    }
+                }
+            }
+
+            const auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(item);
+            auto res = repo_->exists_by_id(key) ? repo_->update_one(item) : repo_->insert_one(item);
+            if (res && is_tracking_enabled())
+            {
+                record_snapshot(item);
+            }
+            return res;
+        }
+
+        std::expected<void, Core::DbError> upsert_many_immediate(const std::vector<Domain>& items)
+        {
+            if (items.empty())
+            {
+                return {};
+            }
+
+            if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
+            {
+                if (conn_)
+                {
+                    if constexpr (requires(ConnectionHandle& c, const std::vector<DTO>& dtos) { c.upsert_many(dtos); })
+                    {
+                        std::vector<DTO> dtos;
+                        dtos.reserve(items.size());
+                        for (const auto& item : items)
+                        {
+                            dtos.push_back(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item));
+                        }
+                        auto res = conn_->upsert_many(dtos);
+                        if (!res)
+                        {
+                            return std::unexpected<Core::DbError>{
+                                Core::DbError::map_from_message(res.error().what())
+                            };
+                        }
+                        if (is_tracking_enabled())
+                        {
+                            for (const auto& item : items)
+                            {
+                                record_snapshot(item);
+                            }
+                        }
+                        return {};
+                    }
+                }
+            }
+
+            for (const auto& item : items)
+            {
+                auto res = upsert_immediate(item);
+                if (!res)
+                {
+                    return res;
+                }
+            }
+            return {};
+        }
+
+        [[nodiscard]] auto make_detect_fn(std::shared_ptr<DTO> baseline) const
         {
             auto repo = repo_;
-            return [repo](
+            return [repo, baseline = std::move(baseline)](
                 const std::shared_ptr<void>& owned,
-                const void* borrowed,
-                std::string& snapshot)
+                const void* borrowed)
                 -> std::optional<std::function<std::expected<void, Core::DbError>()>>
             {
                 const Domain* ptr = nullptr;
@@ -747,20 +1121,19 @@ export namespace DAL
                 }
 
                 DTO current_dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*ptr);
-                std::string current_json = rfl::json::write(current_dto);
-                if (current_json == snapshot)
+                if (DAL::Schema::dto_equals(current_dto, *baseline))
                 {
                     return std::nullopt;
                 }
 
                 Domain updated_domain = *ptr;
-                return [repo, updated_domain = std::move(updated_domain), current_json = std::move(current_json), &snapshot]() mutable
+                return [repo, updated_domain = std::move(updated_domain), current_dto = std::move(current_dto), baseline]() mutable
                     -> std::expected<void, Core::DbError>
                 {
                     auto res = repo->update_one(updated_domain);
                     if (res)
                     {
-                        snapshot = std::move(current_json);
+                        *baseline = std::move(current_dto);
                     }
                     return res;
                 };
@@ -774,14 +1147,14 @@ export namespace DAL
                 return;
             }
             auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
-            auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity);
+            auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity));
             upsert_tracked_fn_(
                 std::type_index(typeid(Domain)),
-                rfl::json::write(key),
-                rfl::json::write(dto),
+                format_key(key),
+                true,
                 nullptr,
                 nullptr,
-                make_detect_fn());
+                make_detect_fn(std::move(baseline)));
         }
 
         std::shared_ptr<RepoType> repo_;
@@ -792,11 +1165,12 @@ export namespace DAL
         std::function<void(
             std::type_index,
             std::string,
-            std::string,
+            bool,
             std::shared_ptr<void>,
             const void*,
             std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                const std::shared_ptr<void>&, const void*, std::string&)>)> upsert_tracked_fn_{};
+                const std::shared_ptr<void>&, const void*)>)> upsert_tracked_fn_{};
+        std::function<void(std::type_index, const std::string&)> untrack_fn_{};
         std::function<std::shared_ptr<void>(std::type_index, const std::string&)> find_tracked_fn_{};
     };
 

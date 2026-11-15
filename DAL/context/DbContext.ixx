@@ -6,6 +6,7 @@ export module dal:db_context;
 import std;
 import core;
 import :schema_traits;
+import :mappers;
 import :generic_repo;
 import :db_set;
 
@@ -112,12 +113,6 @@ export namespace DAL
         {
             constexpr std::size_t K = dbset_member_count<DerivedType>();
             static constexpr auto dbset_members = dbset_members_of<DerivedType>();
-
-            std::array<std::meta::info, K> dto_types{};
-            for (std::size_t i = 0; i < K; ++i)
-            {
-                dto_types[i] = dbset_members[i];
-            }
 
             std::array<std::meta::info, K> resolved_dtos{};
             std::size_t idx = 0;
@@ -304,11 +299,10 @@ export namespace DAL
 
         struct TrackedEntityEntry
         {
-            std::string snapshot{};
             std::shared_ptr<void> owned_instance{};
             const void* borrowed_instance{ nullptr };
             std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                const std::shared_ptr<void>&, const void*, std::string&)> detect_fn{};
+                const std::shared_ptr<void>&, const void*)> detect_fn{};
         };
 
         void enable_change_tracking(bool enabled = true) noexcept
@@ -331,14 +325,19 @@ export namespace DAL
             tracked_entries_.clear();
         }
 
+        void untrack_key(std::type_index type, const std::string& key_repr) noexcept
+        {
+            tracked_entries_.erase(std::pair<std::type_index, std::string>{ type, key_repr });
+        }
+
         void upsert_tracked_entry(
             std::type_index type,
             std::string key_repr,
-            std::string snapshot,
+            bool refresh_baseline,
             std::shared_ptr<void> owned,
             const void* borrowed,
             std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                const std::shared_ptr<void>&, const void*, std::string&)> detect_fn)
+                const std::shared_ptr<void>&, const void*)> detect_fn)
         {
             auto map_key = std::pair<std::type_index, std::string>{ type, std::move(key_repr) };
             auto it = tracked_entries_.find(map_key);
@@ -347,7 +346,6 @@ export namespace DAL
                 tracked_entries_.emplace(
                     std::move(map_key),
                     TrackedEntityEntry{
-                        std::move(snapshot),
                         std::move(owned),
                         borrowed,
                         std::move(detect_fn)
@@ -357,20 +355,17 @@ export namespace DAL
 
             if (owned)
             {
-                it->second.snapshot = std::move(snapshot);
                 it->second.owned_instance = std::move(owned);
             }
             if (borrowed != nullptr)
             {
-                // Preserve the original DB snapshot if one was already recorded by find()/to_vector()
                 it->second.borrowed_instance = borrowed;
             }
-            if (!owned && borrowed == nullptr)
+            if (refresh_baseline && detect_fn)
             {
-                // Snapshot-only update from find()/to_vector()
-                it->second.snapshot = std::move(snapshot);
+                it->second.detect_fn = std::move(detect_fn);
             }
-            if (detect_fn)
+            else if (!it->second.detect_fn && detect_fn)
             {
                 it->second.detect_fn = std::move(detect_fn);
             }
@@ -397,13 +392,111 @@ export namespace DAL
                 {
                     continue;
                 }
-                if (auto op = entry.detect_fn(entry.owned_instance, entry.borrowed_instance, entry.snapshot))
+                if (auto op = entry.detect_fn(entry.owned_instance, entry.borrowed_instance))
                 {
                     pending_ops_.push_back(std::move(*op));
                     ++dirty_count;
                 }
             }
             return dirty_count;
+        }
+
+        // =====================================================================
+        // Phase 14: Compile-Time Foreign-Key Relationship Navigation
+        // =====================================================================
+
+        template<typename TargetDomain, typename Self>
+        [[nodiscard]] auto& find_dbset(this Self&& self)
+        {
+            using Derived = std::remove_cvref_t<Self>;
+            static constexpr auto members = dbset_members_of<Derived>();
+
+            template for (constexpr auto m : members)
+            {
+                using RawMemberType = [:std::meta::type_of(m):];
+                using MemberType = std::remove_cvref_t<RawMemberType>;
+                if constexpr (std::same_as<typename MemberType::DomainType, TargetDomain>)
+                {
+                    return self.[:m:];
+                }
+            }
+            static_assert(
+                ([]() {
+                    template for (constexpr auto m : dbset_members_of<Derived>())
+                    {
+                        using RawMemberType = [:std::meta::type_of(m):];
+                using MemberType = std::remove_cvref_t<RawMemberType>;
+                        if constexpr (std::same_as<typename MemberType::DomainType, TargetDomain>)
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                })(),
+                "DbContext does not contain a Set<TargetDomain> member");
+        }
+
+        template<typename ChildDomain, typename ParentDomain, typename Self>
+        [[nodiscard]] std::expected<std::vector<ChildDomain>, Core::DbError> query_children(
+            this Self&& self,
+            const ParentDomain& parent)
+        {
+            auto& child_set = self.template find_dbset<ChildDomain>();
+            return child_set.template where_foreign_key<ParentDomain>(parent).try_to_vector();
+        }
+
+        template<typename ParentDomain, typename ChildDomain, typename Self>
+        [[nodiscard]] std::expected<std::optional<ParentDomain>, Core::DbError> query_parent(
+            this Self&& self,
+            const ChildDomain& child)
+        {
+            auto& child_set = self.template find_dbset<ChildDomain>();
+            auto& parent_set = self.template find_dbset<ParentDomain>();
+            using ChildSetType = std::remove_cvref_t<decltype(child_set)>;
+            using ParentSetType = std::remove_cvref_t<decltype(parent_set)>;
+            using ChildDTO = typename ChildSetType::DTOType;
+            using ParentDTO = typename ParentSetType::DTOType;
+
+            const ChildDTO child_dto = DAL::Mappers::MapperTraits<ChildDomain, ChildDTO>::to_dto(child);
+            const auto fk_val = Schema::extract_fk_value<ChildDTO, ParentDTO>(child_dto);
+            return parent_set.try_find(fk_val);
+        }
+
+        template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
+        [[nodiscard]] std::expected<std::vector<TargetDomain>, Core::DbError> query_many_to_many(
+            this Self&& self,
+            const SourceDomain& source)
+        {
+            auto junctions_res = self.template query_children<JunctionDomain>(source);
+            if (!junctions_res)
+            {
+                return std::unexpected<Core::DbError>{ junctions_res.error() };
+            }
+
+            auto& junction_set = self.template find_dbset<JunctionDomain>();
+            auto& target_set = self.template find_dbset<TargetDomain>();
+            using JunctionSetType = std::remove_cvref_t<decltype(junction_set)>;
+            using TargetSetType = std::remove_cvref_t<decltype(target_set)>;
+            using JunctionDTO = typename JunctionSetType::DTOType;
+            using TargetDTO = typename TargetSetType::DTOType;
+
+            std::vector<TargetDomain> results;
+            results.reserve(junctions_res.value().size());
+            for (const auto& junction : junctions_res.value())
+            {
+                const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
+                const auto target_fk = Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto);
+                auto target_res = target_set.try_find(target_fk);
+                if (!target_res)
+                {
+                    return std::unexpected<Core::DbError>{ target_res.error() };
+                }
+                if (target_res.value().has_value())
+                {
+                    results.push_back(std::move(*target_res.value()));
+                }
+            }
+            return results;
         }
 
         std::expected<void, Core::DbError> begin_transaction()
