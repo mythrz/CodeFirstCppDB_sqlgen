@@ -74,6 +74,51 @@ export namespace DAL
             return {};
         }
 
+        template<rfl::internal::StringLiteral IndexName, typename DTO, typename... ColTypes>
+            requires (sizeof...(ColTypes) >= 1)
+        std::expected<void, Core::DbError> ensure_index_created(bool unique, const ColTypes&...)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot create index: database connection is closed")
+                };
+            }
+            auto res = sqlgen::CreateIndex<IndexName, DTO, sqlgen::Nothing, ColTypes...>{
+                .unique_ = unique,
+                .if_not_exists_ = true,
+                .where_ = sqlgen::Nothing{}
+            }(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        template<rfl::internal::StringLiteral IndexName, typename DTO, typename WhereCond, typename... ColTypes>
+            requires (sizeof...(ColTypes) >= 1)
+        std::expected<void, Core::DbError> ensure_filtered_index_created(
+            bool unique, const WhereCond& where_cond, const ColTypes&...)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot create index: database connection is closed")
+                };
+            }
+            auto res = sqlgen::CreateIndex<IndexName, DTO, WhereCond, ColTypes...>{
+                .unique_ = unique,
+                .if_not_exists_ = true,
+                .where_ = where_cond
+            }(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
         template<typename DTO>
         std::expected<void, Core::DbError> ensure_table_dropped()
         {
@@ -330,6 +375,35 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
             }
             return std::move(res.value());
+        }
+
+        template<typename RowTuple, typename Query>
+        [[nodiscard]] std::expected<std::vector<RowTuple>, Core::DbError> try_execute_tuple_read(Query&& query) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto range_res = std::forward<Query>(query)(conn_);
+            if (!range_res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(range_res.error().what()) };
+            }
+            std::vector<RowTuple> rows;
+            for (auto& item_res : *range_res)
+            {
+                if (!item_res)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(item_res.error().what()) };
+                }
+                auto& nt = *item_res;
+                rows.push_back([&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                    return RowTuple{ std::move(rfl::get<static_cast<int>(Is)>(nt))... };
+                }(std::make_index_sequence<std::tuple_size_v<RowTuple>>{}));
+            }
+            return rows;
         }
 
         template<typename DTO, typename Query>

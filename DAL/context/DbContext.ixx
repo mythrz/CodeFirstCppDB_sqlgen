@@ -674,12 +674,19 @@ export namespace DAL
             }
             else
             {
+                using FkValueType = std::remove_cvref_t<decltype(
+                    Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
+                std::set<FkValueType> seen_fks;
                 std::vector<TargetDomain> results;
                 results.reserve(junctions_res->size());
                 for (const auto& junction : *junctions_res)
                 {
                     const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
                     const auto target_fk = Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto);
+                    if (!seen_fks.insert(target_fk).second)
+                    {
+                        continue;
+                    }
                     auto target_res = target_set.try_find(target_fk);
                     if (!target_res)
                     {
@@ -692,6 +699,119 @@ export namespace DAL
                 }
                 return results;
             }
+        }
+
+        template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
+        [[nodiscard]] std::expected<std::vector<std::pair<SourceDomain, std::vector<TargetDomain>>>, Core::DbError>
+        query_many_to_many_grouped(this Self&& self, const std::vector<SourceDomain>& sources)
+        {
+            using PairType = std::pair<SourceDomain, std::vector<TargetDomain>>;
+            std::vector<PairType> grouped;
+            grouped.reserve(sources.size());
+            if (sources.empty())
+            {
+                return grouped;
+            }
+
+            auto junctions_res = self.template query_children_batch<JunctionDomain>(sources);
+            if (!junctions_res)
+            {
+                return std::unexpected<Core::DbError>{ junctions_res.error() };
+            }
+
+            auto& source_set = self.template find_dbset<SourceDomain>();
+            auto& junction_set = self.template find_dbset<JunctionDomain>();
+            auto& target_set = self.template find_dbset<TargetDomain>();
+            using SourceDTO = typename std::remove_cvref_t<decltype(source_set)>::DTOType;
+            using JunctionDTO = typename std::remove_cvref_t<decltype(junction_set)>::DTOType;
+            using TargetDTO = typename std::remove_cvref_t<decltype(target_set)>::DTOType;
+
+            using SourceFkType = std::remove_cvref_t<decltype(
+                Schema::extract_fk_value<JunctionDTO, SourceDTO>(std::declval<const JunctionDTO&>()))>;
+            using TargetFkType = std::remove_cvref_t<decltype(
+                Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
+
+            std::map<TargetFkType, TargetDomain> target_map;
+            if (!junctions_res->empty())
+            {
+                if constexpr (Schema::SinglePrimaryKey<TargetDTO>)
+                {
+                    constexpr auto pk_m = Schema::primary_key_member<TargetDTO>();
+                    std::set<TargetFkType> seen_fks;
+                    std::vector<TargetFkType> target_fks;
+                    target_fks.reserve(junctions_res->size());
+                    for (const auto& junction : *junctions_res)
+                    {
+                        const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
+                        const auto tfk = Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto);
+                        if (seen_fks.insert(tfk).second)
+                        {
+                            target_fks.push_back(tfk);
+                        }
+                    }
+                    auto targets_res = target_set.where_sql(Schema::col_of<pk_m>.in(target_fks)).try_to_vector();
+                    if (!targets_res)
+                    {
+                        return std::unexpected<Core::DbError>{ targets_res.error() };
+                    }
+                    for (auto& t : *targets_res)
+                    {
+                        const auto tkey = Schema::EntityMetadata<TargetDomain, TargetDTO>::extract_key(t);
+                        const auto raw_pk = static_cast<TargetFkType>(detail::normalize_query_val(tkey));
+                        target_map.emplace(raw_pk, std::move(t));
+                    }
+                }
+                else
+                {
+                    for (const auto& junction : *junctions_res)
+                    {
+                        const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
+                        const auto target_fk = Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto);
+                        if (target_map.contains(target_fk))
+                        {
+                            continue;
+                        }
+                        auto target_res = target_set.try_find(target_fk);
+                        if (!target_res)
+                        {
+                            return std::unexpected<Core::DbError>{ target_res.error() };
+                        }
+                        if (target_res->has_value())
+                        {
+                            target_map.emplace(target_fk, std::move(*target_res.value()));
+                        }
+                    }
+                }
+            }
+
+            std::map<SourceFkType, std::vector<TargetDomain>> buckets;
+            for (const auto& junction : *junctions_res)
+            {
+                const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
+                const auto src_fk = Schema::extract_fk_value<JunctionDTO, SourceDTO>(j_dto);
+                const auto tgt_fk = Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto);
+                auto it = target_map.find(tgt_fk);
+                if (it != target_map.end())
+                {
+                    buckets[src_fk].push_back(it->second);
+                }
+            }
+
+            for (const auto& source : sources)
+            {
+                const auto src_key = Schema::EntityMetadata<SourceDomain, SourceDTO>::extract_key(source);
+                const auto raw_pk = static_cast<SourceFkType>(detail::normalize_query_val(src_key));
+                auto it = buckets.find(raw_pk);
+                if (it != buckets.end())
+                {
+                    grouped.emplace_back(source, std::move(it->second));
+                }
+                else
+                {
+                    grouped.emplace_back(source, std::vector<TargetDomain>{});
+                }
+            }
+            return grouped;
         }
 
         std::expected<void, Core::DbError> begin_transaction()
@@ -933,6 +1053,7 @@ export namespace DAL
                             }
                         }
 
+                        (void)detect_changes();
                         if (pending_ops_.size() > saved_pending_size)
                         {
                             auto flush_res = flush_pending_since(saved_pending_size);
@@ -1098,6 +1219,7 @@ export namespace DAL
             }
             if (is_savepoint_)
             {
+                (void)ctx_->detect_changes();
                 if (ctx_->pending_changes_count() > saved_pending_size_)
                 {
                     auto flush_res = ctx_->flush_pending_since(saved_pending_size_);

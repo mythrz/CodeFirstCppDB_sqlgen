@@ -291,7 +291,7 @@ Expose type-safe Code-First index creation (`CREATE [UNIQUE] INDEX IF NOT EXISTS
 
 #### Detailed Tasks
 
-- [ ] **Task 31.1: Add `ensure_index_created` & `ensure_filtered_index_created` on `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
+- [x] **Task 31.1: Add `ensure_index_created` & `ensure_filtered_index_created` on `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx), add:
     ```cpp
     template<rfl::internal::StringLiteral IndexName, typename DTO, typename... ColTypes>
@@ -340,14 +340,14 @@ Expose type-safe Code-First index creation (`CREATE [UNIQUE] INDEX IF NOT EXISTS
     }
     ```
 
-- [ ] **Task 31.2: Expose `ensure_index_created` & `ensure_unique_index_created` on `DbSet` and `DbQuery` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 31.2: Expose `ensure_index_created` & `ensure_unique_index_created` on `DbSet` and `DbQuery` (`DAL/context/DbSet.ixx`)**
   - On `DbSet<Domain, DTO, ConnectionHandle, KeyType>`, add:
     - `ensure_index_created<IndexName, ColLiterals...>(bool unique = false)`
     - `ensure_unique_index_created<IndexName, ColLiterals...>()`
     constrained by `(sizeof...(ColLiterals) >= 1) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)`, forwarding `Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...` to `conn_->template ensure_index_created<IndexName, DTO>(unique, ...)`.
   - On `DbQuery`, add `ensure_index_created<IndexName, ColLiterals...>(bool unique = false)` and `ensure_unique_index_created<IndexName, ColLiterals...>()` (calling `ensure_filtered_index_created` when `!std::same_as<WhereCondT, rfl::Nothing>`, or `ensure_index_created` otherwise).
 
-- [ ] **Task 31.3: Phase 31 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 31.3: Phase 31 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test creating a composite index `db.people.ensure_index_created<"idx_person_name", "lastName", "firstName">()`.
   - Test creating a unique index `db.people.ensure_unique_index_created<"idx_person_unique_name", "firstName", "lastName">()` and verify inserting a duplicate row returns `Core::DbErrorCode::ConstraintViolation`.
   - Test creating a partial unique index via `DbQuery` (`where_not_null<"nickname">().ensure_unique_index_created<"idx_unique_nickname", "nickname">()`), verifying multiple `NULL` nicknames succeed while duplicate non-null nicknames fail with `ConstraintViolation`.
@@ -361,7 +361,7 @@ Allow callers to project 2 or more columns server-side into `std::vector<std::tu
 
 #### Detailed Tasks
 
-- [ ] **Task 32.1: Add `try_execute_tuple_read<RowTuple>` on `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
+- [x] **Task 32.1: Add `try_execute_tuple_read<RowTuple>` on `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx), add:
     ```cpp
     template<typename RowTuple, typename Query>
@@ -394,7 +394,7 @@ Allow callers to project 2 or more columns server-side into `std::vector<std::tu
     }
     ```
 
-- [ ] **Task 32.2: Add `try_select_columns` / `select_columns` & `try_select_distinct_columns` / `select_distinct_columns` on `DbQuery` and `DbSet` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 32.2: Add `try_select_columns` / `select_columns` & `try_select_distinct_columns` / `select_distinct_columns` on `DbQuery` and `DbSet` (`DAL/context/DbSet.ixx`)**
   - Add a private helper `execute_tuple_projection<RowTuple>(const ConnectionHandle& conn, BaseQuery&& base_query)` on `DbQuery` that applies `limit_` and `offset_` (without `| sqlgen::to<...>`) and invokes `conn.template try_execute_tuple_read<RowTuple>(std::move(q))`.
   - Add on `DbQuery` and forward on `DbSet`:
     - `try_select_columns<ColLiterals...>()` -> `std::expected<std::vector<std::tuple<ColValueT...>>, Core::DbError>`
@@ -403,7 +403,7 @@ Allow callers to project 2 or more columns server-side into `std::vector<std::tu
     - `select_distinct_columns<ColLiterals...>()` -> `std::vector<std::tuple<ColValueT...>>`
     where each `ColValueT` is `typename [:std::meta::type_of(DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()):]`.
 
-- [ ] **Task 32.3: Phase 32 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 32.3: Phase 32 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `db.people.order_by<"lastName">().then_by<"firstName">().select_columns<"firstName", "lastName">()` and structured bindings `for (const auto& [first, last] : rows)`.
   - Test `select_distinct_columns` on multi-column combinations with duplicates.
 
@@ -416,10 +416,10 @@ Deduplicate composite-key targets in `query_many_to_many_batch` and provide `que
 
 #### Detailed Tasks
 
-- [ ] **Task 33.1: Deduplicate Composite-Key Targets in `query_many_to_many_batch` (`DAL/context/DbContext.ixx`)**
+- [x] **Task 33.1: Deduplicate Composite-Key Targets in `query_many_to_many_batch` (`DAL/context/DbContext.ixx`)**
   - In the composite-key `else` branch of `DbContextBase::query_many_to_many_batch` ([DAL/context/DbContext.ixx:675-694](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L675-L694)), track seen target keys (`std::unordered_set<std::string>` using `std::format("{}", target_fk)` or `TargetKeyT`) before calling `target_set.try_find(target_fk)` so shared targets across multiple sources are returned only once.
 
-- [ ] **Task 33.2: Add `query_many_to_many_grouped<TargetDomain, JunctionDomain>(sources)` on `DbContextBase` (`DAL/context/DbContext.ixx`)**
+- [x] **Task 33.2: Add `query_many_to_many_grouped<TargetDomain, JunctionDomain>(sources)` on `DbContextBase` (`DAL/context/DbContext.ixx`)**
   - In [DAL/context/DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx), add:
     ```cpp
     template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
@@ -432,7 +432,7 @@ Deduplicate composite-key targets in `query_many_to_many_batch` and provide `que
     3. Execute **Query 2**: load all referenced `TargetDomain` entities in a single batched `IN` query (or deduplicated lookup for composite-key targets) and index them in an `std::unordered_map` keyed by target raw PK (or formatted key).
     4. Group junction rows by source FK (`Schema::extract_fk_value<JunctionDTO, SourceDTO>(j_dto)`), look up each `TargetDomain` in the map, and build `std::vector<std::pair<SourceDomain, std::vector<TargetDomain>>>` preserving the exact order of `sources` (including sources with 0 linked targets).
 
-- [ ] **Task 33.3: Phase 33 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 33.3: Phase 33 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `db.query_many_to_many_grouped<Core::Something, Core::Person_Something>(people)` across multiple `Core::Person` entities (including shared `Core::Something` items and a `Core::Person` with 0 items), verifying each person's paired `std::vector<Core::Something>` is accurate.
 
 ---
@@ -444,13 +444,13 @@ Ensure dirty tracked entities (`find_tracked` / `track`) are automatically detec
 
 #### Detailed Tasks
 
-- [ ] **Task 34.1: Call `detect_changes()` Before Savepoint Flush in `DbContextBase::transaction` & `TransactionScope::commit` (`DAL/context/DbContext.ixx`)**
+- [x] **Task 34.1: Call `detect_changes()` Before Savepoint Flush in `DbContextBase::transaction` & `TransactionScope::commit` (`DAL/context/DbContext.ixx`)**
   - In `DbContextBase::transaction(Fn&& fn)`'s nested savepoint branch ([DAL/context/DbContext.ixx:936](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L936)):
     - Before `if (pending_ops_.size() > saved_pending_size)`, call `(void)detect_changes();` so any tracked entity mutated inside `fn()` enqueues its update operation and is flushed inside the savepoint (and rolled back if the update violates a constraint).
   - In `TransactionScope::commit()`'s `if (is_savepoint_)` branch ([DAL/context/DbContext.ixx:1101](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L1101)):
     - Call `(void)ctx_->detect_changes();` before checking `ctx_->pending_changes_count() > saved_pending_size_` and calling `ctx_->flush_pending_since(saved_pending_size_)`.
 
-- [ ] **Task 34.2: Record/Refresh `ChangeTracker` Snapshots on Immediate `add`, `add_range`, & `update`, and Add `update_where_equal` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 34.2: Record/Refresh `ChangeTracker` Snapshots on Immediate `add`, `add_range`, & `update`, and Add `update_where_equal` (`DAL/context/DbSet.ixx`)**
   - In `DbSet::add(const Domain& item)` and `DbSet::add_range(const std::vector<Domain>& items)` ([DAL/context/DbSet.ixx:1269-1385](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbSet.ixx#L1269-L1385)): when not deferred and `res.has_value() && is_tracking_enabled()`, if `constexpr (!Schema::has_auto_incr_primary_key<DTO>())`, call `record_snapshot(item)` (or for each item in `items`).
   - In `DbSet::update(const Domain& item)` ([DAL/context/DbSet.ixx:1388-1395](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbSet.ixx#L1388-L1395)): when not deferred and `res.has_value() && is_tracking_enabled()`, call `record_snapshot(item)` so the baseline snapshot reflects the newly persisted state.
   - On `DbSet`, add `update_where_equal` to mirror `remove_where_equal`:
@@ -466,7 +466,7 @@ Ensure dirty tracked entities (`find_tracked` / `track`) are automatically detec
     }
     ```
 
-- [ ] **Task 34.3: Phase 34 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 34.3: Phase 34 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test mutating an entity obtained via `find_tracked()` inside a nested `TransactionScope` and calling `inner.commit()`, verifying the change is persisted in SQLite immediately on `inner.commit()`.
   - Test `db.people.update_where_equal<"lastName", "firstName">("Lovelace", "Augusta")`.
 

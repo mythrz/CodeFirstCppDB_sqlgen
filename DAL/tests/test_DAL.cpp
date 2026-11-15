@@ -2820,4 +2820,172 @@ namespace
         EXPECT_EQ(batchItems->size(), 2u);
     }
 
+    // =========================================================================
+    // Phase 31: Code-First Index & Partial Index DDL
+    // =========================================================================
+
+    struct Phase31Member
+    {
+        static constexpr const char* tablename = "phase31_members";
+        sqlgen::PrimaryKey<std::int32_t, true> id{ 0 };
+        std::string email{};
+        std::optional<std::string> nickname{};
+    };
+
+    TEST(Phase31IndexAndPartialIndexDdlTest, CompositeUniqueAndPartialIndexes)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<DAL::Schema::PersonDTO>().has_value());
+        ASSERT_TRUE(conn->ensure_table_created<Phase31Member>().has_value());
+
+        DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection> people(conn);
+        ASSERT_TRUE((people.ensure_index_created<"idx_person_name", "lastName", "firstName">().has_value()));
+        ASSERT_TRUE((people.ensure_unique_index_created<"idx_person_unique_name", "firstName", "lastName">().has_value()));
+
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 1 }, "Ada", "Lovelace")).has_value());
+        auto dupPerson = people.add(Core::Person(Core::PersonId{ 2 }, "Ada", "Lovelace"));
+        ASSERT_FALSE(dupPerson.has_value());
+        EXPECT_EQ(dupPerson.error().code, Core::DbErrorCode::DuplicateKey);
+
+        // Partial unique index: multiple NULL nicknames allowed, duplicate non-NULL fails
+        DAL::DbSet<Phase31Member, Phase31Member, DAL::SQLiteConnection> members(conn);
+        ASSERT_TRUE((members.where_not_null<"nickname">()
+            .ensure_unique_index_created<"idx_unique_nickname", "nickname">().has_value()));
+
+        ASSERT_TRUE(members.add(Phase31Member{ .email = "a@example.com", .nickname = std::nullopt }).has_value());
+        ASSERT_TRUE(members.add(Phase31Member{ .email = "b@example.com", .nickname = std::nullopt }).has_value());
+        ASSERT_TRUE(members.add(Phase31Member{ .email = "c@example.com", .nickname = "ada" }).has_value());
+        auto dupNick = members.add(Phase31Member{ .email = "d@example.com", .nickname = "ada" });
+        ASSERT_FALSE(dupNick.has_value());
+        EXPECT_EQ(dupNick.error().code, Core::DbErrorCode::DuplicateKey);
+    }
+
+    // =========================================================================
+    // Phase 32: Multi-Column Server-Side Tuple Projections
+    // =========================================================================
+
+    TEST(Phase32MultiColumnTupleProjectionTest, SelectColumnsAndSelectDistinctColumns)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<DAL::Schema::PersonDTO>().has_value());
+
+        DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection> people(conn);
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 1 }, "Bob", "Smith")).has_value());
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 2 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 3 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 4 }, "Charlie", "Adams")).has_value());
+
+        auto rows = people
+            .order_by<"lastName">(false)
+            .then_by<"firstName">(false)
+            .select_columns<"firstName", "lastName">();
+        ASSERT_EQ(rows.size(), 4u);
+        {
+            const auto& [first, last] = rows[0];
+            EXPECT_EQ(first, "Charlie");
+            EXPECT_EQ(last, "Adams");
+        }
+        {
+            const auto& [first, last] = rows[1];
+            EXPECT_EQ(first, "Alice");
+            EXPECT_EQ(last, "Smith");
+        }
+
+        auto distinctRows = people
+            .order_by<"lastName">(false)
+            .then_by<"firstName">(false)
+            .select_distinct_columns<"firstName", "lastName">();
+        ASSERT_EQ(distinctRows.size(), 3u);
+        EXPECT_EQ(std::get<0>(distinctRows[0]), "Charlie");
+        EXPECT_EQ(std::get<0>(distinctRows[1]), "Alice");
+        EXPECT_EQ(std::get<0>(distinctRows[2]), "Bob");
+    }
+
+    // =========================================================================
+    // Phase 33: Grouped Many-to-Many Eager Hydration
+    // =========================================================================
+
+    TEST(Phase33GroupedManyToManyTest, QueryManyToManyGroupedWithSharedAndEmptyTargets)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        Core::Person p1(Core::PersonId{ 1 }, "Alice", "Smith");
+        Core::Person p2(Core::PersonId{ 2 }, "Bob", "Jones");
+        Core::Person p3(Core::PersonId{ 3 }, "Charlie", "Empty");
+        ASSERT_TRUE(db.people.add_range({ p1, p2, p3 }).has_value());
+
+        Core::Something s1(Core::SomethingId{ 1 }, "Laptop", "Tech", "Work");
+        Core::Something s2(Core::SomethingId{ 2 }, "Desk", "Office", "Home");
+        ASSERT_TRUE(db.somethings.add_range({ s1, s2 }).has_value());
+
+        // Both p1 and p2 share s1; p1 also owns s2; p3 owns nothing
+        ASSERT_TRUE(db.personSomethings.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner")).has_value());
+        ASSERT_TRUE(db.personSomethings.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 2 }, "Owner")).has_value());
+        ASSERT_TRUE(db.personSomethings.add(Core::Person_Something(Core::PersonId{ 2 }, Core::SomethingId{ 1 }, "User")).has_value());
+
+        auto groupedRes = db.query_many_to_many_grouped<Core::Something, Core::Person_Something>(
+            std::vector<Core::Person>{ p1, p2, p3 });
+        ASSERT_TRUE(groupedRes.has_value()) << groupedRes.error().to_string();
+        ASSERT_EQ(groupedRes->size(), 3u);
+        EXPECT_EQ((*groupedRes)[0].first.getFirstName(), "Alice");
+        EXPECT_EQ((*groupedRes)[0].second.size(), 2u);
+        EXPECT_EQ((*groupedRes)[1].first.getFirstName(), "Bob");
+        EXPECT_EQ((*groupedRes)[1].second.size(), 1u);
+        EXPECT_EQ((*groupedRes)[1].second[0].getName(), "Laptop");
+        EXPECT_EQ((*groupedRes)[2].first.getFirstName(), "Charlie");
+        EXPECT_EQ((*groupedRes)[2].second.size(), 0u);
+    }
+
+    // =========================================================================
+    // Phase 34: Savepoint ChangeTracker Dirty-Flush & update_where_equal
+    // =========================================================================
+
+    TEST(Phase34SavepointDirtyFlushAndUpdateWhereEqualTest, NestedSavepointFlushesDirtyAndUpdateWhereEqual)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        db.enable_change_tracking(true);
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Ada", "Lovelace")).has_value());
+
+        {
+            DAL::TransactionScope<DAL::SQLiteConnection> outer(db);
+            ASSERT_TRUE(outer.is_active());
+
+            {
+                DAL::TransactionScope<DAL::SQLiteConnection> inner(db);
+                ASSERT_TRUE(inner.is_active());
+
+                auto tracked = db.people.find_tracked(1);
+                ASSERT_NE(tracked, nullptr);
+                tracked->setFirstName("LadyAda");
+
+                ASSERT_TRUE(inner.commit().has_value());
+            }
+
+            // Persisted immediately into the SQLite transaction upon inner.commit()
+            auto midRead = db.people.where_equal<"id">(1).select<"firstName">();
+            ASSERT_EQ(midRead.size(), 1u);
+            EXPECT_EQ(midRead[0], "LadyAda");
+
+            ASSERT_TRUE(outer.commit().has_value());
+        }
+
+        // Shorthand update_where_equal
+        auto updRes = db.people.update_where_equal<"lastName", "firstName">("Lovelace", "Augusta");
+        ASSERT_TRUE(updRes.has_value()) << updRes.error().to_string();
+        auto afterRead = db.people.find(1);
+        ASSERT_TRUE(afterRead.has_value());
+        EXPECT_EQ(afterRead->getFirstName(), "Augusta");
+    }
+
 } // namespace
