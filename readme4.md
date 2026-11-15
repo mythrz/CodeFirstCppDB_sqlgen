@@ -295,14 +295,14 @@ Make RAII `TransactionScope` support nested `SAVEPOINT`s automatically when a tr
 
 #### Detailed Tasks
 
-- [ ] **Task 27.1: Savepoint-Aware `pending_ops_` Flushing & Truncation in `DbContextBase` (`DAL/context/DbContext.ixx`)**
+- [x] **Task 27.1: Savepoint-Aware `pending_ops_` Flushing & Truncation in `DbContextBase` (`DAL/context/DbContext.ixx`)**
   - Add a helper `flush_pending_since(std::size_t start_idx)` on `DbContextBase` that executes `pending_ops_[i]` for `i` in `[start_idx, pending_ops_.size())` and erases the executed range (or, on error, truncates `pending_ops_.resize(start_idx)` and returns the `DbError`).
   - In the nested savepoint branch of `DbContextBase::transaction(Fn&& fn)` ([DAL/context/DbContext.ixx:738-783](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L738-L783)):
     - Record `const std::size_t saved_pending_size = pending_ops_.size();` before invoking `fn()`.
     - If `fn()` returns an error or throws, call `pending_ops_.resize(saved_pending_size)` in addition to `conn_->rollback_to_savepoint(sp_name)`.
     - If `fn()` succeeds and `pending_ops_.size() > saved_pending_size`, call `flush_pending_since(saved_pending_size)` *before* `conn_->release_savepoint(sp_name)` (rolling back to `sp_name` if flushing fails!).
 
-- [ ] **Task 27.2: Upgrade `TransactionScope` to Support Nested Savepoints (`DAL/context/DbContext.ixx`)**
+- [x] **Task 27.2: Upgrade `TransactionScope` to Support Nested Savepoints (`DAL/context/DbContext.ixx`)**
   - Add `acquire_savepoint()` -> `std::expected<std::string, Core::DbError>` on `DbContextBase` (incrementing `savepoint_depth_` and calling `savepoint(sp_name)`).
   - In `TransactionScope` ([DAL/context/DbContext.ixx:846-917](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L846-L917)):
     - Record `saved_pending_size_ = ctx_->pending_changes_count();`.
@@ -310,7 +310,7 @@ Make RAII `TransactionScope` support nested `SAVEPOINT`s automatically when a tr
     - On `commit()`: if `is_savepoint_`, flush pending ops added since `saved_pending_size_` and call `ctx_->release_savepoint(savepoint_name_)`.
     - On `rollback()` and `~TransactionScope()`: if `is_savepoint_`, truncate pending ops to `saved_pending_size_` and call `ctx_->rollback_to_savepoint(savepoint_name_)` while keeping the outer transaction active!
 
-- [ ] **Task 27.3: Phase 27 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 27.3: Phase 27 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test nested `DAL::TransactionScope` inside an outer `DAL::TransactionScope` (both inner rollback and inner commit).
   - Test `db.defer_changes(true)` with nested `db.transaction(...)` where the inner transaction stages an operation and fails, verifying the aborted staged operation is not executed when the outer transaction commits.
 
@@ -323,14 +323,14 @@ Prevent `DbQuery::any()` from polluting `ChangeTracker`, optimize `SQLiteConnect
 
 #### Detailed Tasks
 
-- [ ] **Task 28.1: Non-Tracking `try_any()` / `any()`, `try_first_or_default()`, & `COUNT(*)` `exists()` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
+- [x] **Task 28.1: Non-Tracking `try_any()` / `any()`, `try_first_or_default()`, & `COUNT(*)` `exists()` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx:440-450](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L440-L450), update `exists<DTO>(id)` and `exists_by_composite_id<DTO>(parts...)` to use `try_count_where<DTO>(DAL::Schema::make_pk_where<DTO>(id))` / `make_composite_where<DTO>(parts...)` (`res.has_value() && *res > 0`).
   - In `DbQuery` ([DAL/context/DbSet.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbSet.ixx)):
     - Add `[[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_first_or_default() const` (calling `limit(1).try_to_vector()`).
     - Add `[[nodiscard]] std::expected<bool, Core::DbError> try_any() const` which calls `try_count()` when `!limit_.has_value() && !offset_.has_value()` (or executes `limit(1).execute_query(*conn_)` directly on DTOs without invoking `track_fn_`), and update `any()` to return `try_any().value_or(false)`.
   - Expose `first_or_default()`, `try_first_or_default()`, `any()`, and `try_any()` directly on `DbSet`.
 
-- [ ] **Task 28.2: Variadic Multi-Column `update_where<ColLiterals...>(new_vals...)` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
+- [x] **Task 28.2: Variadic Multi-Column `update_where<ColLiterals...>(new_vals...)` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx:642-658](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L642-L658), add a variadic overload:
     ```cpp
     template<typename DTO, typename Condition, typename... SetExprs>
@@ -362,7 +362,7 @@ Prevent `DbQuery::any()` from polluting `ChangeTracker`, optimize `SQLiteConnect
     std::expected<void, Core::DbError> update_where(const Vals&... new_vals) const
     ```
 
-- [ ] **Task 28.3: Phase 28 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 28.3: Phase 28 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Verify calling `db.books.where_equal<"genre">("SciFi").any()` while `db.enable_change_tracking(true)` is active leaves `db.tracked_entities_count() == 0`.
   - Verify `try_first_or_default()`, `try_any()`, and multi-column `update_where<"genre", "title">("Classic", "Updated Title")`.
 
@@ -375,16 +375,16 @@ Expose server-side `COUNT(DISTINCT col)` and `SELECT col ... GROUP BY col` (`sel
 
 #### Detailed Tasks
 
-- [ ] **Task 29.1: Server-Side `try_count_distinct<ColLiteral>()` & `count_distinct<ColLiteral>()` (`DbSet.ixx`)**
+- [x] **Task 29.1: Server-Side `try_count_distinct<ColLiteral>()` & `count_distinct<ColLiteral>()` (`DbSet.ixx`)**
   - In `DbQuery` and `DbSet` ([DAL/context/DbSet.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbSet.ixx)), add:
     - `try_count_distinct<ColLiteral>()` -> `std::expected<std::size_t, Core::DbError>` using `try_aggregate_impl<std::size_t>(sqlgen::count_distinct(Schema::col_of<dto_m>))` (unwrapping the `std::optional<std::size_t>` to `0` if empty).
     - `count_distinct<ColLiteral>()` -> `std::size_t` returning `try_count_distinct<ColLiteral>().value_or(0)`.
 
-- [ ] **Task 29.2: Server-Side `try_select_distinct<ColLiteral>()` & `select_distinct<ColLiteral>()` (`DbSet.ixx`)**
+- [x] **Task 29.2: Server-Side `try_select_distinct<ColLiteral>()` & `select_distinct<ColLiteral>()` (`DbSet.ixx`)**
   - In `DbQuery` and `DbSet`, add `try_select_distinct<ColLiteral>()` and `select_distinct<ColLiteral>()`:
     - Builds `sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">)` (with optional `| sqlgen::where(where_cond_)`) piped into `| sqlgen::group_by(Schema::col_of<dto_m>)` and `execute_projection<ProjRow>(*conn_, ...)` so SQLite returns only distinct column values directly from the database engine.
 
-- [ ] **Task 29.3: Full `or_where_*` Predicate Parity on `DbQuery` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 29.3: Full `or_where_*` Predicate Parity on `DbQuery` (`DAL/context/DbSet.ixx`)**
   - Alongside `or_where_equal`, add on `DbQuery`:
     - `or_where_not_equal<ColLiteral>(val)`
     - `or_where_lt<ColLiteral>(val)`, `or_where_le<ColLiteral>(val)`, `or_where_gt<ColLiteral>(val)`, `or_where_ge<ColLiteral>(val)`
@@ -393,7 +393,7 @@ Expose server-side `COUNT(DISTINCT col)` and `SELECT col ... GROUP BY col` (`sel
     - `or_where_in<ColLiteral>(vals...)`, `or_where_in_vec<ColLiteral>(vec)`, `or_where_not_in<ColLiteral>(vals...)`, `or_where_not_in_vec<ColLiteral>(vec)`
     - `or_where_null<ColLiteral>()`, `or_where_not_null<ColLiteral>()`
 
-- [ ] **Task 29.4: Phase 29 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 29.4: Phase 29 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `count_distinct<"lastName">()` and `select_distinct<"lastName">()` on a table with duplicate last names.
   - Test chained `where_equal<"lastName">("Smith").or_where_like<"firstName">("B%").or_where_between<"id">(10, 20)`.
 
@@ -406,7 +406,7 @@ Provide one-call grouped 1:N hydration (`query_children_grouped`) that pairs eac
 
 #### Detailed Tasks
 
-- [ ] **Task 30.1: Add `query_children_grouped<ChildDomain>(parents)` to `DbContextBase` (`DAL/context/DbContext.ixx`)**
+- [x] **Task 30.1: Add `query_children_grouped<ChildDomain>(parents)` to `DbContextBase` (`DAL/context/DbContext.ixx`)**
   - In [DAL/context/DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx), add:
     ```cpp
     template<typename ChildDomain, typename ParentDomain, typename Self>
@@ -415,7 +415,7 @@ Provide one-call grouped 1:N hydration (`query_children_grouped`) that pairs eac
     ```
   - Calls `self.template query_children_batch<ChildDomain>(parents)` to fetch all children in **1 SQL query**, buckets the children into a map keyed by their parent FK value (`Schema::extract_fk_value<ChildDTO, ParentDTO>`), and returns a `std::vector<std::pair<ParentDomain, std::vector<ChildDomain>>>` preserving the exact order of `parents` (including parents with 0 children).
 
-- [ ] **Task 30.2: Add `query_many_to_many_batch<TargetDomain, JunctionDomain>(sources)` to `DbContextBase` (`DAL/context/DbContext.ixx`)**
+- [x] **Task 30.2: Add `query_many_to_many_batch<TargetDomain, JunctionDomain>(sources)` to `DbContextBase` (`DAL/context/DbContext.ixx`)**
   - In [DAL/context/DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx), add:
     ```cpp
     template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
@@ -424,7 +424,7 @@ Provide one-call grouped 1:N hydration (`query_children_grouped`) that pairs eac
     ```
   - Calls `self.template query_children_batch<JunctionDomain>(sources)` (Query 1), extracts all `target_fks` from the junction rows, and queries `target_set.where_sql(Schema::col_of<pk_m>.in(target_fks)).try_to_vector()` (Query 2).
 
-- [ ] **Task 30.3: Phase 30 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 30.3: Phase 30 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `db.query_children_grouped<Phase25Book>(authors)` with multiple authors (including an author with 0 books) and verify each author is paired with its exact books.
   - Test `db.query_many_to_many_batch<Core::Something, Core::Person_Something>(people)` across multiple `Core::Person` entities.
 

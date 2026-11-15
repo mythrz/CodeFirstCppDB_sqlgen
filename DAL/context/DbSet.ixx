@@ -172,6 +172,134 @@ export namespace DAL
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
             requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_not_equal(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m> != detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_lt(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m> < detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_le(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m> <= detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_gt(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m> > detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_ge(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m> >= detail::normalize_query_val(val));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_between(const Val& low, const Val& high) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(
+                (Schema::col_of<dto_m> >= detail::normalize_query_val(low))
+                && (Schema::col_of<dto_m> <= detail::normalize_query_val(high)));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_like(std::string_view pattern) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m>.like(std::string(pattern)));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_not_like(std::string_view pattern) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m>.not_like(std::string(pattern)));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
+            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_in(const Ts&... vals) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m>.in(detail::normalize_query_val(vals)...));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_in_vec(const std::vector<Val>& vals) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using NormalizedT = std::remove_cvref_t<decltype(detail::normalize_query_val(std::declval<const Val&>()))>;
+            std::vector<NormalizedT> normalized;
+            normalized.reserve(vals.size());
+            for (const auto& v : vals)
+            {
+                normalized.push_back(detail::normalize_query_val(v));
+            }
+            return or_where_sql(Schema::col_of<dto_m>.in(normalized));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
+            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_not_in(const Ts&... vals) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m>.not_in(detail::normalize_query_val(vals)...));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_not_in_vec(const std::vector<Val>& vals) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using NormalizedT = std::remove_cvref_t<decltype(detail::normalize_query_val(std::declval<const Val&>()))>;
+            std::vector<NormalizedT> normalized;
+            normalized.reserve(vals.size());
+            for (const auto& v : vals)
+            {
+                normalized.push_back(detail::normalize_query_val(v));
+            }
+            return or_where_sql(Schema::col_of<dto_m>.not_in(normalized));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_null() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m>.is_null());
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_not_null() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m>.is_not_null());
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_not_equal(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
@@ -405,14 +533,23 @@ export namespace DAL
             return {};
         }
 
+        [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_first_or_default() const
+        {
+            auto res = limit(1).try_to_vector();
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ res.error() };
+            }
+            if (res->empty())
+            {
+                return std::optional<Domain>{ std::nullopt };
+            }
+            return std::optional<Domain>{ std::move(res->front()) };
+        }
+
         [[nodiscard]] std::optional<Domain> first_or_default() const
         {
-            auto items = limit(1).to_vector();
-            if (items.empty())
-            {
-                return std::nullopt;
-            }
-            return std::move(items.front());
+            return try_first_or_default().value_or(std::nullopt);
         }
 
         [[nodiscard]] std::expected<std::size_t, Core::DbError> try_count() const
@@ -611,10 +748,158 @@ export namespace DAL
             return VecT{};
         }
 
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> try_count_distinct() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            auto res = try_aggregate_impl<std::size_t>(sqlgen::count_distinct(Schema::col_of<dto_m>));
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ res.error() };
+            }
+            return res->value_or(0);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] std::size_t count_distinct() const
+        {
+            return try_count_distinct<ColLiteral>().value_or(0);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto try_select_distinct() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using SplicedT = [:std::meta::type_of(dto_m):];
+            using RawT = std::remove_cvref_t<SplicedT>;
+            using ScalarT = typename detail::UnwrapColumnScalar<RawT>::type;
+            using ColValueT = std::conditional_t<
+                detail::IsOptionalField<RawT>::value, std::optional<ScalarT>, ScalarT>;
+
+            if (!conn_)
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{
+                    std::unexpected<Core::DbError>{
+                        Core::DbError::connection_error("Database connection is null")
+                    }
+                };
+            }
+
+            struct ProjRow
+            {
+                RawT val{};
+            };
+
+            auto with_group = [&]() {
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
+                {
+                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">)
+                         | sqlgen::where(where_cond_)
+                         | sqlgen::group_by(Schema::col_of<dto_m>);
+                }
+                else
+                {
+                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">)
+                         | sqlgen::group_by(Schema::col_of<dto_m>);
+                }
+            }();
+
+            auto rows_res = [&]() -> std::expected<std::vector<ProjRow>, Core::DbError> {
+                if constexpr (!std::same_as<OrderByT, rfl::Nothing>)
+                {
+                    return std::visit(
+                        [&](const auto& ob) {
+                            return execute_projection<ProjRow>(*conn_, with_group | ob);
+                        },
+                        order_by_);
+                }
+                else
+                {
+                    return execute_projection<ProjRow>(*conn_, std::move(with_group));
+                }
+            }();
+
+            if (!rows_res)
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{
+                    std::unexpected<Core::DbError>{ rows_res.error() }
+                };
+            }
+
+            std::vector<ColValueT> result;
+            result.reserve(rows_res->size());
+            for (auto& r : *rows_res)
+            {
+                if constexpr (requires { r.val.value(); })
+                {
+                    result.push_back(r.val.value());
+                }
+                else
+                {
+                    result.push_back(std::move(r.val));
+                }
+            }
+            return std::expected<std::vector<ColValueT>, Core::DbError>{ std::move(result) };
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto select_distinct() const
+        {
+            auto res = try_select_distinct<ColLiteral>();
+            using VecT = std::remove_cvref_t<decltype(res.value())>;
+            if (res)
+            {
+                return VecT{ std::move(res.value()) };
+            }
+            return VecT{};
+        }
+
+        [[nodiscard]] std::expected<bool, Core::DbError> try_any() const
+        {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is null")
+                };
+            }
+            if (!limit_.has_value() && !offset_.has_value())
+            {
+                auto cnt_res = try_count();
+                if (!cnt_res)
+                {
+                    return std::unexpected<Core::DbError>{ cnt_res.error() };
+                }
+                return *cnt_res > 0;
+            }
+            if constexpr (requires(const ConnectionHandle& c) {
+                c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>);
+            })
+            {
+                auto dto_res = limit(1).execute_query(*conn_);
+                if (!dto_res)
+                {
+                    return std::unexpected<Core::DbError>{ dto_res.error() };
+                }
+                return !dto_res->empty();
+            }
+            else
+            {
+                auto cnt_res = try_count();
+                if (!cnt_res)
+                {
+                    return std::unexpected<Core::DbError>{ cnt_res.error() };
+                }
+                return *cnt_res > 0;
+            }
+        }
+
         [[nodiscard]] bool any() const
         {
-            auto res = limit(1).try_to_vector();
-            return res.has_value() && !res.value().empty();
+            return try_any().value_or(false);
         }
 
         std::expected<void, Core::DbError> remove_where() const
@@ -662,10 +947,12 @@ export namespace DAL
             }
         }
 
-        template<rfl::internal::StringLiteral ColLiteral, typename Val>
-            requires (!std::same_as<WhereCondT, rfl::Nothing>)
-                  && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
-        std::expected<void, Core::DbError> update_where(const Val& new_val) const
+        template<rfl::internal::StringLiteral... ColLiterals, typename... Vals>
+            requires (sizeof...(ColLiterals) >= 1)
+                  && (sizeof...(ColLiterals) == sizeof...(Vals))
+                  && (!std::same_as<WhereCondT, rfl::Nothing>)
+                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+        std::expected<void, Core::DbError> update_where(const Vals&... new_vals) const
         {
             if (!conn_)
             {
@@ -673,10 +960,24 @@ export namespace DAL
                     Core::DbError::connection_error("Database connection is null")
                 };
             }
-            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            auto res = conn_->template update_where<DTO>(
-                Schema::col_of<dto_m>.set(detail::normalize_query_val(new_val)),
-                where_cond_);
+            auto make_set_expr = []<rfl::internal::StringLiteral ColLit, typename ValT>(const ValT& v) {
+                constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLit>();
+                return Schema::col_of<dto_m>.set(detail::normalize_query_val(v));
+            };
+
+            std::expected<void, Core::DbError> res{};
+            if constexpr (sizeof...(ColLiterals) == 1)
+            {
+                res = conn_->template update_where<DTO>(
+                    make_set_expr.template operator()<ColLiterals>(new_vals)...,
+                    where_cond_);
+            }
+            else
+            {
+                res = conn_->template update_where_many<DTO>(
+                    where_cond_,
+                    make_set_expr.template operator()<ColLiterals>(new_vals)...);
+            }
             if (res && clear_track_fn_)
             {
                 clear_track_fn_();
@@ -1295,6 +1596,26 @@ export namespace DAL
             return std::nullopt;
         }
 
+        [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_first_or_default() const
+        {
+            return query().try_first_or_default();
+        }
+
+        [[nodiscard]] std::optional<Domain> first_or_default() const
+        {
+            return query().first_or_default();
+        }
+
+        [[nodiscard]] std::expected<bool, Core::DbError> try_any() const
+        {
+            return query().try_any();
+        }
+
+        [[nodiscard]] bool any() const
+        {
+            return query().any();
+        }
+
         // =====================================================================
         // Task 10.1: Fluent Server-Side Query Pushdown
         // =====================================================================
@@ -1521,6 +1842,34 @@ export namespace DAL
         [[nodiscard]] auto select() const
         {
             return query().template select<ColLiteral>();
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> try_count_distinct() const
+        {
+            return query().template try_count_distinct<ColLiteral>();
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] std::size_t count_distinct() const
+        {
+            return query().template count_distinct<ColLiteral>();
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto try_select_distinct() const
+        {
+            return query().template try_select_distinct<ColLiteral>();
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto select_distinct() const
+        {
+            return query().template select_distinct<ColLiteral>();
         }
 
         // =====================================================================

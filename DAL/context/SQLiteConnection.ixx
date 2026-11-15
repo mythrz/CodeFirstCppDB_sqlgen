@@ -440,13 +440,15 @@ export namespace DAL
         template<typename DTO, typename IdType>
         [[nodiscard]] bool exists(const IdType& id) const
         {
-            return get_by_id<DTO>(id).has_value();
+            auto res = try_count_where<DTO>(DAL::Schema::make_pk_where<DTO>(id));
+            return res.has_value() && *res > 0;
         }
 
         template<typename DTO, typename... Parts>
         [[nodiscard]] bool exists_by_composite_id(const Parts&... parts) const
         {
-            return get_by_composite_id<DTO>(parts...).has_value();
+            auto res = try_count_where<DTO>(DAL::Schema::make_composite_where<DTO>(parts...));
+            return res.has_value() && *res > 0;
         }
 
         template<typename DTO>
@@ -649,6 +651,25 @@ export namespace DAL
                 };
             }
             auto query = sqlgen::update<DTO>(set_expr) | sqlgen::where(cond);
+            auto res = query(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        template<typename DTO, typename Condition, typename... SetExprs>
+            requires (sizeof...(SetExprs) >= 2)
+        std::expected<void, Core::DbError> update_where_many(const Condition& cond, const SetExprs&... set_exprs)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto query = sqlgen::update<DTO>(set_exprs...) | sqlgen::where(cond);
             auto res = query(conn_);
             if (!res)
             {

@@ -584,6 +584,116 @@ export namespace DAL
             return parent_set.where_sql(Schema::col_of<pk_m>.in(fk_vals)).try_to_vector();
         }
 
+        template<typename ChildDomain, typename ParentDomain, typename Self>
+        [[nodiscard]] std::expected<std::vector<std::pair<ParentDomain, std::vector<ChildDomain>>>, Core::DbError>
+        query_children_grouped(this Self&& self, const std::vector<ParentDomain>& parents)
+        {
+            using PairType = std::pair<ParentDomain, std::vector<ChildDomain>>;
+            std::vector<PairType> grouped;
+            grouped.reserve(parents.size());
+            if (parents.empty())
+            {
+                return grouped;
+            }
+
+            auto children_res = self.template query_children_batch<ChildDomain>(parents);
+            if (!children_res)
+            {
+                return std::unexpected<Core::DbError>{ children_res.error() };
+            }
+
+            auto& child_set = self.template find_dbset<ChildDomain>();
+            auto& parent_set = self.template find_dbset<ParentDomain>();
+            using ChildDTO = typename std::remove_cvref_t<decltype(child_set)>::DTOType;
+            using ParentDTO = typename std::remove_cvref_t<decltype(parent_set)>::DTOType;
+            using FkValueType = std::remove_cvref_t<decltype(
+                Schema::extract_fk_value<ChildDTO, ParentDTO>(std::declval<const ChildDTO&>()))>;
+
+            std::map<FkValueType, std::vector<ChildDomain>> buckets;
+            for (auto& child : *children_res)
+            {
+                const ChildDTO c_dto = DAL::Mappers::MapperTraits<ChildDomain, ChildDTO>::to_dto(child);
+                const auto fk_val = Schema::extract_fk_value<ChildDTO, ParentDTO>(c_dto);
+                buckets[fk_val].push_back(std::move(child));
+            }
+
+            for (const auto& parent : parents)
+            {
+                const auto parent_key = Schema::EntityMetadata<ParentDomain, ParentDTO>::extract_key(parent);
+                const auto pk_val = static_cast<FkValueType>(detail::normalize_query_val(parent_key));
+                auto it = buckets.find(pk_val);
+                if (it != buckets.end())
+                {
+                    grouped.emplace_back(parent, std::move(it->second));
+                }
+                else
+                {
+                    grouped.emplace_back(parent, std::vector<ChildDomain>{});
+                }
+            }
+            return grouped;
+        }
+
+        template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
+        [[nodiscard]] std::expected<std::vector<TargetDomain>, Core::DbError>
+        query_many_to_many_batch(this Self&& self, const std::vector<SourceDomain>& sources)
+        {
+            if (sources.empty())
+            {
+                return std::vector<TargetDomain>{};
+            }
+
+            auto junctions_res = self.template query_children_batch<JunctionDomain>(sources);
+            if (!junctions_res)
+            {
+                return std::unexpected<Core::DbError>{ junctions_res.error() };
+            }
+            if (junctions_res->empty())
+            {
+                return std::vector<TargetDomain>{};
+            }
+
+            auto& junction_set = self.template find_dbset<JunctionDomain>();
+            auto& target_set = self.template find_dbset<TargetDomain>();
+            using JunctionDTO = typename std::remove_cvref_t<decltype(junction_set)>::DTOType;
+            using TargetDTO = typename std::remove_cvref_t<decltype(target_set)>::DTOType;
+
+            if constexpr (Schema::SinglePrimaryKey<TargetDTO>)
+            {
+                constexpr auto pk_m = Schema::primary_key_member<TargetDTO>();
+                using FkValueType = std::remove_cvref_t<decltype(
+                    Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
+                std::vector<FkValueType> target_fks;
+                target_fks.reserve(junctions_res->size());
+                for (const auto& junction : *junctions_res)
+                {
+                    const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
+                    target_fks.push_back(Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto));
+                }
+                return target_set.where_sql(Schema::col_of<pk_m>.in(target_fks)).try_to_vector();
+            }
+            else
+            {
+                std::vector<TargetDomain> results;
+                results.reserve(junctions_res->size());
+                for (const auto& junction : *junctions_res)
+                {
+                    const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
+                    const auto target_fk = Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto);
+                    auto target_res = target_set.try_find(target_fk);
+                    if (!target_res)
+                    {
+                        return std::unexpected<Core::DbError>{ target_res.error() };
+                    }
+                    if (target_res->has_value())
+                    {
+                        results.push_back(std::move(*target_res.value()));
+                    }
+                }
+                return results;
+            }
+        }
+
         std::expected<void, Core::DbError> begin_transaction()
         {
             if (!is_connected())
@@ -725,6 +835,62 @@ export namespace DAL
             return {};
         }
 
+        std::expected<void, Core::DbError> flush_pending_since(std::size_t start_idx)
+        {
+            if (start_idx >= pending_ops_.size())
+            {
+                return {};
+            }
+            for (std::size_t i = start_idx; i < pending_ops_.size(); ++i)
+            {
+                auto res = pending_ops_[i]();
+                if (!res)
+                {
+                    pending_ops_.resize(start_idx);
+                    return res;
+                }
+            }
+            pending_ops_.resize(start_idx);
+            return {};
+        }
+
+        [[nodiscard]] std::expected<std::string, Core::DbError> acquire_savepoint()
+        {
+            const std::string sp_name = std::format("_codefirst_sp_{}", ++savepoint_depth_);
+            auto res = savepoint(sp_name);
+            if (!res)
+            {
+                --savepoint_depth_;
+                return std::unexpected<Core::DbError>{ res.error() };
+            }
+            return sp_name;
+        }
+
+        void release_savepoint_depth() noexcept
+        {
+            if (savepoint_depth_ > 0)
+            {
+                --savepoint_depth_;
+            }
+        }
+
+        void truncate_pending_changes(std::size_t size) noexcept
+        {
+            if (size < pending_ops_.size())
+            {
+                pending_ops_.resize(size);
+            }
+        }
+
+        [[nodiscard]] static constexpr bool supports_savepoints() noexcept
+        {
+            return requires(ConnectionHandle& c, std::string_view n) {
+                c.savepoint(n);
+                c.release_savepoint(n);
+                c.rollback_to_savepoint(n);
+            };
+        }
+
         template<typename Fn>
         std::expected<void, Core::DbError> transaction(Fn&& fn)
         {
@@ -737,13 +903,10 @@ export namespace DAL
 
             if (in_transaction())
             {
-                if constexpr (requires(ConnectionHandle& c, std::string_view n) {
-                    c.savepoint(n);
-                    c.release_savepoint(n);
-                    c.rollback_to_savepoint(n);
-                })
+                if constexpr (supports_savepoints())
                 {
                     const std::string sp_name = std::format("_codefirst_sp_{}", ++savepoint_depth_);
+                    const std::size_t saved_pending_size = pending_ops_.size();
                     auto sp_res = conn_->savepoint(sp_name);
                     if (!sp_res)
                     {
@@ -763,9 +926,21 @@ export namespace DAL
                             auto fn_res = std::invoke(std::forward<Fn>(fn));
                             if (!fn_res)
                             {
+                                pending_ops_.resize(saved_pending_size);
                                 (void)conn_->rollback_to_savepoint(sp_name);
                                 --savepoint_depth_;
                                 return fn_res;
+                            }
+                        }
+
+                        if (pending_ops_.size() > saved_pending_size)
+                        {
+                            auto flush_res = flush_pending_since(saved_pending_size);
+                            if (!flush_res)
+                            {
+                                (void)conn_->rollback_to_savepoint(sp_name);
+                                --savepoint_depth_;
+                                return flush_res;
                             }
                         }
 
@@ -775,6 +950,7 @@ export namespace DAL
                     }
                     catch (...)
                     {
+                        pending_ops_.resize(saved_pending_size);
                         (void)conn_->rollback_to_savepoint(sp_name);
                         --savepoint_depth_;
                         throw;
@@ -848,15 +1024,42 @@ export namespace DAL
     public:
         explicit TransactionScope(DbContextBase<ConnectionHandle>& ctx)
             : ctx_(&ctx)
+            , saved_pending_size_(ctx.pending_changes_count())
         {
-            begin_result_ = ctx_->begin_transaction();
+            if (ctx_->in_transaction() && DbContextBase<ConnectionHandle>::supports_savepoints())
+            {
+                is_savepoint_ = true;
+                auto sp_res = ctx_->acquire_savepoint();
+                if (sp_res)
+                {
+                    savepoint_name_ = std::move(*sp_res);
+                    begin_result_ = {};
+                }
+                else
+                {
+                    begin_result_ = std::unexpected<Core::DbError>{ sp_res.error() };
+                }
+            }
+            else
+            {
+                begin_result_ = ctx_->begin_transaction();
+            }
         }
 
         ~TransactionScope()
         {
-            if (!committed_ && ctx_ && ctx_->in_transaction())
+            if (!committed_ && !rolled_back_ && begin_result_.has_value() && ctx_ && ctx_->in_transaction())
             {
-                (void)ctx_->rollback();
+                if (is_savepoint_)
+                {
+                    ctx_->truncate_pending_changes(saved_pending_size_);
+                    (void)ctx_->rollback_to_savepoint(savepoint_name_);
+                    ctx_->release_savepoint_depth();
+                }
+                else
+                {
+                    (void)ctx_->rollback();
+                }
             }
         }
 
@@ -867,7 +1070,7 @@ export namespace DAL
 
         [[nodiscard]] bool is_active() const noexcept
         {
-            return begin_result_.has_value() && !committed_ && ctx_ && ctx_->in_transaction();
+            return begin_result_.has_value() && !committed_ && !rolled_back_ && ctx_ && ctx_->in_transaction();
         }
 
         [[nodiscard]] const std::expected<void, Core::DbError>& begin_result() const noexcept
@@ -887,6 +1090,33 @@ export namespace DAL
                     Core::DbError::connection_error("TransactionScope already committed")
                 };
             }
+            if (rolled_back_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot commit a rolled-back TransactionScope")
+                };
+            }
+            if (is_savepoint_)
+            {
+                if (ctx_->pending_changes_count() > saved_pending_size_)
+                {
+                    auto flush_res = ctx_->flush_pending_since(saved_pending_size_);
+                    if (!flush_res)
+                    {
+                        (void)ctx_->rollback_to_savepoint(savepoint_name_);
+                        ctx_->release_savepoint_depth();
+                        rolled_back_ = true;
+                        return flush_res;
+                    }
+                }
+                auto rel_res = ctx_->release_savepoint(savepoint_name_);
+                ctx_->release_savepoint_depth();
+                if (rel_res)
+                {
+                    committed_ = true;
+                }
+                return rel_res;
+            }
             auto res = ctx_->save_changes();
             if (res)
             {
@@ -903,8 +1133,20 @@ export namespace DAL
                     Core::DbError::connection_error("Cannot rollback a committed TransactionScope")
                 };
             }
+            if (rolled_back_)
+            {
+                return {};
+            }
             if (ctx_ && ctx_->in_transaction())
             {
+                rolled_back_ = true;
+                if (is_savepoint_)
+                {
+                    ctx_->truncate_pending_changes(saved_pending_size_);
+                    auto res = ctx_->rollback_to_savepoint(savepoint_name_);
+                    ctx_->release_savepoint_depth();
+                    return res;
+                }
                 return ctx_->rollback();
             }
             return {};
@@ -913,7 +1155,11 @@ export namespace DAL
     private:
         DbContextBase<ConnectionHandle>* ctx_{ nullptr };
         std::expected<void, Core::DbError> begin_result_{};
+        std::size_t saved_pending_size_{ 0 };
+        bool is_savepoint_{ false };
+        std::string savepoint_name_{};
         bool committed_{ false };
+        bool rolled_back_{ false };
     };
 
 } // namespace DAL
