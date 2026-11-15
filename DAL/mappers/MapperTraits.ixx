@@ -21,8 +21,23 @@ export namespace DAL::Mappers
             return to_lower(a) == to_lower(b);
         }
 
+        consteval std::string_view strip_member_affixes(std::string_view name)
+        {
+            if (name.starts_with("m_") || name.starts_with("M_"))
+            {
+                name.remove_prefix(2);
+            }
+            if (name.ends_with("_") && name.size() > 1)
+            {
+                name.remove_suffix(1);
+            }
+            return name;
+        }
+
         consteval bool matches_snake_to_camel(std::string_view snake, std::string_view camel)
         {
+            snake = strip_member_affixes(snake);
+            camel = strip_member_affixes(camel);
             std::size_t c_idx = 0;
             for (std::size_t s_idx = 0; s_idx < snake.size(); ++s_idx)
             {
@@ -36,15 +51,11 @@ export namespace DAL::Mappers
                     return false;
                 c_idx++;
             }
-            if (c_idx < camel.size() && camel[c_idx] == '_' && c_idx + 1 == camel.size())
-            {
-                return true;
-            }
             return c_idx == camel.size();
         }
 
         // Given a DTO member, find the unique matching domain member.
-        // Strategies are tried in order: exact name, trailing underscore, snake→camel.
+        // Strategies are tried in order: exact name, stripped affixes (m_/M_/_), snake→camel.
         // Evaluating a throw inside a consteval function is ill-formed, so any
         // no-match or ambiguous-match is a compile-time error at the call site.
         consteval std::meta::info find_matching_domain_member(std::meta::info dto_m, std::span<const std::meta::info> domain_members)
@@ -67,25 +78,24 @@ export namespace DAL::Mappers
             if (exact_count > 1)
                 throw std::invalid_argument("MapperTraits: ambiguous exact match for DTO field");
 
-            // domain member name is DTO name plus a trailing underscore
-            //              (e.g. DTO "id" matches domain "id_").
-            std::meta::info underscore_hit{};
-            int underscore_count = 0;
+            // stripped member affixes (e.g. DTO "id" matches domain "id_", "m_id", "m_id_").
+            std::string_view stripped_dto = strip_member_affixes(dto_name);
+            std::meta::info affix_hit{};
+            int affix_count = 0;
             for (auto m : domain_members)
             {
-                std::string_view d_name = std::meta::identifier_of(m);
-                if (d_name.size() == dto_name.size() + 1 && d_name.starts_with(dto_name) && d_name.ends_with("_"))
+                if (strip_member_affixes(std::meta::identifier_of(m)) == stripped_dto)
                 {
-                    underscore_hit = m;
-                    ++underscore_count;
+                    affix_hit = m;
+                    ++affix_count;
                 }
             }
-            if (underscore_count == 1)
-                return underscore_hit;
-            if (underscore_count > 1)
-                throw std::invalid_argument("MapperTraits: ambiguous trailing-underscore match for DTO field");
+            if (affix_count == 1)
+                return affix_hit;
+            if (affix_count > 1)
+                throw std::invalid_argument("MapperTraits: ambiguous affix-stripped match for DTO field");
 
-            // DTO name is snake_case, domain name is camelCase (with optional trailing underscore).
+            // DTO name is snake_case, domain name is camelCase (with optional m_/M_ prefix or trailing _).
             std::meta::info camel_hit{};
             int camel_count = 0;
             for (auto m : domain_members)
@@ -128,25 +138,24 @@ export namespace DAL::Mappers
             if (exact_count > 1)
                 throw std::invalid_argument("MapperTraits: ambiguous exact match for domain member");
 
-            // domain member name is DTO name plus a trailing underscore
-            //              (e.g. domain "id_" matches DTO "id").
-            std::meta::info underscore_hit{};
-            int underscore_count = 0;
+            // stripped member affixes (e.g. domain "id_", "m_id", "m_id_" matches DTO "id").
+            std::string_view stripped_dom = strip_member_affixes(dom_name);
+            std::meta::info affix_hit{};
+            int affix_count = 0;
             for (auto m : dto_members)
             {
-                std::string_view dto_name = std::meta::identifier_of(m);
-                if (dom_name.size() == dto_name.size() + 1 && dom_name.starts_with(dto_name) && dom_name.ends_with("_"))
+                if (strip_member_affixes(std::meta::identifier_of(m)) == stripped_dom)
                 {
-                    underscore_hit = m;
-                    ++underscore_count;
+                    affix_hit = m;
+                    ++affix_count;
                 }
             }
-            if (underscore_count == 1)
-                return underscore_hit;
-            if (underscore_count > 1)
-                throw std::invalid_argument("MapperTraits: ambiguous trailing-underscore match for domain member");
+            if (affix_count == 1)
+                return affix_hit;
+            if (affix_count > 1)
+                throw std::invalid_argument("MapperTraits: ambiguous affix-stripped match for domain member");
 
-            // DTO name is snake_case, domain name is camelCase (with optional trailing underscore).
+            // DTO name is snake_case, domain name is camelCase (with optional m_/M_ prefix or trailing _).
             std::meta::info camel_hit{};
             int camel_count = 0;
             for (auto m : dto_members)
@@ -323,7 +332,7 @@ export namespace DAL::Mappers
             {
                 std::string_view d_name = std::meta::identifier_of(dm);
                 if (d_name == name ||
-                    (d_name.size() == name.size() + 1 && d_name.starts_with(name) && d_name.ends_with("_")))
+                    detail::strip_member_affixes(d_name) == detail::strip_member_affixes(name))
                 {
                     return true;
                 }
@@ -369,7 +378,7 @@ export namespace DAL::Mappers
             {
                 std::string_view d_name = std::meta::identifier_of(dm);
                 if (d_name == name ||
-                    (d_name.size() == name.size() + 1 && d_name.starts_with(name) && d_name.ends_with("_")))
+                    detail::strip_member_affixes(d_name) == detail::strip_member_affixes(name))
                 {
                     return detail::find_matching_dto_member(dm, dto_members);
                 }

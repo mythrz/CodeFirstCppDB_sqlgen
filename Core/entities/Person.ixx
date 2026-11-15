@@ -1,8 +1,7 @@
-export module core:person;
+export module samples:person;
 
 import std;
-import :id;
-import :key;
+import core;
 
 export namespace Core
 {

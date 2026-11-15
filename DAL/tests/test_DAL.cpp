@@ -5,6 +5,7 @@
 import std;
 import core;
 import dal;
+import samples;
 namespace
 {
 
@@ -2986,6 +2987,119 @@ namespace
         auto afterRead = db.people.find(1);
         ASSERT_TRUE(afterRead.has_value());
         EXPECT_EQ(afterRead->getFirstName(), "Augusta");
+    }
+
+    // =========================================================================
+    // Phase 37: Standardized m_ Member Prefix Reflection & SQLite Hardening
+    // =========================================================================
+
+    struct PrefixedWidget
+    {
+        int m_id = 0;
+        std::string m_widgetName;
+        int M_count = 0;
+    };
+
+    struct PrefixedWidgetDTO
+    {
+        static constexpr auto tablename = "PrefixedWidget";
+        sqlgen::PrimaryKey<std::int32_t, true> id{ 0 };
+        std::string widget_name;
+        std::int32_t count = 0;
+    };
+
+    TEST(Phase37MemberPrefixReflectionTest, MapsPrefixedDomainMembersAndQueries)
+    {
+        static_assert(DAL::Mappers::ValidQueryColumn<PrefixedWidget, PrefixedWidgetDTO, "m_id">);
+        static_assert(DAL::Mappers::ValidQueryColumn<PrefixedWidget, PrefixedWidgetDTO, "m_widgetName">);
+        static_assert(DAL::Mappers::ValidQueryColumn<PrefixedWidget, PrefixedWidgetDTO, "M_count">);
+
+        PrefixedWidget domain{ 7, "Gearbox", 42 };
+        auto dto = DAL::Mappers::MapperTraits<PrefixedWidget, PrefixedWidgetDTO>::to_dto(domain);
+        EXPECT_EQ(dto.id.value(), 7);
+        EXPECT_EQ(dto.widget_name, "Gearbox");
+        EXPECT_EQ(dto.count, 42);
+
+        auto roundtrip = DAL::Mappers::MapperTraits<PrefixedWidget, PrefixedWidgetDTO>::to_domain(dto);
+        EXPECT_EQ(roundtrip.m_id, 7);
+        EXPECT_EQ(roundtrip.m_widgetName, "Gearbox");
+        EXPECT_EQ(roundtrip.M_count, 42);
+    }
+
+    TEST(Phase37SqliteHardeningTest, CompositePkUniqueAndFkEnforcementOnFreshConnect)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // Foreign keys must be enforced automatically on fresh connect()
+        auto badFk = db.personSomethings.add(
+            Core::Person_Something(Core::PersonId{ 999 }, Core::SomethingId{ 999 }, "Invalid"));
+        ASSERT_FALSE(badFk.has_value());
+
+        auto pRes = db.people.add(Core::Person(Core::PersonId{ 0 }, "Ada", "Lovelace"));
+        ASSERT_TRUE(pRes.has_value()) << pRes.error().to_string();
+        auto sRes = db.somethings.add(Core::Something(Core::SomethingId{ 0 }, "Engine", "Tech"));
+        ASSERT_TRUE(sRes.has_value()) << sRes.error().to_string();
+
+        const auto pid = Core::PersonId{ 1 };
+        const auto sid = Core::SomethingId{ 1 };
+
+        auto okAssoc = db.personSomethings.add(
+            Core::Person_Something(pid, sid, "Creator"));
+        ASSERT_TRUE(okAssoc.has_value()) << okAssoc.error().to_string();
+
+        // Duplicate composite key must fail with DuplicateKey
+        auto dupAssoc = db.personSomethings.add(
+            Core::Person_Something(pid, sid, "Duplicate"));
+        ASSERT_FALSE(dupAssoc.has_value());
+        EXPECT_EQ(dupAssoc.error().code, Core::DbErrorCode::DuplicateKey);
+
+        // Update existing composite-key row in-place
+        auto updateAssoc = db.personSomethings.update(
+            Core::Person_Something(pid, sid, "Maintainer"));
+        ASSERT_TRUE(updateAssoc.has_value()) << updateAssoc.error().to_string();
+
+        auto all = db.personSomethings.to_vector();
+        ASSERT_EQ(all.size(), 1u);
+        EXPECT_EQ(all[0].getAssociationType(), "Maintainer");
+    }
+
+    // =========================================================================
+    // Phase 38: Runtime SQLite Schema & Table Introspection API
+    // =========================================================================
+
+    TEST(Phase38SchemaIntrospectionTest, ListTablesTableInfoAndExecuteRaw)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        auto tablesRes = db.list_tables();
+        ASSERT_TRUE(tablesRes.has_value()) << tablesRes.error().to_string();
+        const auto& tables = *tablesRes;
+        EXPECT_NE(std::ranges::find(tables, std::string_view("Person")), tables.end());
+        EXPECT_NE(std::ranges::find(tables, std::string_view("Something")), tables.end());
+        EXPECT_NE(std::ranges::find(tables, std::string_view("Person_Something")), tables.end());
+
+        auto personColsRes = db.table_info("Person");
+        ASSERT_TRUE(personColsRes.has_value()) << personColsRes.error().to_string();
+        ASSERT_EQ(personColsRes->size(), 3u);
+        EXPECT_EQ((*personColsRes)[0].name, "id");
+        EXPECT_EQ((*personColsRes)[0].pk_index, 1);
+        EXPECT_EQ((*personColsRes)[1].name, "first_name");
+        EXPECT_EQ((*personColsRes)[2].name, "last_name");
+
+        auto somethingColsRes = db.table_info("Something");
+        ASSERT_TRUE(somethingColsRes.has_value()) << somethingColsRes.error().to_string();
+        ASSERT_EQ(somethingColsRes->size(), 4u);
+        EXPECT_EQ((*somethingColsRes)[3].name, "description");
+        EXPECT_FALSE((*somethingColsRes)[3].not_null);
+
+        EXPECT_TRUE(db.execute_raw("CREATE INDEX IF NOT EXISTS idx_person_last ON Person (last_name);").has_value());
+        EXPECT_FALSE(db.execute_raw("").has_value());
     }
 
 } // namespace

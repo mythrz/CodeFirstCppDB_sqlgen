@@ -51,6 +51,27 @@ export namespace DAL
             return conn_ && conn_->is_open();
         }
 
+        // Lists user tables in the underlying database (Phase 38)
+        [[nodiscard]] auto list_tables() const
+            requires requires(const ConnectionHandle& c) { c.list_tables(); }
+        {
+            return conn_->list_tables();
+        }
+
+        // Returns column metadata for the specified table (Phase 38)
+        [[nodiscard]] auto table_info(std::string_view table_name) const
+            requires requires(const ConnectionHandle& c, std::string_view t) { c.table_info(t); }
+        {
+            return conn_->table_info(table_name);
+        }
+
+        // Executes a raw SQL statement against the underlying connection (Phase 38)
+        auto execute_raw(std::string_view sql)
+            requires requires(ConnectionHandle& c, std::string_view s) { c.execute_raw(s); }
+        {
+            return conn_->execute_raw(sql);
+        }
+
         // Type alias for zero-boilerplate DbSet declarations inside derived DbContext classes
         template<typename Domain,
                  typename DTO = Schema::SchemaOf_t<Domain>,

@@ -1,9 +1,11 @@
-export module dal:sqlite_something_repo;
+export module samples:sqlite_something_repo;
 
 import std;
 import core;
+import dal;
+import :something;
+import :isomething_repository;
 import :schema_something;
-import :generic_repo;
 
 export namespace DAL::Repositories
 {

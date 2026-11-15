@@ -280,7 +280,7 @@ Allow external projects ("Project Horizon" and any C++26 consumer) to include `C
 
 #### Detailed Tasks
 
-- [ ] **Task 35.1: Modernize Root `CMakeLists.txt` with `PROJECT_IS_TOP_LEVEL` Guards (`CMakeLists.txt`)**
+- [x] **Task 35.1: Modernize Root `CMakeLists.txt` with `PROJECT_IS_TOP_LEVEL` Guards (`CMakeLists.txt`)**
   - Update [CMakeLists.txt](CMakeLists.txt):
     - Change `cmake_minimum_required(VERSION 4.0)` and `project(CodeFirstCppDB VERSION 1.0.0 LANGUAGES CXX)`.
     - Guard `CMAKE_EXPERIMENTAL_CXX_IMPORT_STD` with `if(NOT DEFINED CMAKE_EXPERIMENTAL_CXX_IMPORT_STD)` so parent projects that already configure `CMAKE_CXX_MODULE_STD` are never disrupted.
@@ -297,7 +297,7 @@ Allow external projects ("Project Horizon" and any C++26 consumer) to include `C
     - Guard `googletest` and `enable_testing()` behind `if(CODEFIRST_BUILD_TESTS)`.
     - Guard `add_subdirectory(Samples)` behind `if(CODEFIRST_INCLUDE_SAMPLES)` and `add_subdirectory(Startup)` behind `if(CODEFIRST_BUILD_EXAMPLES)`.
 
-- [ ] **Task 35.2: Add Namespaced CMake Alias Targets & Guard `DAL/tests` ([Core/CMakeLists.txt](Core/CMakeLists.txt) & [DAL/CMakeLists.txt](DAL/CMakeLists.txt))**
+- [x] **Task 35.2: Add Namespaced CMake Alias Targets & Guard `DAL/tests` ([Core/CMakeLists.txt](Core/CMakeLists.txt) & [DAL/CMakeLists.txt](DAL/CMakeLists.txt))**
   - In [Core/CMakeLists.txt](Core/CMakeLists.txt), add:
     ```cmake
     add_library(CodeFirstCppDB::Core ALIAS Core)
@@ -322,7 +322,7 @@ Make `Core` (`module core;`) and `DAL` (`module dal;`) 100% pure, entity-agnosti
 
 #### Detailed Tasks
 
-- [ ] **Task 36.1: Keep `Core` (`module core;`) & `DAL` (`module dal;`) 100% Entity-Agnostic (`Core/` & `DAL/`)**
+- [x] **Task 36.1: Keep `Core` (`module core;`) & `DAL` (`module dal;`) 100% Entity-Agnostic (`Core/` & `DAL/`)**
   - Update [Core/CMakeLists.txt](Core/CMakeLists.txt) and [Core/core.ixx](Core/core.ixx) so `Core` compiles and exports **only** the reusable domain primitives:
     - `Id.ixx` (`export import :id;`)
     - `Key.ixx` (`export import :key;`)
@@ -337,7 +337,7 @@ Make `Core` (`module core;`) and `DAL` (`module dal;`) 100% pure, entity-agnosti
     - `context/DbContext.ixx` (`export import :db_context;`)
     - `context/SQLiteConnection.ixx` (`export import :sqlite_connection;`)
 
-- [ ] **Task 36.2: Create `Samples` Module Target (`Samples/CMakeLists.txt` & `Samples/samples.ixx`)**
+- [x] **Task 36.2: Create `Samples` Module Target (`Samples/CMakeLists.txt` & `Samples/samples.ixx`)**
   - Create `Samples/CMakeLists.txt` defining `add_library(Samples)` (with aliases `CodeFirstCppDB::Samples` and `CodeFirst::Samples`) linking `PUBLIC Core DAL` and compiling the sample module files (`Samples/samples.ixx` + the existing sample `.ixx` files in `Core/entities/`, `Core/repositories/I*Repository.ixx`, `DAL/schema/*DTO.ixx`, and `DAL/repositories/SQLite*Repo.ixx`, switching their module declaration from `export module core:...` / `export module dal:...` to `export module samples:...` while preserving their `namespace Core` and `namespace DAL::Schema` / `namespace DAL::Repositories` declarations!).
   - Update [Startup/CMakeLists.txt](Startup/CMakeLists.txt) and [DAL/tests/CMakeLists.txt](DAL/tests/CMakeLists.txt) to link `Samples`, and add `import samples;` to [Startup/main.cpp](Startup/main.cpp) and [DAL/tests/test_DAL.cpp](DAL/tests/test_DAL.cpp).
 
@@ -350,7 +350,7 @@ Support standardized `m_` member naming (`m_id`, `m_firstName`, `m_lastName`) au
 
 #### Detailed Tasks
 
-- [ ] **Task 37.1: Support `m_` Prefix (and `_` Suffix) in `MapperTraits` & `ValidQueryColumn` ([DAL/mappers/MapperTraits.ixx](DAL/mappers/MapperTraits.ixx))**
+- [x] **Task 37.1: Support `m_` Prefix (and `_` Suffix) in `MapperTraits` & `ValidQueryColumn` ([DAL/mappers/MapperTraits.ixx](DAL/mappers/MapperTraits.ixx))**
   - In [DAL/mappers/MapperTraits.ixx](DAL/mappers/MapperTraits.ixx), add a `consteval` helper in `namespace detail`:
     ```cpp
     consteval std::string_view strip_member_affixes(std::string_view name)
@@ -371,13 +371,13 @@ Support standardized `m_` member naming (`m_id`, `m_firstName`, `m_lastName`) au
     - Domain `m_firstName` / `firstName_` / `firstName` matches DTO `first_name` (or `m_firstName`).
     - Queries accept `.where_equal<"m_firstName">(...)`, `.where_equal<"firstName">(...)`, or `.where_equal<"first_name">(...)` interchangeably at compile time!
 
-- [ ] **Task 37.2: Enable `PRAGMA foreign_keys = ON` on `SQLiteConnection::connect()` & Auto-Create Composite Key `UNIQUE` Index ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx))**
+- [x] **Task 37.2: Enable `PRAGMA foreign_keys = ON` on `SQLiteConnection::connect()` & Auto-Create Composite Key `UNIQUE` Index ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx))**
   - In `SQLiteConnection::connect(const std::string& dbPath)` ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx#L49-L75)), call `auto fk_res = handle->enable_foreign_keys();` immediately after constructing the `SQLiteConnection` so connections to existing `.db` files always enforce foreign keys.
   - In `SQLiteConnection::ensure_table_created<DTO>()` ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx#L49-L75)):
     - After `sqlgen::CreateTable<DTO>{ .if_not_exists_ = true }(conn_)` succeeds, check `if constexpr (DAL::Schema::CompositePrimaryKey<DTO>)`:
     - Automatically execute `CREATE UNIQUE INDEX IF NOT EXISTS "ux_<tablename>_composite_pk" ON "<tablename>" ("<col1>", "<col2>", ...);` using the composite key column names from `DAL::Schema::composite_key_column_names<DTO>()` (or iterating `SqlgenForeignKeyField` members of `DTO`), so composite-key junction tables enforce uniqueness and support atomic `INSERT OR REPLACE` (`upsert`) in SQLite!
 
-- [ ] **Task 37.3: Phase 37 Verification Tests ([DAL/tests/test_DAL.cpp](DAL/tests/test_DAL.cpp))**
+- [x] **Task 37.3: Phase 37 Verification Tests ([DAL/tests/test_DAL.cpp](DAL/tests/test_DAL.cpp))**
   - Define pure aggregate structs mirroring Project Horizon's `m_`-prefixed models (`PersonRecord` with `m_id`, `m_firstName`, `m_lastName`; `PersonSomethingRecord` with `m_personId`, `m_somethingId`, `m_associationType`), map them to `PersonDTO` and `Person_SomethingDTO`, and test CRUD, `add_returning`, and `.where_equal<"m_firstName">(...)` queries.
   - Verify that inserting duplicate `(person_id, something_id)` rows into `Person_Something` fails with `Core::DbErrorCode::ConstraintViolation`, and that `db.personSomethings.upsert(...)` updates the existing junction row in place without creating duplicates.
   - Verify that a fresh `SQLiteConnection::connect` to an existing database enforces foreign keys without calling `ensure_created()`.
@@ -391,7 +391,7 @@ Provide a clean, pure-module C++26 runtime schema introspection API on `SQLiteCo
 
 #### Detailed Tasks
 
-- [ ] **Task 38.1: Add `TableColumnInfo`, `list_tables()`, `table_info()`, & `execute_raw()` on `SQLiteConnection` and `DbContextBase` ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx) & [DAL/context/DbContext.ixx](DAL/context/DbContext.ixx))**
+- [x] **Task 38.1: Add `TableColumnInfo`, `list_tables()`, `table_info()`, & `execute_raw()` on `SQLiteConnection` and `DbContextBase` ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx) & [DAL/context/DbContext.ixx](DAL/context/DbContext.ixx))**
   - In [DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx), export:
     ```cpp
     struct TableColumnInfo
@@ -412,7 +412,7 @@ Provide a clean, pure-module C++26 runtime schema introspection API on `SQLiteCo
     - `std::expected<void, Core::DbError> execute_raw(std::string_view sql)`
       Executes `conn_->execute(std::string(sql))` and maps any failure to `Core::DbError`.
 
-- [ ] **Task 38.2: Phase 38 Verification Tests ([DAL/tests/test_DAL.cpp](DAL/tests/test_DAL.cpp))**
+- [x] **Task 38.2: Phase 38 Verification Tests ([DAL/tests/test_DAL.cpp](DAL/tests/test_DAL.cpp))**
   - Test `db.list_tables()` after `db.ensure_created()`, confirming `"Person"`, `"Person_Something"`, and `"Something"` are returned.
   - Test `db.table_info("Person")` and `db.table_info("Something")`, verifying column names, SQLite types (`INTEGER`, `TEXT`), `not_null` flags (including `std::optional<std::string> description` having `not_null == false`), and `pk_index == 1` on `id`.
 

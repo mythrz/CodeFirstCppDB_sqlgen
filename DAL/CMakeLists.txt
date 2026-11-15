@@ -1,18 +1,14 @@
 add_library(DAL)
+add_library(CodeFirstCppDB::DAL ALIAS DAL)
+add_library(CodeFirst::DAL ALIAS DAL)
 
 target_sources(DAL
     PUBLIC
         FILE_SET CXX_MODULES FILES
-            schema/PersonDTO.ixx
-            schema/SomethingDTO.ixx
-            schema/Person_SomethingDTO.ixx
             schema/SchemaTraits.ixx
             schema/EntityMetadata.ixx
             mappers/MapperTraits.ixx
             repositories/GenericRepository.ixx
-            repositories/SQLitePersonRepo.ixx
-            repositories/SQLiteSomethingRepo.ixx
-            repositories/SQLitePerson_SomethingRepo.ixx
             context/DbSet.ixx
             context/DbContext.ixx
             context/SQLiteConnection.ixx
@@ -33,4 +29,6 @@ target_compile_options(DAL
         -Wno-deprecated-literal-operator
 )
 
-add_subdirectory(tests)
+if(CODEFIRST_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

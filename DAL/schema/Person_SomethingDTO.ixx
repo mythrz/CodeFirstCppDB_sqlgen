@@ -1,11 +1,12 @@
 module;
 #include <sqlgen/ForeignKey.hpp>
 
-export module dal:schema_person_something;
+export module samples:schema_person_something;
 
 import std;
 import core;
-import :schema_traits;
+import dal;
+import :person_something;
 import :schema_person;
 import :schema_something;
 

@@ -1,8 +1,8 @@
-export module core:isomething_repository;
+export module samples:isomething_repository;
 
 import std;
+import core;
 import :something;
-import :igeneric_repository;
 
 export namespace Core 
 {

@@ -10,6 +10,16 @@ import :schema_traits;
 
 export namespace DAL
 {
+    struct TableColumnInfo
+    {
+        std::int64_t cid = 0;
+        std::string name;
+        std::string type;
+        bool not_null = false;
+        std::optional<std::string> default_value;
+        std::int64_t pk_index = 0;
+    };
+
     // SQLiteConnection adapts a raw sqlgen SQLite connection to satisfy
     // the generic DAL::Repositories::DatabaseConnection concepts.
     class SQLiteConnection
@@ -54,7 +64,12 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(res.error().what()) };
             }
-            return std::make_shared<SQLiteConnection>(std::move(res.value()));
+            auto handle = std::make_shared<SQLiteConnection>(std::move(res.value()));
+            if (auto fk_res = handle->enable_foreign_keys(); !fk_res)
+            {
+                return std::unexpected<Core::DbError>{ fk_res.error() };
+            }
+            return handle;
         }
 
         template<typename DTO>
@@ -70,6 +85,31 @@ export namespace DAL
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            if constexpr (Schema::CompositePrimaryKey<DTO>)
+            {
+                static constexpr auto key_members = Schema::key_members_of<DTO>();
+                std::string cols;
+                std::size_t idx = 0;
+                template for (constexpr auto m : key_members)
+                {
+                    if (idx > 0)
+                    {
+                        cols += ", ";
+                    }
+                    cols += std::format("\"{}\"", std::meta::identifier_of(m));
+                    ++idx;
+                }
+                const std::string_view table_name = DTO::tablename;
+                const std::string index_sql = std::format(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS \"ux_{}_composite_pk\" ON \"{}\" ({});",
+                    table_name,
+                    table_name,
+                    cols);
+                if (auto idx_res = conn_->execute(index_sql); !idx_res)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(idx_res.error().what()) };
+                }
             }
             return {};
         }
@@ -826,6 +866,158 @@ export namespace DAL
                 };
             }
             auto res = conn_->execute("PRAGMA journal_mode = WAL;");
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        [[nodiscard]] std::expected<std::vector<std::string>, Core::DbError> list_tables() const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            if (auto r = conn_->execute(
+                    "CREATE TEMP VIEW IF NOT EXISTS _codefirst_tables AS "
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name;");
+                !r)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(r.error().what()) };
+            }
+            struct TableNameRow
+            {
+                std::string name;
+            };
+            sqlgen::dynamic::SelectFrom query{
+                .table_or_query = sqlgen::dynamic::Table{ .name = "_codefirst_tables" },
+                .fields = {
+                    sqlgen::dynamic::SelectFrom::Field{
+                        .val = sqlgen::dynamic::Operation{
+                            sqlgen::dynamic::Column{ .name = "name" }
+                        },
+                        .as = "name"
+                    }
+                }
+            };
+            auto res = conn_->template read<std::vector<TableNameRow>>(query);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            std::vector<std::string> tables;
+            tables.reserve(res->size());
+            for (auto& row : *res)
+            {
+                tables.push_back(std::move(row.name));
+            }
+            return tables;
+        }
+
+        [[nodiscard]] std::expected<std::vector<TableColumnInfo>, Core::DbError> table_info(
+            std::string_view table_name) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            if (table_name.empty()
+                || table_name.find('\0') != std::string_view::npos
+                || table_name.find_first_of("'\";\r\n") != std::string_view::npos)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::unknown("Invalid table name for table_info()")
+                };
+            }
+            const std::string view_sql = std::format(
+                "DROP VIEW IF EXISTS temp._codefirst_table_info; "
+                "CREATE TEMP VIEW temp._codefirst_table_info AS "
+                "SELECT cid, name, type, \"notnull\" AS not_null, dflt_value AS default_value, pk AS pk_index "
+                "FROM pragma_table_info('{}');",
+                table_name);
+            if (auto r = conn_->execute(view_sql); !r)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(r.error().what()) };
+            }
+            struct RawColumnInfo
+            {
+                std::int64_t cid = 0;
+                std::string name;
+                std::string type;
+                std::int64_t not_null = 0;
+                std::optional<std::string> default_value;
+                std::int64_t pk_index = 0;
+            };
+            sqlgen::dynamic::SelectFrom query{
+                .table_or_query = sqlgen::dynamic::Table{ .name = "_codefirst_table_info" },
+                .fields = {
+                    sqlgen::dynamic::SelectFrom::Field{
+                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .name = "cid" } },
+                        .as = "cid"
+                    },
+                    sqlgen::dynamic::SelectFrom::Field{
+                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .name = "name" } },
+                        .as = "name"
+                    },
+                    sqlgen::dynamic::SelectFrom::Field{
+                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .name = "type" } },
+                        .as = "type"
+                    },
+                    sqlgen::dynamic::SelectFrom::Field{
+                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .name = "not_null" } },
+                        .as = "not_null"
+                    },
+                    sqlgen::dynamic::SelectFrom::Field{
+                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .name = "default_value" } },
+                        .as = "default_value"
+                    },
+                    sqlgen::dynamic::SelectFrom::Field{
+                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .name = "pk_index" } },
+                        .as = "pk_index"
+                    }
+                }
+            };
+            auto res = conn_->template read<std::vector<RawColumnInfo>>(query);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            std::vector<TableColumnInfo> cols;
+            cols.reserve(res->size());
+            for (auto& row : *res)
+            {
+                cols.push_back(TableColumnInfo{
+                    .cid = row.cid,
+                    .name = std::move(row.name),
+                    .type = std::move(row.type),
+                    .not_null = (row.not_null != 0),
+                    .default_value = std::move(row.default_value),
+                    .pk_index = row.pk_index
+                });
+            }
+            return cols;
+        }
+
+        std::expected<void, Core::DbError> execute_raw(std::string_view sql)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            if (sql.empty())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::unknown("SQL statement cannot be empty")
+                };
+            }
+            auto res = conn_->execute(std::string{ sql });
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };

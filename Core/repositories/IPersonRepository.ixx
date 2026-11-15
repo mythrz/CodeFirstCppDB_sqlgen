@@ -1,8 +1,8 @@
-export module core:iperson_repository;
+export module samples:iperson_repository;
 
 import std;
+import core;
 import :person;
-import :igeneric_repository;
 
 export namespace Core 
 {

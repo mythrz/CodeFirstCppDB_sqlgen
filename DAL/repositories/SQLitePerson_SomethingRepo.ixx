@@ -1,10 +1,11 @@
-export module dal:sqlite_person_something_repo;
+export module samples:sqlite_person_something_repo;
 
 import std;
 import core;
+import dal;
+import :person_something;
+import :iperson_something_repository;
 import :schema_person_something;
-import :mappers;
-import :generic_repo;
 
 export namespace DAL::Repositories
 {
