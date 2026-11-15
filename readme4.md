@@ -308,7 +308,7 @@ Make PostgreSQL optional in CMake (defaulting to `OFF` so only SQLite3 is requir
 
 #### Detailed Tasks
 
-- [ ] **Task 19.1: Disable Unneeded `SQLGEN_POSTGRES` by Default in `CMakeLists.txt`**
+- [x] **Task 19.1: Disable Unneeded `SQLGEN_POSTGRES` by Default in `CMakeLists.txt`**
   - In root [CMakeLists.txt](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/CMakeLists.txt#L35-L39), add an option `option(CODEFIRST_ENABLE_POSTGRES "Enable sqlgen PostgreSQL driver" OFF)` and set:
     ```cmake
     set(SQLGEN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -319,7 +319,7 @@ Make PostgreSQL optional in CMake (defaulting to `OFF` so only SQLite3 is requir
     add_subdirectory(extern/sqlgen)
     ```
 
-- [ ] **Task 19.2: Target-Scoped `-freflection` & Zero-Warning Global Module Fragments (`CMakeLists.txt` & `DAL/CMakeLists.txt`)**
+- [x] **Task 19.2: Target-Scoped `-freflection` & Zero-Warning Global Module Fragments (`CMakeLists.txt` & `DAL/CMakeLists.txt`)**
   - Remove global `add_compile_options(-freflection)` before `add_subdirectory(extern/...)` in [CMakeLists.txt](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/CMakeLists.txt#L12) (or apply `-freflection` via `target_compile_options(Core PUBLIC -freflection)` so `Core`, `DAL`, `Startup`, and `test_DAL` inherit it without affecting `reflect-cpp`, `sqlgen`, or `googletest`).
   - In [DAL/CMakeLists.txt](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/CMakeLists.txt), add:
     ```cmake
@@ -339,7 +339,7 @@ Eliminate all references to sample DTOs (`PersonDTO`, `SomethingDTO`, `Person_So
 
 #### Detailed Tasks
 
-- [ ] **Task 20.1: Remove Sample DTO Imports from `MapperTraits.ixx` & `SQLiteConnection.ixx`**
+- [x] **Task 20.1: Remove Sample DTO Imports from `MapperTraits.ixx` & `SQLiteConnection.ixx`**
   - In [DAL/mappers/MapperTraits.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/mappers/MapperTraits.ixx#L9-L11), remove the unused `import :schema_person;`, `import :schema_something;`, and `import :schema_person_something;`.
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L10), remove `import :schema_person_something;` and change line 427 from:
     `template<typename DTO = DAL::Schema::Person_SomethingDTO, typename... Parts>`
@@ -347,7 +347,7 @@ Eliminate all references to sample DTOs (`PersonDTO`, `SomethingDTO`, `Person_So
     `template<typename DTO, typename... Parts>`
   - In [DAL/repositories/SQLitePerson_SomethingRepo.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/repositories/SQLitePerson_SomethingRepo.ixx) (and `GenericRepository.ixx` line 235 if needed), ensure `delete_by_composite_id` passes `<DTO>` when supported or falls back cleanly for mock connections.
 
-- [ ] **Task 20.2: $O(M)$ Case-Insensitive `ValidQueryColumn` & `resolve_dto_member` (`DAL/mappers/MapperTraits.ixx`)**
+- [x] **Task 20.2: $O(M)$ Case-Insensitive `ValidQueryColumn` & `resolve_dto_member` (`DAL/mappers/MapperTraits.ixx`)**
   - Simplify `is_valid_query_column` and `resolve_dto_member` in [DAL/mappers/MapperTraits.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/mappers/MapperTraits.ixx#L264-L340) to:
     1. Check exact match on `dto_members` (`std::meta::identifier_of(m) == name`).
     2. Check case-insensitive `snake_case` <-> `camelCase`/`PascalCase` match on `dto_members` (`detail::matches_snake_to_camel(std::meta::identifier_of(m), name)`).
@@ -363,18 +363,18 @@ Expose `sqlgen::Col`'s nullability and negative-pattern predicates (`IS NULL`, `
 
 #### Detailed Tasks
 
-- [ ] **Task 21.1: Add `where_null`, `where_not_null`, `where_not_like`, and `where_not_in` to `DbQuery` & `DbSet` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 21.1: Add `where_null`, `where_not_null`, `where_not_like`, and `where_not_in` to `DbQuery` & `DbSet` (`DAL/context/DbSet.ixx`)**
   - On both `DbQuery` and `DbSet` in [DAL/context/DbSet.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbSet.ixx), add:
     - `where_null<ColLiteral>()` -> `where_sql(Schema::col_of<dto_m>.is_null())`
     - `where_not_null<ColLiteral>()` -> `where_sql(Schema::col_of<dto_m>.is_not_null())`
     - `where_not_like<ColLiteral>(std::string_view pattern)` -> `where_sql(Schema::col_of<dto_m>.not_like(std::string(pattern)))`
     - `where_not_in<ColLiteral>(const Ts&... vals)` -> `where_sql(Schema::col_of<dto_m>.not_in(detail::normalize_query_val(vals)...))`
 
-- [ ] **Task 21.2: Server-Side Column Aggregations (`try_min`, `try_max`, `try_sum`, `try_avg`) (`SQLiteConnection.ixx` & `DbSet.ixx`)**
+- [x] **Task 21.2: Server-Side Column Aggregations (`try_min`, `try_max`, `try_sum`, `try_avg`) (`SQLiteConnection.ixx` & `DbSet.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx), add a generic single-value aggregation executor using `sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">)` (with optional `| sqlgen::where(cond)`) into `struct AggRow { std::optional<ResultT> val; };`.
   - Expose `.try_min<ColLiteral>()`, `.try_max<ColLiteral>()`, `.try_sum<ColLiteral>()`, and `.try_avg<ColLiteral>()` (plus `.min<ColLiteral>()`, `.max<ColLiteral>()`, `.sum<ColLiteral>()`, `.avg<ColLiteral>()`) on `DbQuery` and `DbSet`.
 
-- [ ] **Task 21.3: Phase 21 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 21.3: Phase 21 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `db.somethings.where_null<"description">()` and `db.somethings.where_not_null<"description">()` on `Core::Something` entities with `std::nullopt` vs populated descriptions.
   - Test `where_not_like`, `where_not_in`, and `.min<"id">()`, `.max<"id">()`, `.sum<"id">()`, `.avg<"id">()`.
 
@@ -387,14 +387,14 @@ Support retrieving the database-assigned primary key upon inserting an auto-incr
 
 #### Detailed Tasks
 
-- [ ] **Task 22.1: Add `try_last_insert_rowid()` to `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
+- [x] **Task 22.1: Add `try_last_insert_rowid()` to `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
   - Add `[[nodiscard]] std::expected<std::int64_t, Core::DbError> try_last_insert_rowid() const` in [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx). Note: in SQLite, `sqlgen::sqlite::Connection` wraps `sqlite3*`, or we can query `sqlgen` / `sqlite3_last_insert_rowid` (or `SELECT last_insert_rowid()`).
 
-- [ ] **Task 22.2: Reflection Helper to Populate Primary Key on `Domain` (`DAL/mappers/MapperTraits.ixx`)**
+- [x] **Task 22.2: Reflection Helper to Populate Primary Key on `Domain` (`DAL/mappers/MapperTraits.ixx`)**
   - Add `MapperTraits<Domain, DTO>::with_primary_key(const Domain& domain, auto new_pk_val)` which converts `domain` to `DTO`, sets the `primary_key_member<DTO>()` field on `DTO` to `new_pk_val`, and maps it back via `MapperTraits<Domain, DTO>::to_domain(dto)`!
   - Because `MapperTraits<Domain, DTO>::to_domain(dto)` already uses `std::meta::access_context::unchecked()` to splice private members on `Domain` (and is a no-op copy on POCOs), this works for **both** encapsulated DDD entities (`Core::Person`) and Zero-DTO POCOs (`PocoUser`) with zero extra reflection code!
 
-- [ ] **Task 22.3: Add `DbSet::add_returning(const Domain& item)` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 22.3: Add `DbSet::add_returning(const Domain& item)` (`DAL/context/DbSet.ixx`)**
   - Implement `[[nodiscard]] std::expected<Domain, Core::DbError> add_returning(const Domain& item)` on `DbSet`:
     - Calls `repo_->insert_one(item)`.
     - If `Schema::SinglePrimaryKey<DTO>` and `Schema::has_auto_incr_primary_key<DTO>()` are true, queries `conn_->try_last_insert_rowid()` (when key is default/zero or always after insert) and returns `MapperTraits<Domain, DTO>::with_primary_key(item, rowid)` (and records snapshot in `ChangeTracker` if enabled).

@@ -6,9 +6,7 @@ export module dal:mappers;
 
 import std;
 import core;
-import :schema_person;
-import :schema_something;
-import :schema_person_something;
+import :schema_traits;
 
 export namespace DAL::Mappers
 {
@@ -42,7 +40,7 @@ export namespace DAL::Mappers
             {
                 return true;
             }
-            return false;
+            return c_idx == camel.size();
         }
 
         // Given a DTO member, find the unique matching domain member.
@@ -249,6 +247,37 @@ export namespace DAL::Mappers
                 return dto;
             }
         }
+
+        template<typename PkVal>
+        [[nodiscard]] static Domain with_primary_key(const Domain& domain, const PkVal& new_pk_val)
+            requires DAL::Schema::SinglePrimaryKey<DTO>
+        {
+            DTO dto = to_dto(domain);
+            constexpr auto pk_m = DAL::Schema::primary_key_member<DTO>();
+            using PkFieldT = [:std::meta::type_of(pk_m):];
+            using CleanPkT = std::remove_cvref_t<PkFieldT>;
+            if constexpr (DAL::Schema::SqlgenPrimaryKeyField<CleanPkT>)
+            {
+                using InnerT = typename CleanPkT::ReflectionType;
+                if constexpr (requires { typename InnerT::value_type; })
+                {
+                    dto.[:pk_m:] = CleanPkT{ InnerT{ static_cast<typename InnerT::value_type>(new_pk_val) } };
+                }
+                else
+                {
+                    dto.[:pk_m:] = CleanPkT{ static_cast<InnerT>(new_pk_val) };
+                }
+            }
+            else if constexpr (requires { typename CleanPkT::value_type; })
+            {
+                dto.[:pk_m:] = CleanPkT{ static_cast<typename CleanPkT::value_type>(new_pk_val) };
+            }
+            else
+            {
+                dto.[:pk_m:] = static_cast<CleanPkT>(new_pk_val);
+            }
+            return to_domain(dto);
+        }
     };
 
     template<typename Domain, typename DTO>
@@ -272,6 +301,14 @@ export namespace DAL::Mappers
         for (auto m : dto_members)
         {
             if (std::meta::identifier_of(m) == name)
+            {
+                return true;
+            }
+        }
+
+        for (auto m : dto_members)
+        {
+            if (detail::matches_snake_to_camel(std::meta::identifier_of(m), name))
             {
                 return true;
             }
@@ -310,6 +347,14 @@ export namespace DAL::Mappers
         for (auto m : dto_members)
         {
             if (std::meta::identifier_of(m) == name)
+            {
+                return m;
+            }
+        }
+
+        for (auto m : dto_members)
+        {
+            if (detail::matches_snake_to_camel(std::meta::identifier_of(m), name))
             {
                 return m;
             }

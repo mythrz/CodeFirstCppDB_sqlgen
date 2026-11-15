@@ -2305,4 +2305,117 @@ namespace
         EXPECT_EQ(smiths[1].getFirstName(), "Charlie");
     }
 
+    // =========================================================================
+    // Phase 20: Case-Insensitive Column Resolution
+    // =========================================================================
+
+    TEST(Phase20CaseInsensitiveColumnResolutionTest, ResolvesSnakeCamelPascalAndTrailingUnderscore)
+    {
+        static_assert(DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "first_name">);
+        static_assert(DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "firstName">);
+        static_assert(DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "FirstName">);
+        static_assert(DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "firstName_">);
+        static_assert(!DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "non_existent_col">);
+
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        ASSERT_TRUE(connRes.value()->ensure_table_created<DAL::Schema::PersonDTO>().has_value());
+        DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection> people(connRes.value());
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 1 }, "Alice", "Smith")).has_value());
+
+        EXPECT_EQ(people.where_equal<"FirstName">("Alice").count(), 1u);
+        EXPECT_EQ(people.where_equal<"firstName">("Alice").count(), 1u);
+        EXPECT_EQ(people.where_equal<"firstName_">("Alice").count(), 1u);
+        EXPECT_EQ(people.where_equal<"first_name">("Alice").count(), 1u);
+    }
+
+    // =========================================================================
+    // Phase 21: Nullable/Pattern Predicates & SQL Aggregations
+    // =========================================================================
+
+    struct Phase21Product
+    {
+        static constexpr const char* tablename = "phase21_products";
+        sqlgen::PrimaryKey<std::int32_t, true> product_id{ 0 };
+        std::string name{};
+        std::optional<std::string> notes{};
+        int score{ 0 };
+        double price{ 0.0 };
+    };
+
+    TEST(Phase21NullPatternAndAggregationTest, NullablePredicatesAndAggregations)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<Phase21Product>().has_value());
+
+        DAL::DbSet<Phase21Product, Phase21Product, DAL::SQLiteConnection> products(conn);
+
+        // Empty table returns std::nullopt for aggregations
+        EXPECT_FALSE(products.min<"score">().has_value());
+        EXPECT_FALSE(products.max<"score">().has_value());
+        EXPECT_FALSE(products.sum<"score">().has_value());
+        EXPECT_FALSE(products.avg<"price">().has_value());
+
+        ASSERT_TRUE(products.add(Phase21Product{ .name = "Alpha", .notes = "Featured", .score = 10, .price = 10.0 }).has_value());
+        ASSERT_TRUE(products.add(Phase21Product{ .name = "Beta",  .notes = std::nullopt, .score = 20, .price = 25.0 }).has_value());
+        ASSERT_TRUE(products.add(Phase21Product{ .name = "Gamma", .notes = "Clearance", .score = 30, .price = 55.0 }).has_value());
+
+        EXPECT_EQ(products.where_null<"notes">().count(), 1u);
+        EXPECT_EQ(products.where_not_null<"notes">().count(), 2u);
+        EXPECT_EQ(products.where_not_like<"name">("A%").count(), 2u);
+        EXPECT_EQ(products.where_not_in<"score">(10, 30).count(), 1u);
+
+        EXPECT_EQ(products.min<"score">(), std::optional<int>(10));
+        EXPECT_EQ(products.max<"score">(), std::optional<int>(30));
+        EXPECT_EQ(products.sum<"score">(), std::optional<int>(60));
+        ASSERT_TRUE(products.avg<"price">().has_value());
+        EXPECT_NEAR(*products.avg<"price">(), 30.0, 1e-6);
+
+        // Filtered aggregation
+        EXPECT_EQ(products.where_not_null<"notes">().sum<"score">(), std::optional<int>(40));
+        EXPECT_EQ(products.where_not_null<"notes">().min<"score">(), std::optional<int>(10));
+        EXPECT_EQ(products.where_not_null<"notes">().max<"score">(), std::optional<int>(30));
+    }
+
+    // =========================================================================
+    // Phase 22: Auto-Increment ID Retrieval (add_returning)
+    // =========================================================================
+
+    struct Phase22AutoUser
+    {
+        static constexpr const char* tablename = "phase22_users";
+        sqlgen::PrimaryKey<std::int32_t, true> user_id{ 0 };
+        std::string username{};
+    };
+
+    TEST(Phase22AddReturningTest, PopulatesAutoIncrementPrimaryKey)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<Phase22AutoUser>().has_value());
+
+        DAL::DbSet<Phase22AutoUser, Phase22AutoUser, DAL::SQLiteConnection> users(conn);
+
+        auto aliceRes = users.add_returning(Phase22AutoUser{ .username = "alice" });
+        ASSERT_TRUE(aliceRes.has_value()) << aliceRes.error().to_string();
+        EXPECT_EQ(aliceRes->user_id.value(), 1);
+        EXPECT_EQ(aliceRes->username, "alice");
+
+        auto bobRes = users.add_returning(Phase22AutoUser{ .username = "bob" });
+        ASSERT_TRUE(bobRes.has_value()) << bobRes.error().to_string();
+        EXPECT_EQ(bobRes->user_id.value(), 2);
+        EXPECT_EQ(bobRes->username, "bob");
+
+        // Also test encapsulated Core::Person via DbSet
+        ASSERT_TRUE(conn->ensure_table_created<DAL::Schema::PersonDTO>().has_value());
+        DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection> people(conn);
+        auto pRes = people.add_returning(Core::Person(Core::PersonId{ 0 }, "Jane", "Doe"));
+        ASSERT_TRUE(pRes.has_value()) << pRes.error().to_string();
+        EXPECT_EQ(pRes->getId().value, 1);
+        EXPECT_EQ(pRes->getFirstName(), "Jane");
+    }
+
 } // namespace

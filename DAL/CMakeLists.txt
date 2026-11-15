@@ -27,4 +27,10 @@ target_link_libraries(DAL
         SQLite3::SQLite3
 )
 
+target_compile_options(DAL
+    PUBLIC
+        -Wno-expose-global-module-tu-local
+        -Wno-deprecated-literal-operator
+)
+
 add_subdirectory(tests)

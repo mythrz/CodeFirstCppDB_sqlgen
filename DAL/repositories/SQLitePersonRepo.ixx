@@ -2,6 +2,7 @@ export module dal:sqlite_person_repo;
 
 import std;
 import core;
+import :schema_person;
 import :generic_repo;
 
 export namespace DAL::Repositories

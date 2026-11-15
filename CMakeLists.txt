@@ -8,9 +8,6 @@ set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Enable C++26 reflection. gcc 16+ only
-add_compile_options(-freflection)
-
 # Enable automatic module dependency scanning across targets
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_CXX_MODULE_STD ON) # build std module
@@ -33,7 +30,11 @@ set(SQLite3_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "" FORCE)
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/SQLite3Config.cmake" "include_directories(\"${SQLite3_INCLUDE_DIRS}\")")
 
 # sqlgen (submodule)
+option(CODEFIRST_ENABLE_POSTGRES "Enable sqlgen PostgreSQL driver" OFF)
 set(SQLGEN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(SQLGEN_POSTGRES ${CODEFIRST_ENABLE_POSTGRES} CACHE BOOL "" FORCE)
+set(SQLGEN_MYSQL OFF CACHE BOOL "" FORCE)
+set(SQLGEN_DUCKDB OFF CACHE BOOL "" FORCE)
 set(SQLGEN_SQLITE3 ON CACHE BOOL "" FORCE)
 add_subdirectory(extern/sqlgen)
 

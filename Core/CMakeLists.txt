@@ -15,3 +15,5 @@ target_sources(Core
     repositories/IPerson_SomethingRepository.ixx
     core.ixx
 )
+
+target_compile_options(Core PUBLIC -freflection)

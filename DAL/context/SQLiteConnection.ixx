@@ -7,7 +7,6 @@ export module dal:sqlite_connection;
 import std;
 import core;
 import :schema_traits;
-import :schema_person_something;
 
 export namespace DAL
 {
@@ -424,7 +423,7 @@ export namespace DAL
                   | sqlgen::where(DAL::Schema::make_pk_where<DTO>(id)))(conn_);
         }
 
-        template<typename DTO = DAL::Schema::Person_SomethingDTO, typename... Parts>
+        template<typename DTO, typename... Parts>
         [[nodiscard]] auto delete_by_composite_id(const Parts&... parts)
         {
             if (!is_open())
@@ -497,6 +496,109 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
             }
             return res.value().count;
+        }
+
+        template<typename DTO, typename ResultT, typename AggExpr>
+        [[nodiscard]] std::expected<std::optional<ResultT>, Core::DbError> try_aggregate(const AggExpr& agg_expr) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            struct AggRow
+            {
+                std::optional<ResultT> val;
+            };
+            auto query = sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">)
+                       | sqlgen::to<AggRow>;
+            auto res = query(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return res.value().val;
+        }
+
+        template<typename DTO, typename ResultT, typename AggExpr, typename Condition>
+        [[nodiscard]] std::expected<std::optional<ResultT>, Core::DbError> try_aggregate_where(
+            const AggExpr& agg_expr, const Condition& cond) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            struct AggRow
+            {
+                std::optional<ResultT> val;
+            };
+            auto query = sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">)
+                       | sqlgen::where(cond)
+                       | sqlgen::to<AggRow>;
+            auto res = query(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return res.value().val;
+        }
+
+        [[nodiscard]] std::expected<std::int64_t, Core::DbError> try_last_insert_rowid() const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            if (auto r = conn_->execute(
+                    "CREATE TEMP TABLE IF NOT EXISTS _codefirst_last_rowid (id INTEGER);");
+                !r)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(r.error().what()) };
+            }
+            if (auto r = conn_->execute("DELETE FROM _codefirst_last_rowid;"); !r)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(r.error().what()) };
+            }
+            if (auto r = conn_->execute(
+                    "INSERT INTO _codefirst_last_rowid (id) VALUES (last_insert_rowid());");
+                !r)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(r.error().what()) };
+            }
+
+            struct LastRowIdRow
+            {
+                std::int64_t id = 0;
+            };
+            sqlgen::dynamic::SelectFrom query{
+                .table_or_query = sqlgen::dynamic::Table{ .name = "_codefirst_last_rowid" },
+                .fields = {
+                    sqlgen::dynamic::SelectFrom::Field{
+                        .val = sqlgen::dynamic::Operation{
+                            sqlgen::dynamic::Column{ .name = "id" }
+                        },
+                        .as = "id"
+                    }
+                },
+                .limit = sqlgen::dynamic::Limit{ 1 }
+            };
+            auto res = conn_->template read<std::vector<LastRowIdRow>>(query);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            if (res->empty())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::unknown("Failed to retrieve last_insert_rowid()")
+                };
+            }
+            return res->front().id;
         }
 
         template<typename DTO>
