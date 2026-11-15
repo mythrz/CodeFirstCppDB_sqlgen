@@ -54,6 +54,36 @@ export namespace DAL
         {
             using type = typename UnwrapColumnScalar<typename T::ReflectionType>::type;
         };
+
+        template<typename T>
+        struct IsOptionalField : std::false_type {};
+
+        template<typename T>
+        struct IsOptionalField<std::optional<T>> : std::true_type {};
+
+        template<typename T>
+            requires requires { typename T::ReflectionType; }
+        struct IsOptionalField<T> : IsOptionalField<typename T::ReflectionType> {};
+
+        template<typename OrderByVariant, typename NewAscCol, typename NewDescCol>
+        struct AppendOrderByVariant;
+
+        template<typename... PrevOrderBys, typename NewAscCol, typename NewDescCol>
+        struct AppendOrderByVariant<std::variant<PrevOrderBys...>, NewAscCol, NewDescCol>
+        {
+            template<typename PrevOB, typename NextCol>
+            struct AppendOne;
+
+            template<typename... Cols, typename NextCol>
+            struct AppendOne<sqlgen::OrderBy<Cols...>, NextCol>
+            {
+                using type = sqlgen::OrderBy<Cols..., NextCol>;
+            };
+
+            using type = std::variant<
+                typename AppendOne<PrevOrderBys, NewAscCol>::type...,
+                typename AppendOne<PrevOrderBys, NewDescCol>::type...>;
+        };
     } // namespace detail
 
     // Fluent server-side query builder for DbSet (Phases 10, 12, 13, 14).
@@ -243,6 +273,31 @@ export namespace DAL
             return where_sql(Schema::col_of<dto_m>.not_in(detail::normalize_query_val(vals)...));
         }
 
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_between(const Val& low, const Val& high) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(
+                (Schema::col_of<dto_m> >= detail::normalize_query_val(low))
+                && (Schema::col_of<dto_m> <= detail::normalize_query_val(high)));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_in_vec(const std::vector<Val>& vals) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using NormalizedT = std::remove_cvref_t<decltype(detail::normalize_query_val(std::declval<const Val&>()))>;
+            std::vector<NormalizedT> normalized;
+            normalized.reserve(vals.size());
+            for (const auto& v : vals)
+            {
+                normalized.push_back(detail::normalize_query_val(v));
+            }
+            return where_sql(Schema::col_of<dto_m>.not_in(normalized));
+        }
+
         template<rfl::internal::StringLiteral ColLiteral>
             requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto order_by(bool desc = false) const
@@ -254,6 +309,37 @@ export namespace DAL
             VarT ob = desc ? VarT{ DescT{} } : VarT{ AscT{} };
             return DbQuery<Domain, DTO, ConnectionHandle, KeyType, WhereCondT, VarT>(
                 repo_, conn_, where_cond_, std::move(ob), limit_, offset_, track_fn_, clear_track_fn_);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires (!std::same_as<OrderByT, rfl::Nothing>)
+                  && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto then_by(bool desc = false) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using NewAscCol = std::remove_cvref_t<decltype(Schema::col_of<dto_m>)>;
+            using NewDescCol = std::remove_cvref_t<decltype(Schema::col_of<dto_m>.desc())>;
+            using Helper = detail::AppendOrderByVariant<OrderByT, NewAscCol, NewDescCol>;
+            using NewVarT = typename Helper::type;
+
+            NewVarT combined = std::visit(
+                [desc](const auto& prev_ob) -> NewVarT {
+                    using PrevOB = std::remove_cvref_t<decltype(prev_ob)>;
+                    if (desc)
+                    {
+                        using NextOB = typename Helper::template AppendOne<PrevOB, NewDescCol>::type;
+                        return NewVarT{ NextOB{} };
+                    }
+                    else
+                    {
+                        using NextOB = typename Helper::template AppendOne<PrevOB, NewAscCol>::type;
+                        return NewVarT{ NextOB{} };
+                    }
+                },
+                order_by_);
+
+            return DbQuery<Domain, DTO, ConnectionHandle, KeyType, WhereCondT, NewVarT>(
+                repo_, conn_, where_cond_, std::move(combined), limit_, offset_, track_fn_, clear_track_fn_);
         }
 
         [[nodiscard]] DbQuery limit(std::size_t limit_count) const
@@ -437,6 +523,94 @@ export namespace DAL
             return try_avg<ColLiteral>().value_or(std::nullopt);
         }
 
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto try_select() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using SplicedT = [:std::meta::type_of(dto_m):];
+            using RawT = std::remove_cvref_t<SplicedT>;
+            using ScalarT = typename detail::UnwrapColumnScalar<RawT>::type;
+            using ColValueT = std::conditional_t<
+                detail::IsOptionalField<RawT>::value, std::optional<ScalarT>, ScalarT>;
+
+            if (!conn_)
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{
+                    std::unexpected<Core::DbError>{
+                        Core::DbError::connection_error("Database connection is null")
+                    }
+                };
+            }
+
+            struct ProjRow
+            {
+                RawT val{};
+            };
+
+            auto with_where = [&]() {
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
+                {
+                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">)
+                         | sqlgen::where(where_cond_);
+                }
+                else
+                {
+                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">);
+                }
+            }();
+
+            auto rows_res = [&]() -> std::expected<std::vector<ProjRow>, Core::DbError> {
+                if constexpr (!std::same_as<OrderByT, rfl::Nothing>)
+                {
+                    return std::visit(
+                        [&](const auto& ob) {
+                            return execute_projection<ProjRow>(*conn_, with_where | ob);
+                        },
+                        order_by_);
+                }
+                else
+                {
+                    return execute_projection<ProjRow>(*conn_, std::move(with_where));
+                }
+            }();
+
+            if (!rows_res)
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{
+                    std::unexpected<Core::DbError>{ rows_res.error() }
+                };
+            }
+
+            std::vector<ColValueT> result;
+            result.reserve(rows_res->size());
+            for (auto& r : *rows_res)
+            {
+                if constexpr (requires { r.val.value(); })
+                {
+                    result.push_back(r.val.value());
+                }
+                else
+                {
+                    result.push_back(std::move(r.val));
+                }
+            }
+            return std::expected<std::vector<ColValueT>, Core::DbError>{ std::move(result) };
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto select() const
+        {
+            auto res = try_select<ColLiteral>();
+            using VecT = std::remove_cvref_t<decltype(res.value())>;
+            if (res)
+            {
+                return VecT{ std::move(res.value()) };
+            }
+            return VecT{};
+        }
+
         [[nodiscard]] bool any() const
         {
             auto res = limit(1).try_to_vector();
@@ -488,7 +662,60 @@ export namespace DAL
             }
         }
 
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires (!std::same_as<WhereCondT, rfl::Nothing>)
+                  && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        std::expected<void, Core::DbError> update_where(const Val& new_val) const
+        {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is null")
+                };
+            }
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            auto res = conn_->template update_where<DTO>(
+                Schema::col_of<dto_m>.set(detail::normalize_query_val(new_val)),
+                where_cond_);
+            if (res && clear_track_fn_)
+            {
+                clear_track_fn_();
+            }
+            return res;
+        }
+
     private:
+        template<typename OutRowT, typename BaseQuery>
+        [[nodiscard]] std::expected<std::vector<OutRowT>, Core::DbError> execute_projection(
+            const ConnectionHandle& conn,
+            BaseQuery&& base_query) const
+        {
+            if (limit_.has_value() && offset_.has_value())
+            {
+                auto q = std::forward<BaseQuery>(base_query)
+                       | sqlgen::limit(*limit_)
+                       | sqlgen::offset(*offset_)
+                       | sqlgen::to<std::vector<OutRowT>>;
+                return conn.template try_execute_read<OutRowT>(std::move(q));
+            }
+            if (limit_.has_value())
+            {
+                auto q = std::forward<BaseQuery>(base_query)
+                       | sqlgen::limit(*limit_)
+                       | sqlgen::to<std::vector<OutRowT>>;
+                return conn.template try_execute_read<OutRowT>(std::move(q));
+            }
+            if (offset_.has_value())
+            {
+                auto q = std::forward<BaseQuery>(base_query)
+                       | sqlgen::offset(*offset_)
+                       | sqlgen::to<std::vector<OutRowT>>;
+                return conn.template try_execute_read<OutRowT>(std::move(q));
+            }
+            auto q = std::forward<BaseQuery>(base_query) | sqlgen::to<std::vector<OutRowT>>;
+            return conn.template try_execute_read<OutRowT>(std::move(q));
+        }
+
         template<typename ResultT, typename AggExpr>
         [[nodiscard]] std::expected<std::optional<ResultT>, Core::DbError> try_aggregate_impl(
             const AggExpr& agg_expr) const
@@ -777,8 +1004,73 @@ export namespace DAL
                 }
             }
 
-            record_snapshot(result);
+            if (is_tracking_enabled())
+            {
+                record_snapshot(result);
+            }
             return result;
+        }
+
+        // Inserts multiple entities immediately in a transaction (when not already in one)
+        // and returns copies populated with any database-generated auto-increment primary keys.
+        [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> add_range_returning(
+            const std::vector<Domain>& items)
+        {
+            std::vector<Domain> results;
+            results.reserve(items.size());
+            if (items.empty())
+            {
+                return results;
+            }
+
+            bool started_tx = false;
+            if constexpr (requires(ConnectionHandle& c) {
+                c.in_transaction();
+                c.begin_transaction();
+                c.commit();
+                c.rollback();
+            })
+            {
+                if (conn_ && !conn_->in_transaction())
+                {
+                    auto tx_res = conn_->begin_transaction();
+                    if (!tx_res)
+                    {
+                        return std::unexpected<Core::DbError>{ tx_res.error() };
+                    }
+                    started_tx = true;
+                }
+            }
+
+            for (const auto& item : items)
+            {
+                auto res = add_returning(item);
+                if (!res)
+                {
+                    if (started_tx)
+                    {
+                        if constexpr (requires(ConnectionHandle& c) { c.rollback(); })
+                        {
+                            (void)conn_->rollback();
+                        }
+                    }
+                    return std::unexpected<Core::DbError>{ res.error() };
+                }
+                results.push_back(std::move(*res));
+            }
+
+            if (started_tx)
+            {
+                if constexpr (requires(ConnectionHandle& c) { c.commit(); })
+                {
+                    auto commit_res = conn_->commit();
+                    if (!commit_res)
+                    {
+                        return std::unexpected<Core::DbError>{ commit_res.error() };
+                    }
+                }
+            }
+            return results;
         }
 
         // Inserts multiple entities into the database table (or stages if deferred)
@@ -1122,6 +1414,20 @@ export namespace DAL
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
             requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_between(const Val& low, const Val& high) const
+        {
+            return query().template where_between<ColLiteral>(low, high);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_in_vec(const std::vector<Val>& vals) const
+        {
+            return query().template where_not_in_vec<ColLiteral>(vals);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         std::expected<void, Core::DbError> remove_where_equal(const Val& val) const
         {
             return where_equal<ColLiteral>(val).remove_where();
@@ -1201,6 +1507,20 @@ export namespace DAL
         [[nodiscard]] std::optional<double> avg() const
         {
             return query().template avg<ColLiteral>();
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto try_select() const
+        {
+            return query().template try_select<ColLiteral>();
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto select() const
+        {
+            return query().template select<ColLiteral>();
         }
 
         // =====================================================================

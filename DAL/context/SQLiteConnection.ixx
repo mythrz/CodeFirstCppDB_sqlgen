@@ -43,6 +43,7 @@ export namespace DAL
                 in_transaction_ = false;
             }
             is_open_ = false;
+            last_rowid_view_ready_ = false;
         }
 
         [[nodiscard]] static std::expected<std::shared_ptr<SQLiteConnection>, Core::DbError> connect(
@@ -554,21 +555,15 @@ export namespace DAL
                     Core::DbError::connection_error("Database connection is closed")
                 };
             }
-            if (auto r = conn_->execute(
-                    "CREATE TEMP TABLE IF NOT EXISTS _codefirst_last_rowid (id INTEGER);");
-                !r)
+            if (!last_rowid_view_ready_)
             {
-                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(r.error().what()) };
-            }
-            if (auto r = conn_->execute("DELETE FROM _codefirst_last_rowid;"); !r)
-            {
-                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(r.error().what()) };
-            }
-            if (auto r = conn_->execute(
-                    "INSERT INTO _codefirst_last_rowid (id) VALUES (last_insert_rowid());");
-                !r)
-            {
-                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(r.error().what()) };
+                if (auto r = conn_->execute(
+                        "CREATE TEMP VIEW IF NOT EXISTS _codefirst_last_rowid AS SELECT last_insert_rowid() AS id;");
+                    !r)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(r.error().what()) };
+                }
+                last_rowid_view_ready_ = true;
             }
 
             struct LastRowIdRow
@@ -644,6 +639,105 @@ export namespace DAL
             return {};
         }
 
+        template<typename DTO, typename SetExpr, typename Condition>
+        std::expected<void, Core::DbError> update_where(const SetExpr& set_expr, const Condition& cond)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto query = sqlgen::update<DTO>(set_expr) | sqlgen::where(cond);
+            auto res = query(conn_);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> savepoint(std::string_view name)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto res = conn_->execute(std::format("SAVEPOINT \"{}\";", name));
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> release_savepoint(std::string_view name)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto res = conn_->execute(std::format("RELEASE SAVEPOINT \"{}\";", name));
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> rollback_to_savepoint(std::string_view name)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto res = conn_->execute(
+                std::format("ROLLBACK TO SAVEPOINT \"{}\"; RELEASE SAVEPOINT \"{}\";", name, name));
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> set_busy_timeout(std::chrono::milliseconds timeout)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto res = conn_->execute(std::format("PRAGMA busy_timeout = {};", timeout.count()));
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> enable_wal_mode()
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed")
+                };
+            }
+            auto res = conn_->execute("PRAGMA journal_mode = WAL;");
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+            }
+            return {};
+        }
+
     private:
         struct RowCount
         {
@@ -653,6 +747,7 @@ export namespace DAL
         sqlgen::Ref<sqlgen::sqlite::Connection> conn_;
         bool is_open_{ true };
         bool in_transaction_{ false };
+        mutable bool last_rowid_view_ready_{ false };
     };
 
 } // namespace DAL

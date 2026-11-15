@@ -2418,4 +2418,206 @@ namespace
         EXPECT_EQ(pRes->getFirstName(), "Jane");
     }
 
+    // =========================================================================
+    // Phase 23: Read-Only Temp-View try_last_insert_rowid & add_range_returning
+    // =========================================================================
+
+    TEST(Phase23TempViewAndAddRangeReturningTest, IdempotentRowIdAndAddRangeReturning)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<DAL::Schema::PersonDTO>().has_value());
+
+        DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection> people(conn);
+
+        auto one = people.add_returning(Core::Person(Core::PersonId{ 0 }, "First", "User"));
+        ASSERT_TRUE(one.has_value()) << one.error().to_string();
+        EXPECT_EQ(one->getId().value, 1);
+
+        // Calling try_last_insert_rowid() twice in a row must return the exact same rowid
+        auto r1 = conn->try_last_insert_rowid();
+        auto r2 = conn->try_last_insert_rowid();
+        ASSERT_TRUE(r1.has_value());
+        ASSERT_TRUE(r2.has_value());
+        EXPECT_EQ(*r1, 1);
+        EXPECT_EQ(*r2, 1);
+
+        // add_range_returning populates sequential IDs atomically
+        std::vector<Core::Person> batch{
+            Core::Person(Core::PersonId{ 0 }, "Alice", "Smith"),
+            Core::Person(Core::PersonId{ 0 }, "Bob", "Jones"),
+            Core::Person(Core::PersonId{ 0 }, "Charlie", "Brown")
+        };
+        auto batchRes = people.add_range_returning(batch);
+        ASSERT_TRUE(batchRes.has_value()) << batchRes.error().to_string();
+        ASSERT_EQ(batchRes->size(), 3u);
+        EXPECT_EQ((*batchRes)[0].getId().value, 2);
+        EXPECT_EQ((*batchRes)[1].getId().value, 3);
+        EXPECT_EQ((*batchRes)[2].getId().value, 4);
+    }
+
+    // =========================================================================
+    // Phase 24: Multi-Column then_by, select, where_between, where_not_in_vec
+    // =========================================================================
+
+    TEST(Phase24SortingProjectionAndBetweenTest, MultiColumnSortProjectionAndPredicates)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<DAL::Schema::PersonDTO>().has_value());
+
+        DAL::DbSet<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection> people(conn);
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 1 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 2 }, "Zack", "Smith")).has_value());
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 3 }, "Bob", "Adams")).has_value());
+        ASSERT_TRUE(people.add(Core::Person(Core::PersonId{ 4 }, "Charlie", "Adams")).has_value());
+
+        // Order by lastName ASC, then firstName DESC -> Charlie Adams, Bob Adams, Zack Smith, Alice Smith
+        auto sortedNames = people
+            .order_by<"lastName">(false)
+            .then_by<"firstName">(true)
+            .select<"firstName">();
+        ASSERT_EQ(sortedNames.size(), 4u);
+        EXPECT_EQ(sortedNames[0], "Charlie");
+        EXPECT_EQ(sortedNames[1], "Bob");
+        EXPECT_EQ(sortedNames[2], "Zack");
+        EXPECT_EQ(sortedNames[3], "Alice");
+
+        // Filtered projection
+        auto smithNames = people
+            .where_equal<"lastName">("Smith")
+            .order_by<"firstName">(false)
+            .select<"firstName">();
+        ASSERT_EQ(smithNames.size(), 2u);
+        EXPECT_EQ(smithNames[0], "Alice");
+        EXPECT_EQ(smithNames[1], "Zack");
+
+        // where_between & where_not_in_vec
+        auto midIds = people.where_between<"id">(2, 3).order_by<"id">(false).select<"id">();
+        ASSERT_EQ(midIds.size(), 2u);
+        EXPECT_EQ(midIds[0], 2);
+        EXPECT_EQ(midIds[1], 3);
+
+        auto excluded = people.where_not_in_vec<"id">(std::vector<int>{ 1, 4 }).order_by<"id">(false).select<"id">();
+        ASSERT_EQ(excluded.size(), 2u);
+        EXPECT_EQ(excluded[0], 2);
+        EXPECT_EQ(excluded[1], 3);
+    }
+
+    // =========================================================================
+    // Phase 25: Bulk update_where & Batched query_children_batch / query_parents_batch
+    // =========================================================================
+
+    struct Phase25Author
+    {
+        static constexpr const char* tablename = "phase25_authors";
+        sqlgen::PrimaryKey<std::int32_t, true> author_id{ 0 };
+        std::string name{};
+    };
+
+    struct Phase25Book
+    {
+        static constexpr const char* tablename = "phase25_books";
+        sqlgen::PrimaryKey<std::int32_t, true> book_id{ 0 };
+        sqlgen::ForeignKey<std::int32_t, Phase25Author, "author_id"> author_id{ 0 };
+        std::string title{};
+        std::string genre{};
+    };
+
+    struct Phase25Context : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        DAL::DbSet<Phase25Author, Phase25Author, DAL::SQLiteConnection> authors{ this };
+        DAL::DbSet<Phase25Book, Phase25Book, DAL::SQLiteConnection> books{ this };
+
+        explicit Phase25Context(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(Phase25BulkUpdateAndBatchedNavTest, UpdateWhereAndBatchedNavigation)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase25Context db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        db.enable_change_tracking(true);
+
+        auto a1 = db.authors.add_returning(Phase25Author{ .name = "Author One" }).value();
+        auto a2 = db.authors.add_returning(Phase25Author{ .name = "Author Two" }).value();
+
+        ASSERT_TRUE(db.books.add(Phase25Book{ .book_id = 1, .author_id = a1.author_id.value(), .title = "Book A", .genre = "SciFi" }).has_value());
+        ASSERT_TRUE(db.books.add(Phase25Book{ .book_id = 2, .author_id = a1.author_id.value(), .title = "Book B", .genre = "SciFi" }).has_value());
+        ASSERT_TRUE(db.books.add(Phase25Book{ .book_id = 3, .author_id = a2.author_id.value(), .title = "Book C", .genre = "Drama" }).has_value());
+
+        // Track a book and mutate it, then run update_where which should evict tracked entries
+        auto trackedBook = db.books.find_tracked(1);
+        ASSERT_NE(trackedBook, nullptr);
+        trackedBook->title = "StaleMutatedTitle";
+
+        auto updRes = db.books.where_equal<"genre">("SciFi").update_where<"genre">("Speculative");
+        ASSERT_TRUE(updRes.has_value()) << updRes.error().to_string();
+        ASSERT_TRUE(db.save_changes().has_value());
+
+        auto reloaded = db.books.find(1);
+        ASSERT_TRUE(reloaded.has_value());
+        EXPECT_EQ(reloaded->genre, "Speculative");
+        EXPECT_EQ(reloaded->title, "Book A");
+
+        // Batched 1:N and N:1 loading
+        auto allChildren = db.query_children_batch<Phase25Book>(std::vector<Phase25Author>{ a1, a2 });
+        ASSERT_TRUE(allChildren.has_value()) << allChildren.error().to_string();
+        EXPECT_EQ(allChildren->size(), 3u);
+
+        auto allParents = db.query_parents_batch<Phase25Author>(*allChildren);
+        ASSERT_TRUE(allParents.has_value()) << allParents.error().to_string();
+        EXPECT_EQ(allParents->size(), 2u);
+    }
+
+    // =========================================================================
+    // Phase 26: Nested Transactions via SAVEPOINTs & SQLite Pragmas
+    // =========================================================================
+
+    TEST(Phase26NestedSavepointAndPragmasTest, NestedSavepointRollbackAndPragmas)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        EXPECT_TRUE(conn->set_busy_timeout(std::chrono::milliseconds(5000)).has_value());
+        EXPECT_TRUE(conn->enable_wal_mode().has_value());
+
+        Phase25Context db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // Outer transaction: inserts a1, fails inner transaction (inserts a2 then fails), then inserts a3
+        auto outerRes = db.transaction([&]() -> std::expected<void, Core::DbError> {
+            auto r1 = db.authors.add(Phase25Author{ .author_id = 1, .name = "OuterBefore" });
+            if (!r1) return r1;
+
+            auto innerFail = db.transaction([&]() -> std::expected<void, Core::DbError> {
+                auto r2 = db.authors.add(Phase25Author{ .author_id = 2, .name = "InnerRolledBack" });
+                if (!r2) return r2;
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("Intentional inner failure") };
+            });
+            EXPECT_FALSE(innerFail.has_value());
+
+            auto innerOk = db.transaction([&]() -> std::expected<void, Core::DbError> {
+                return db.authors.add(Phase25Author{ .author_id = 3, .name = "InnerCommitted" });
+            });
+            if (!innerOk) return innerOk;
+
+            return db.authors.add(Phase25Author{ .author_id = 4, .name = "OuterAfter" });
+        });
+        ASSERT_TRUE(outerRes.has_value()) << outerRes.error().to_string();
+
+        EXPECT_EQ(db.authors.count(), 3u);
+        EXPECT_EQ(db.authors.where_equal<"name">("OuterBefore").count(), 1u);
+        EXPECT_EQ(db.authors.where_equal<"name">("InnerRolledBack").count(), 0u);
+        EXPECT_EQ(db.authors.where_equal<"name">("InnerCommitted").count(), 1u);
+        EXPECT_EQ(db.authors.where_equal<"name">("OuterAfter").count(), 1u);
+    }
+
 } // namespace

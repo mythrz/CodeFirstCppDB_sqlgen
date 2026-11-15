@@ -371,13 +371,7 @@ export namespace DAL::Mappers
                 if (d_name == name ||
                     (d_name.size() == name.size() + 1 && d_name.starts_with(name) && d_name.ends_with("_")))
                 {
-                    for (auto dto_m : dto_members)
-                    {
-                        if (detail::find_matching_domain_member(dto_m, dom_members) == dm)
-                        {
-                            return dto_m;
-                        }
-                    }
+                    return detail::find_matching_dto_member(dm, dto_members);
                 }
             }
         }

@@ -290,7 +290,7 @@ Fix `SQLiteConnection::try_last_insert_rowid()` so it is a single, read-only, id
 
 #### Detailed Tasks
 
-- [ ] **Task 23.1: Idempotent Single-Query `try_last_insert_rowid()` via Temp View (`DAL/context/SQLiteConnection.ixx`)**
+- [x] **Task 23.1: Idempotent Single-Query `try_last_insert_rowid()` via Temp View (`DAL/context/SQLiteConnection.ixx`)**
   - Add `mutable bool last_rowid_view_ready_{ false };` to `SQLiteConnection` (resetting it to `false` in `close()`).
   - In `SQLiteConnection::try_last_insert_rowid() const` ([DAL/context/SQLiteConnection.ixx:549-602](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L549-L602)), replace the `CREATE TEMP TABLE` + `DELETE` + `INSERT` sequence with:
     ```cpp
@@ -307,14 +307,14 @@ Fix `SQLiteConnection::try_last_insert_rowid()` so it is a single, read-only, id
     ```
     followed by reading `_codefirst_last_rowid` via `conn_->template read<std::vector<LastRowIdRow>>(query)`.
 
-- [ ] **Task 23.2: Guard `record_snapshot` & Add `DbSet::add_range_returning()` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 23.2: Guard `record_snapshot` & Add `DbSet::add_range_returning()` (`DAL/context/DbSet.ixx`)**
   - In `DbSet::add_returning()` ([DAL/context/DbSet.ixx:780](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbSet.ixx#L780)), wrap `record_snapshot(result)` in `if (is_tracking_enabled()) { record_snapshot(result); }`.
   - Add `[[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> add_range_returning(const std::vector<Domain>& items)` to `DbSet`, which inserts each item via `add_returning` (or inside a transaction when not already in one) and returns the vector of populated `Domain` entities.
 
-- [ ] **Task 23.3: Simplify `resolve_dto_member()` Fallback to $O(M)$ (`DAL/mappers/MapperTraits.ixx`)**
+- [x] **Task 23.3: Simplify `resolve_dto_member()` Fallback to $O(M)$ (`DAL/mappers/MapperTraits.ixx`)**
   - In [DAL/mappers/MapperTraits.ixx:374-380](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/mappers/MapperTraits.ixx#L374-L380), replace the inner `for (auto dto_m : dto_members)` loop with `return detail::find_matching_dto_member(dm, dto_members);`.
 
-- [ ] **Task 23.4: Phase 23 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 23.4: Phase 23 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Verify that calling `conn->try_last_insert_rowid()` twice in a row after an insert returns the exact same `rowid` both times (proving `last_insert_rowid()` is no longer overwritten).
   - Verify `db.people.add_range_returning(...)` returns all inserted entities with populated sequential auto-increment IDs.
 
@@ -327,7 +327,7 @@ Support multi-column `ORDER BY` chains via `.then_by<ColLiteral>(bool desc = fal
 
 #### Detailed Tasks
 
-- [ ] **Task 24.1: Multi-Column `then_by<ColLiteral>(bool desc = false)` on `DbQuery` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 24.1: Multi-Column `then_by<ColLiteral>(bool desc = false)` on `DbQuery` (`DAL/context/DbSet.ixx`)**
   - In `DAL::detail` ([DAL/context/DbSet.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbSet.ixx)), add a helper that appends a new `ColOrDesc` type to an existing `sqlgen::OrderBy<PrevCols...>` variant:
     ```cpp
     template<typename OrderByVariant, typename NewAscCol, typename NewDescCol>
@@ -352,18 +352,18 @@ Support multi-column `ORDER BY` chains via `.then_by<ColLiteral>(bool desc = fal
     ```
   - Add `then_by<ColLiteral>(bool desc = false)` on `DbQuery` (constrained by `!std::same_as<OrderByT, rfl::Nothing> && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>`) that visits `order_by_` and returns a new `DbQuery` with the combined `OrderBy` variant!
 
-- [ ] **Task 24.2: Server-Side Column Projections (`try_select<ColLiteral>()` & `select<ColLiteral>()`) (`SQLiteConnection.ixx` & `DbSet.ixx`)**
+- [x] **Task 24.2: Server-Side Column Projections (`try_select<ColLiteral>()` & `select<ColLiteral>()`) (`SQLiteConnection.ixx` & `DbSet.ixx`)**
   - In [DAL/context/DbSet.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbSet.ixx), add `try_select<ColLiteral>()` and `select<ColLiteral>()` on `DbQuery` and `DbSet`:
     - Resolves `constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();`.
     - Determines the projected column type `ColValueT` (`std::optional<ScalarT>` if the DTO field is `std::optional`, or `ScalarT` otherwise).
     - Builds a `sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">)` pipeline with `where_cond_`, `order_by_`, `limit_`, `offset_`, and `| sqlgen::to<std::vector<ProjRow>>` (where `struct ProjRow { ColValueT val; };`), executing it on `conn_` and extracting `std::vector<ColValueT>`.
 
-- [ ] **Task 24.3: Add `where_between` and `where_not_in_vec` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 24.3: Add `where_between` and `where_not_in_vec` (`DAL/context/DbSet.ixx`)**
   - On `DbQuery` and `DbSet`, add:
     - `where_between<ColLiteral>(const Val& low, const Val& high)` -> `where_sql((Schema::col_of<dto_m> >= detail::normalize_query_val(low)) && (Schema::col_of<dto_m> <= detail::normalize_query_val(high)))`
     - `where_not_in_vec<ColLiteral>(const std::vector<Val>& vals)` -> normalizes `vals` into `std::vector<NormalizedT>` and calls `where_sql(Schema::col_of<dto_m>.not_in(normalized))`.
 
-- [ ] **Task 24.4: Phase 24 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 24.4: Phase 24 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `.order_by<"lastName">(false).then_by<"firstName">(true)` on multiple people sharing the same `lastName`.
   - Test `.select<"firstName">()` and filtered/ordered `.where_equal<"lastName">("Smith").order_by<"firstName">().select<"firstName">()`.
   - Test `where_between` and `where_not_in_vec`.
@@ -377,7 +377,7 @@ Add EF Core-style `.ExecuteUpdate()` (`update_where<ColLiteral>(new_val)`) for s
 
 #### Detailed Tasks
 
-- [ ] **Task 25.1: Server-Side `update_where<ColLiteral>(new_val)` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
+- [x] **Task 25.1: Server-Side `update_where<ColLiteral>(new_val)` (`SQLiteConnection.ixx` & `DbSet.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx), add:
     ```cpp
     template<typename DTO, typename SetExpr, typename Condition>
@@ -407,7 +407,7 @@ Add EF Core-style `.ExecuteUpdate()` (`update_where<ColLiteral>(new_val)`) for s
     ```
     which calls `conn_->template update_where<DTO>(Schema::col_of<dto_m>.set(detail::normalize_query_val(new_val)), where_cond_)` and invokes `if (res && clear_track_fn_) { clear_track_fn_(); }` so the `ChangeTracker` never holds stale baselines.
 
-- [ ] **Task 25.2: Batched 1:N and N:1 Relationship Loading (`query_children_batch` & `query_parents_batch` in `DAL/context/DbContext.ixx`)**
+- [x] **Task 25.2: Batched 1:N and N:1 Relationship Loading (`query_children_batch` & `query_parents_batch` in `DAL/context/DbContext.ixx`)**
   - In [DAL/context/DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L446-L529), add:
     - `query_children_batch<ChildDomain>(this Self&& self, const std::vector<ParentDomain>& parents)`:
       - If `parents.empty()`, returns `std::vector<ChildDomain>{}`.
@@ -416,7 +416,7 @@ Add EF Core-style `.ExecuteUpdate()` (`update_where<ColLiteral>(new_val)`) for s
       - If `children.empty()`, returns `std::vector<ParentDomain>{}`.
       - Extracts the FK values from `children` referencing `ParentDTO` (`Schema::extract_fk_value<ChildDTO, ParentDTO>`), and executes `parent_set.where_sql(Schema::col_of<pk_m>.in(fk_vals)).try_to_vector()` in **1 SQL query**!
 
-- [ ] **Task 25.3: Phase 25 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 25.3: Phase 25 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `db.somethings.where_equal<"category">("Electronics").update_where<"category">("Tech")` and verify `ChangeTracker` eviction.
   - Test `db.query_children_batch<ChildEntity>(parents)` and `db.query_parents_batch<ParentEntity>(children)` in 1 query.
 
@@ -429,7 +429,7 @@ Support nested transactions via SQL `SAVEPOINT`s in `SQLiteConnection` and `DbCo
 
 #### Detailed Tasks
 
-- [ ] **Task 26.1: Add `SAVEPOINT` Operations & Concurrency Pragmas to `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
+- [x] **Task 26.1: Add `SAVEPOINT` Operations & Concurrency Pragmas to `SQLiteConnection` (`DAL/context/SQLiteConnection.ixx`)**
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx), add:
     - `std::expected<void, Core::DbError> savepoint(std::string_view name)` -> executes `SAVEPOINT "<name>";`
     - `std::expected<void, Core::DbError> release_savepoint(std::string_view name)` -> executes `RELEASE SAVEPOINT "<name>";`
@@ -437,7 +437,7 @@ Support nested transactions via SQL `SAVEPOINT`s in `SQLiteConnection` and `DbCo
     - `std::expected<void, Core::DbError> set_busy_timeout(std::chrono::milliseconds timeout)` -> executes `std::format("PRAGMA busy_timeout = {};", timeout.count())`
     - `std::expected<void, Core::DbError> enable_wal_mode()` -> executes `"PRAGMA journal_mode = WAL;"`
 
-- [ ] **Task 26.2: Automatic Savepoint Nesting in `DbContextBase::transaction()` (`DAL/context/DbContext.ixx`)**
+- [x] **Task 26.2: Automatic Savepoint Nesting in `DbContextBase::transaction()` (`DAL/context/DbContext.ixx`)**
   - Add `std::size_t savepoint_depth_{ 0 };` to `DbContextBase`.
   - Expose `savepoint(std::string_view)`, `release_savepoint(std::string_view)`, and `rollback_to_savepoint(std::string_view)` on `DbContextBase`.
   - In `DbContextBase::transaction(Fn&& fn)` ([DAL/context/DbContext.ixx:626-683](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L626-L683)):
@@ -447,7 +447,7 @@ Support nested transactions via SQL `SAVEPOINT`s in `SQLiteConnection` and `DbCo
       - Run `fn()`. If `fn()` returns an error or throws an exception, call `conn_->rollback_to_savepoint(sp_name)`, decrement `savepoint_depth_`, and return/rethrow—leaving the outer transaction active!
       - If `fn()` succeeds, call `conn_->release_savepoint(sp_name)` and decrement `savepoint_depth_` without committing the outer transaction!
 
-- [ ] **Task 26.3: Phase 26 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 26.3: Phase 26 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Verify a nested `db.transaction([&] { ... })` inside an outer `db.transaction([&] { ... })`:
     - When the inner transaction fails, its writes are rolled back to the savepoint while the outer transaction's prior and subsequent writes still commit atomically!
     - When both inner and outer transactions succeed, all writes are committed.

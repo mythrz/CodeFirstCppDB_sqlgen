@@ -528,6 +528,62 @@ export namespace DAL
             }
         }
 
+        template<typename ChildDomain, typename ParentDomain, typename Self>
+        [[nodiscard]] std::expected<std::vector<ChildDomain>, Core::DbError> query_children_batch(
+            this Self&& self,
+            const std::vector<ParentDomain>& parents)
+        {
+            if (parents.empty())
+            {
+                return std::vector<ChildDomain>{};
+            }
+            auto& child_set = self.template find_dbset<ChildDomain>();
+            auto& parent_set = self.template find_dbset<ParentDomain>();
+            using ChildDTO = typename std::remove_cvref_t<decltype(child_set)>::DTOType;
+            using ParentDTO = typename std::remove_cvref_t<decltype(parent_set)>::DTOType;
+
+            constexpr auto fk_m = Schema::find_fk_member_referencing<ChildDTO, ParentDTO>();
+            using FkValueType = std::remove_cvref_t<decltype(
+                Schema::extract_fk_value<ChildDTO, ParentDTO>(std::declval<const ChildDTO&>()))>;
+
+            std::vector<FkValueType> pks;
+            pks.reserve(parents.size());
+            for (const auto& parent : parents)
+            {
+                const auto parent_key = Schema::EntityMetadata<ParentDomain, ParentDTO>::extract_key(parent);
+                pks.push_back(static_cast<FkValueType>(detail::normalize_query_val(parent_key)));
+            }
+            return child_set.where_sql(Schema::col_of<fk_m>.in(pks)).try_to_vector();
+        }
+
+        template<typename ParentDomain, typename ChildDomain, typename Self>
+        [[nodiscard]] std::expected<std::vector<ParentDomain>, Core::DbError> query_parents_batch(
+            this Self&& self,
+            const std::vector<ChildDomain>& children)
+        {
+            if (children.empty())
+            {
+                return std::vector<ParentDomain>{};
+            }
+            auto& child_set = self.template find_dbset<ChildDomain>();
+            auto& parent_set = self.template find_dbset<ParentDomain>();
+            using ChildDTO = typename std::remove_cvref_t<decltype(child_set)>::DTOType;
+            using ParentDTO = typename std::remove_cvref_t<decltype(parent_set)>::DTOType;
+
+            constexpr auto pk_m = Schema::primary_key_member<ParentDTO>();
+            using FkValueType = std::remove_cvref_t<decltype(
+                Schema::extract_fk_value<ChildDTO, ParentDTO>(std::declval<const ChildDTO&>()))>;
+
+            std::vector<FkValueType> fk_vals;
+            fk_vals.reserve(children.size());
+            for (const auto& child : children)
+            {
+                const ChildDTO c_dto = DAL::Mappers::MapperTraits<ChildDomain, ChildDTO>::to_dto(child);
+                fk_vals.push_back(Schema::extract_fk_value<ChildDTO, ParentDTO>(c_dto));
+            }
+            return parent_set.where_sql(Schema::col_of<pk_m>.in(fk_vals)).try_to_vector();
+        }
+
         std::expected<void, Core::DbError> begin_transaction()
         {
             if (!is_connected())
@@ -622,7 +678,53 @@ export namespace DAL
         }
 
         // Scoped transaction helper: begins a transaction, runs fn(), flushes staged changes,
-        // and commits on success or automatically rolls back on failure.
+        // Executes fn inside a transaction (or a SQL SAVEPOINT if already in a transaction),
+        // committing/releasing on success or rolling back on failure.
+        std::expected<void, Core::DbError> savepoint(std::string_view name)
+        {
+            if (!is_connected())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot create savepoint: database connection is closed")
+                };
+            }
+            if constexpr (requires(ConnectionHandle& c) { c.savepoint(name); })
+            {
+                return conn_->savepoint(name);
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> release_savepoint(std::string_view name)
+        {
+            if (!is_connected())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot release savepoint: database connection is closed")
+                };
+            }
+            if constexpr (requires(ConnectionHandle& c) { c.release_savepoint(name); })
+            {
+                return conn_->release_savepoint(name);
+            }
+            return {};
+        }
+
+        std::expected<void, Core::DbError> rollback_to_savepoint(std::string_view name)
+        {
+            if (!is_connected())
+            {
+                return std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot rollback savepoint: database connection is closed")
+                };
+            }
+            if constexpr (requires(ConnectionHandle& c) { c.rollback_to_savepoint(name); })
+            {
+                return conn_->rollback_to_savepoint(name);
+            }
+            return {};
+        }
+
         template<typename Fn>
         std::expected<void, Core::DbError> transaction(Fn&& fn)
         {
@@ -631,6 +733,53 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{
                     Core::DbError::connection_error("Cannot start transaction: database connection is closed")
                 };
+            }
+
+            if (in_transaction())
+            {
+                if constexpr (requires(ConnectionHandle& c, std::string_view n) {
+                    c.savepoint(n);
+                    c.release_savepoint(n);
+                    c.rollback_to_savepoint(n);
+                })
+                {
+                    const std::string sp_name = std::format("_codefirst_sp_{}", ++savepoint_depth_);
+                    auto sp_res = conn_->savepoint(sp_name);
+                    if (!sp_res)
+                    {
+                        --savepoint_depth_;
+                        return sp_res;
+                    }
+
+                    try
+                    {
+                        using FnResult = std::invoke_result_t<Fn>;
+                        if constexpr (std::is_void_v<FnResult>)
+                        {
+                            std::invoke(std::forward<Fn>(fn));
+                        }
+                        else
+                        {
+                            auto fn_res = std::invoke(std::forward<Fn>(fn));
+                            if (!fn_res)
+                            {
+                                (void)conn_->rollback_to_savepoint(sp_name);
+                                --savepoint_depth_;
+                                return fn_res;
+                            }
+                        }
+
+                        auto rel_res = conn_->release_savepoint(sp_name);
+                        --savepoint_depth_;
+                        return rel_res;
+                    }
+                    catch (...)
+                    {
+                        (void)conn_->rollback_to_savepoint(sp_name);
+                        --savepoint_depth_;
+                        throw;
+                    }
+                }
             }
 
             auto tx_res = begin_transaction();
@@ -687,6 +836,7 @@ export namespace DAL
         std::vector<std::function<std::expected<void, Core::DbError>()>> pending_ops_;
         bool defer_changes_{ false };
         bool change_tracking_enabled_{ false };
+        std::size_t savepoint_depth_{ 0 };
         std::map<std::pair<std::type_index, std::string>, TrackedEntityEntry> tracked_entries_{};
     };
 
