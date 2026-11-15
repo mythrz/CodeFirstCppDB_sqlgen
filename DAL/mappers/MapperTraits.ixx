@@ -23,7 +23,7 @@ export namespace DAL::Mappers
 
         consteval std::string_view strip_member_affixes(std::string_view name)
         {
-            if (name.starts_with("m_") || name.starts_with("M_"))
+            if (name.size() > 2 && (name.starts_with("m_") || name.starts_with("M_")))
             {
                 name.remove_prefix(2);
             }
@@ -180,6 +180,57 @@ export namespace DAL::Mappers
         inline constexpr bool is_optional_v = false;
         template<typename T>
         inline constexpr bool is_optional_v<std::optional<T>> = true;
+
+        template<typename Domain>
+        consteval std::meta::info find_hydrating_constructor(std::span<const std::meta::info> dto_members)
+        {
+            if constexpr (std::is_aggregate_v<Domain>)
+            {
+                return std::meta::info{};
+            }
+            for (auto mem : std::meta::members_of(^^Domain, std::meta::access_context::current()))
+            {
+                if (std::meta::is_constructor(mem) && !std::meta::is_copy_constructor(mem) &&
+                    !std::meta::is_move_constructor(mem) && !std::meta::is_default_constructor(mem))
+                {
+                    auto params = std::meta::parameters_of(mem);
+                    if (params.size() == dto_members.size() && !params.empty())
+                    {
+                        bool all_match = true;
+                        for (auto p : params)
+                        {
+                            if (!std::meta::has_identifier(p))
+                            {
+                                all_match = false;
+                                break;
+                            }
+                            std::string_view pname = std::meta::identifier_of(p);
+                            int hits = 0;
+                            for (auto dm : dto_members)
+                            {
+                                std::string_view dname = std::meta::identifier_of(dm);
+                                if (dname == pname ||
+                                    strip_member_affixes(dname) == strip_member_affixes(pname) ||
+                                    matches_snake_to_camel(dname, pname))
+                                {
+                                    ++hits;
+                                }
+                            }
+                            if (hits != 1)
+                            {
+                                all_match = false;
+                                break;
+                            }
+                        }
+                        if (all_match)
+                        {
+                            return mem;
+                        }
+                    }
+                }
+            }
+            return std::meta::info{};
+        }
     } // namespace detail
 
     template<typename Domain, typename DTO>
@@ -218,19 +269,31 @@ export namespace DAL::Mappers
                         return val;
                 };
 
-                Domain result{};
-                template for (constexpr auto dom_m : domain_members)
+                constexpr auto ctor = detail::find_hydrating_constructor<Domain>(dto_members);
+                if constexpr (ctor != std::meta::info{})
                 {
-                    // Locate the DTO member whose name matches this domain member.
-                    // Ill-formed at compile time if no unique match is found.
-                    constexpr auto dto_m = detail::find_matching_dto_member(dom_m, dto_members);
-
-                    // Write directly into the private domain member via unchecked splice.
-                    // Cast to the domain member's type so that strong ID types
-                    // (e.g. PersonId) are constructed from their int32_t DTO counterpart.
-                    result.[:dom_m:] = static_cast<[:std::meta::type_of(dom_m):]>(extract_value(dto.[:dto_m:]));
+                    static constexpr auto params = std::define_static_array(std::meta::parameters_of(ctor));
+                    return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                        return Domain(static_cast<[:std::meta::remove_cvref(std::meta::type_of(params[Is])):]>(
+                            extract_value(dto.[:detail::find_matching_dto_member(params[Is], dto_members):]))...);
+                    }(std::make_index_sequence<params.size()>{});
                 }
-                return result;
+                else
+                {
+                    Domain result{};
+                    template for (constexpr auto dom_m : domain_members)
+                    {
+                        // Locate the DTO member whose name matches this domain member.
+                        // Ill-formed at compile time if no unique match is found.
+                        constexpr auto dto_m = detail::find_matching_dto_member(dom_m, dto_members);
+
+                        // Write directly into the private domain member via unchecked splice.
+                        // Cast to the domain member's type so that strong ID types
+                        // (e.g. PersonId) are constructed from their int32_t DTO counterpart.
+                        result.[:dom_m:] = static_cast<[:std::meta::type_of(dom_m):]>(extract_value(dto.[:dto_m:]));
+                    }
+                    return result;
+                }
             }
         }
 
@@ -251,7 +314,16 @@ export namespace DAL::Mappers
                 template for (constexpr auto dto_m : dto_members)
                 {
                     constexpr auto dom_m = detail::find_matching_domain_member(dto_m, domain_members);
-                    dto.[:dto_m:] = static_cast<std::remove_cvref_t<decltype(dto.[:dto_m:])>>(domain.[:dom_m:]);
+                    using TargetT = std::remove_cvref_t<decltype(dto.[:dto_m:])>;
+                    const auto& src = domain.[:dom_m:];
+                    if constexpr (requires { src.get(); })
+                    {
+                        dto.[:dto_m:] = static_cast<TargetT>(src.get());
+                    }
+                    else
+                    {
+                        dto.[:dto_m:] = static_cast<TargetT>(src);
+                    }
                 }
                 return dto;
             }

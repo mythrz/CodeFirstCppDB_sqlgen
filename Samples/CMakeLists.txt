@@ -1,12 +1,14 @@
-add_library(Samples)
-add_library(CodeFirstCppDB::Samples ALIAS Samples)
-add_library(CodeFirst::Samples ALIAS Samples)
+add_library(CodeFirstCppDB_Samples)
+set_target_properties(CodeFirstCppDB_Samples PROPERTIES OUTPUT_NAME Samples)
+add_library(CodeFirstCppDB::Samples ALIAS CodeFirstCppDB_Samples)
+add_library(CodeFirst::Samples ALIAS CodeFirstCppDB_Samples)
 
-target_sources(Samples
+target_sources(CodeFirstCppDB_Samples
     PUBLIC
         FILE_SET CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/..
         FILES
+            SampleIds.ixx
             ../Core/entities/Person.ixx
             ../Core/entities/Something.ixx
             ../Core/entities/Person_Something.ixx
@@ -22,8 +24,13 @@ target_sources(Samples
             samples.ixx
 )
 
-target_link_libraries(Samples
+target_link_libraries(CodeFirstCppDB_Samples
     PUBLIC
-        Core
-        DAL
+        CodeFirstCppDB::Core
+        CodeFirstCppDB::DAL
+)
+
+target_compile_options(CodeFirstCppDB_Samples
+    PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-Wall;-Wextra;-Wpedantic;-Wshadow>
 )

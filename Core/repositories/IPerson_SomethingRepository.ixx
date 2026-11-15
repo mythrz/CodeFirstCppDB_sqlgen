@@ -2,6 +2,7 @@ export module samples:iperson_something_repository;
 
 import std;
 import core;
+import :ids;
 import :person_something;
 
 export namespace Core 

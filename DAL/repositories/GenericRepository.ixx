@@ -184,41 +184,41 @@ export namespace DAL::Repositories
             }
         }
 
-        std::expected<void, Core::DbError> insert_one(const Domain& item) override
+        [[nodiscard]] std::expected<void, Core::DbError> insert_one(const Domain& item) override
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
             auto res = conn_->insert(dto);
             if (!res)
             {
-                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+                return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
             }
             return {};
         }
 
-        std::expected<void, Core::DbError> insert_many(const std::vector<Domain>& items) override
+        [[nodiscard]] std::expected<void, Core::DbError> insert_many(const std::vector<Domain>& items) override
         {
             auto dto_view = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto);
             std::vector<DTO> dtos(dto_view.begin(), dto_view.end());
             auto res = conn_->insert_many(dtos);
             if (!res)
             {
-                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+                return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
             }
             return {};
         }
 
-        std::expected<void, Core::DbError> update_one(const Domain& item) override
+        [[nodiscard]] std::expected<void, Core::DbError> update_one(const Domain& item) override
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
             auto res = conn_->update(dto);
             if (!res)
             {
-                return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+                return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
             }
             return {};
         }
 
-        std::expected<void, Core::DbError> delete_by_id(KeyType id) override
+        [[nodiscard]] std::expected<void, Core::DbError> delete_by_id(KeyType id) override
         {
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
@@ -238,7 +238,7 @@ export namespace DAL::Repositories
                     id.tuple());
                 if (!res)
                 {
-                    return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+                    return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
                 }
                 return {};
             }
@@ -247,7 +247,7 @@ export namespace DAL::Repositories
                 auto res = conn_->template delete_by_id<DTO>(unwrap_key_part(id));
                 if (!res)
                 {
-                    return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
+                    return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
                 }
                 return {};
             }
@@ -284,6 +284,18 @@ export namespace DAL::Repositories
         }
 
     protected:
+        [[nodiscard]] Core::DbError map_conn_error(std::string_view msg) const
+        {
+            if constexpr (requires { conn_->map_error(msg); })
+            {
+                return conn_->map_error(msg);
+            }
+            else
+            {
+                return Core::DbError::map_from_message(msg);
+            }
+        }
+
         template<typename Part>
         [[nodiscard]] static constexpr decltype(auto) unwrap_key_part(const Part& part) noexcept
         {

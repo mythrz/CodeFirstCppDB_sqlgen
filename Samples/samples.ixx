@@ -1,5 +1,6 @@
 export module samples;
 
+export import :ids;
 export import :person;
 export import :something;
 export import :person_something;

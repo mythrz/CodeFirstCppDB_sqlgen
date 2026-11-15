@@ -25,9 +25,9 @@ export namespace Core
             return value;
         }
 
-        // Implicit conversion to underlying type allows static_cast in reflection
-        // mappers and interop with sqlgen/SQLite.
-        constexpr operator const ValueType&() const noexcept
+        // Explicit conversion to underlying type prevents accidental cross-entity
+        // comparisons/arithmetic while allowing static_cast or .get() in mappers.
+        constexpr explicit operator const ValueType&() const noexcept
         {
             return value;
         }
@@ -35,11 +35,6 @@ export namespace Core
         constexpr bool operator==(const Id&) const noexcept = default;
         constexpr auto operator<=>(const Id&) const noexcept = default;
     };
-
-    // Domain-specific ID aliases — all entity IDs live here so
-    // any partition can import :id and use them.
-    using PersonId = Id<struct PersonTag>;
-    using SomethingId = Id<struct SomethingTag>;
 
 } // namespace Core
 

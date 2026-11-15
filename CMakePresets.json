@@ -1,42 +1,10 @@
 {
-  "version": 3,
+  "version": 4,
   "configurePresets": [
     {
-      "name": "clang-debug",
-      "displayName": "clang-debug",
-      "description": "Debug build using Clang (Ninja)",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/linux/arch/clang/debug",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_C_COMPILER": "/usr/bin/clang",
-        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
-        "CMAKE_CXX_FLAGS": "-stdlib=libc++",
-        "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
-        "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
-    },
-    {
-      "name": "clang-release",
-      "displayName": "clang-release",
-      "description": "Release build using Clang (Ninja)",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/linux/arch/clang/release",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_COMPILER": "/usr/bin/clang",
-        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
-        "CMAKE_CXX_FLAGS": "-stdlib=libc++",
-        "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
-        "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
-    },
-    {
       "name": "gcc-debug",
-      "displayName": "gcc-debug",
-      "description": "Debug build using GCC (Ninja)",
+      "displayName": "GCC 16+ Debug",
+      "description": "Debug build using GCC 16+ (Ninja, C++26 Reflection)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/linux/arch/gcc/debug",
       "cacheVariables": {
@@ -48,8 +16,8 @@
     },
     {
       "name": "gcc-release",
-      "displayName": "gcc-release",
-      "description": "Release build using GCC (Ninja)",
+      "displayName": "GCC 16+ Release",
+      "description": "Release build using GCC 16+ (Ninja, C++26 Reflection)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/linux/arch/gcc/release",
       "cacheVariables": {
@@ -58,36 +26,57 @@
         "CMAKE_CXX_COMPILER": "/usr/bin/g++",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
+    },
+    {
+      "name": "gcc-asan",
+      "displayName": "GCC 16+ ASan + UBSan",
+      "description": "Debug build with AddressSanitizer, UndefinedBehaviorSanitizer, and libstdc++ assertions",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux/arch/gcc/asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "/usr/bin/gcc",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
     }
   ],
   "buildPresets": [
     {
-      "name": "build-clang-debug",
-      "configurePreset": "clang-debug",
-      "displayName": "Build Clang Debug",
-      "description": "Configure (if needed) and build Clang Debug",
-      "jobs": 0
-    },
-    {
-      "name": "build-clang-release",
-      "configurePreset": "clang-release",
-      "displayName": "Build Clang Release",
-      "description": "Configure (if needed) and build Clang Release",
-      "jobs": 0
-    },
-    {
       "name": "build-gcc-debug",
       "configurePreset": "gcc-debug",
       "displayName": "Build GCC Debug",
-      "description": "Configure (if needed) and build GCC Debug",
       "jobs": 0
     },
     {
       "name": "build-gcc-release",
       "configurePreset": "gcc-release",
       "displayName": "Build GCC Release",
-      "description": "Configure (if needed) and build GCC Release",
       "jobs": 0
+    },
+    {
+      "name": "build-gcc-asan",
+      "configurePreset": "gcc-asan",
+      "displayName": "Build GCC ASan + UBSan",
+      "jobs": 0
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-gcc-debug",
+      "configurePreset": "gcc-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-gcc-asan",
+      "configurePreset": "gcc-asan",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

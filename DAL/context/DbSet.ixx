@@ -1638,7 +1638,11 @@ export namespace DAL
                     Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
                 };
             }
-            enqueue_op_fn_([this, item]() { return upsert_immediate(item); });
+            enqueue_op_fn_(
+                [repo = repo_, conn = conn_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, item]()
+                {
+                    return upsert_immediate_with(repo, conn, upsert_fn, tracking_fn, item);
+                });
             return {};
         }
 
@@ -1650,7 +1654,11 @@ export namespace DAL
                     Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
                 };
             }
-            enqueue_op_fn_([this, items]() { return upsert_many_immediate(items); });
+            enqueue_op_fn_(
+                [repo = repo_, conn = conn_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, items]()
+                {
+                    return upsert_many_immediate_with(repo, conn, upsert_fn, tracking_fn, items);
+                });
             return {};
         }
 
@@ -1831,7 +1839,10 @@ export namespace DAL
             std::function<void()> clear_cb{};
             if (is_tracking_enabled())
             {
-                track_cb = [this](const Domain& entity) { record_snapshot(entity); };
+                track_cb = [repo = repo_, upsert_fn = upsert_tracked_fn_](const Domain& entity)
+                {
+                    record_snapshot_with(repo, upsert_fn, entity);
+                };
                 if (untrack_type_fn_)
                 {
                     clear_cb = [fn = untrack_type_fn_]() { fn(std::type_index(typeid(Domain))); };
@@ -2147,9 +2158,30 @@ export namespace DAL
         // Task 10.2: Identity Map & Snapshot ChangeTracker Helpers
         // =====================================================================
 
+        // Value-owned tracking: stores a shared copy inside the ChangeTracker so caller stack
+        // lifetimes can never dangle.
+        [[nodiscard]] std::shared_ptr<Domain> track_copy(Domain entity) const
+        {
+            auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
+            auto owned = std::make_shared<Domain>(std::move(entity));
+            if (upsert_tracked_fn_)
+            {
+                auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*owned));
+                upsert_tracked_fn_(
+                    std::type_index(typeid(Domain)),
+                    format_key(key),
+                    false,
+                    owned,
+                    nullptr,
+                    make_detect_fn_with(repo_, std::move(baseline)));
+            }
+            return owned;
+        }
+
         // Binds a caller-owned Domain instance to the context's ChangeTracker.
         // If find()/to_vector() previously recorded an original snapshot for this key,
         // that original snapshot is preserved so mutations before or after track() are detected.
+        [[deprecated("Use track_copy() or find_tracked() for value-owned tracking")]]
         void track(Domain& entity) const
         {
             if (!upsert_tracked_fn_)
@@ -2281,25 +2313,50 @@ export namespace DAL
             }
         }
 
+        using UpsertTrackedFn = std::function<void(
+            std::type_index,
+            std::string,
+            bool,
+            std::shared_ptr<void>,
+            const void*,
+            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
+                const std::shared_ptr<void>&, const void*)>)>;
+
         std::expected<void, Core::DbError> upsert_immediate(const Domain& item)
         {
+            return upsert_immediate_with(repo_, conn_, upsert_tracked_fn_, is_tracking_enabled_fn_, item);
+        }
+
+        std::expected<void, Core::DbError> upsert_many_immediate(const std::vector<Domain>& items)
+        {
+            return upsert_many_immediate_with(repo_, conn_, upsert_tracked_fn_, is_tracking_enabled_fn_, items);
+        }
+
+        static std::expected<void, Core::DbError> upsert_immediate_with(
+            const std::shared_ptr<RepoType>& repo,
+            const std::shared_ptr<ConnectionHandle>& conn,
+            const UpsertTrackedFn& upsert_fn,
+            const std::function<bool()>& tracking_fn,
+            const Domain& item)
+        {
+            const bool tracking = tracking_fn && tracking_fn();
             if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
             {
-                if (conn_)
+                if (conn)
                 {
                     if constexpr (requires(ConnectionHandle& c, const DTO& dto) { c.upsert(dto); })
                     {
                         const DTO dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
-                        auto res = conn_->upsert(dto);
+                        auto res = conn->upsert(dto);
                         if (!res)
                         {
                             return std::unexpected<Core::DbError>{
                                 Core::DbError::map_from_message(res.error().what())
                             };
                         }
-                        if (is_tracking_enabled())
+                        if (tracking)
                         {
-                            record_snapshot(item);
+                            record_snapshot_with(repo, upsert_fn, item);
                         }
                         return {};
                     }
@@ -2307,24 +2364,30 @@ export namespace DAL
             }
 
             const auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(item);
-            auto res = repo_->exists_by_id(key) ? repo_->update_one(item) : repo_->insert_one(item);
-            if (res && is_tracking_enabled())
+            auto res = repo->exists_by_id(key) ? repo->update_one(item) : repo->insert_one(item);
+            if (res && tracking)
             {
-                record_snapshot(item);
+                record_snapshot_with(repo, upsert_fn, item);
             }
             return res;
         }
 
-        std::expected<void, Core::DbError> upsert_many_immediate(const std::vector<Domain>& items)
+        static std::expected<void, Core::DbError> upsert_many_immediate_with(
+            const std::shared_ptr<RepoType>& repo,
+            const std::shared_ptr<ConnectionHandle>& conn,
+            const UpsertTrackedFn& upsert_fn,
+            const std::function<bool()>& tracking_fn,
+            const std::vector<Domain>& items)
         {
             if (items.empty())
             {
                 return {};
             }
 
+            const bool tracking = tracking_fn && tracking_fn();
             if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
             {
-                if (conn_)
+                if (conn)
                 {
                     if constexpr (requires(ConnectionHandle& c, const std::vector<DTO>& dtos) { c.upsert_many(dtos); })
                     {
@@ -2334,18 +2397,18 @@ export namespace DAL
                         {
                             dtos.push_back(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item));
                         }
-                        auto res = conn_->upsert_many(dtos);
+                        auto res = conn->upsert_many(dtos);
                         if (!res)
                         {
                             return std::unexpected<Core::DbError>{
                                 Core::DbError::map_from_message(res.error().what())
                             };
                         }
-                        if (is_tracking_enabled())
+                        if (tracking)
                         {
                             for (const auto& item : items)
                             {
-                                record_snapshot(item);
+                                record_snapshot_with(repo, upsert_fn, item);
                             }
                         }
                         return {};
@@ -2355,7 +2418,7 @@ export namespace DAL
 
             for (const auto& item : items)
             {
-                auto res = upsert_immediate(item);
+                auto res = upsert_immediate_with(repo, conn, upsert_fn, tracking_fn, item);
                 if (!res)
                 {
                     return res;
@@ -2366,7 +2429,11 @@ export namespace DAL
 
         [[nodiscard]] auto make_detect_fn(std::shared_ptr<DTO> baseline) const
         {
-            auto repo = repo_;
+            return make_detect_fn_with(repo_, std::move(baseline));
+        }
+
+        [[nodiscard]] static auto make_detect_fn_with(std::shared_ptr<RepoType> repo, std::shared_ptr<DTO> baseline)
+        {
             return [repo, baseline = std::move(baseline)](
                 const std::shared_ptr<void>& owned,
                 const void* borrowed)
@@ -2408,19 +2475,27 @@ export namespace DAL
 
         void record_snapshot(const Domain& entity) const
         {
-            if (!upsert_tracked_fn_)
+            record_snapshot_with(repo_, upsert_tracked_fn_, entity);
+        }
+
+        static void record_snapshot_with(
+            const std::shared_ptr<RepoType>& repo,
+            const UpsertTrackedFn& upsert_tracked_fn,
+            const Domain& entity)
+        {
+            if (!upsert_tracked_fn)
             {
                 return;
             }
             auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
             auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity));
-            upsert_tracked_fn_(
+            upsert_tracked_fn(
                 std::type_index(typeid(Domain)),
                 format_key(key),
                 true,
                 nullptr,
                 nullptr,
-                make_detect_fn(std::move(baseline)));
+                make_detect_fn_with(repo, std::move(baseline)));
         }
 
         std::shared_ptr<RepoType> repo_;
@@ -2428,14 +2503,7 @@ export namespace DAL
         std::function<bool()> is_deferred_fn_{};
         std::function<void(std::function<std::expected<void, Core::DbError>()>)> enqueue_op_fn_{};
         std::function<bool()> is_tracking_enabled_fn_{};
-        std::function<void(
-            std::type_index,
-            std::string,
-            bool,
-            std::shared_ptr<void>,
-            const void*,
-            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                const std::shared_ptr<void>&, const void*)>)> upsert_tracked_fn_{};
+        UpsertTrackedFn upsert_tracked_fn_{};
         std::function<void(std::type_index, const std::string&)> untrack_fn_{};
         std::function<void(std::type_index)> untrack_type_fn_{};
         std::function<std::shared_ptr<void>(std::type_index, const std::string&)> find_tracked_fn_{};

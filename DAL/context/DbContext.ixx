@@ -32,10 +32,10 @@ export namespace DAL
         }
 
         // Non-copyable and non-movable so Set<T>{ this } member closures never dangle
-        DbContextBase(const DbContextBase&) = delete;
-        DbContextBase& operator=(const DbContextBase&) = delete;
-        DbContextBase(DbContextBase&&) = delete;
-        DbContextBase& operator=(DbContextBase&&) = delete;
+        DbContextBase(const DbContextBase&) = delete("DbContextBase is non-copyable because DbSet members bind 'this'");
+        DbContextBase& operator=(const DbContextBase&) = delete("DbContextBase is non-copyable because DbSet members bind 'this'");
+        DbContextBase(DbContextBase&&) = delete("DbContextBase is non-movable because DbSet members bind 'this'");
+        DbContextBase& operator=(DbContextBase&&) = delete("DbContextBase is non-movable because DbSet members bind 'this'");
 
         virtual ~DbContextBase() = default;
 
@@ -66,10 +66,42 @@ export namespace DAL
         }
 
         // Executes a raw SQL statement against the underlying connection (Phase 38)
-        auto execute_raw(std::string_view sql)
+        [[nodiscard]] auto execute_raw(std::string_view sql)
             requires requires(ConnectionHandle& c, std::string_view s) { c.execute_raw(s); }
         {
             return conn_->execute_raw(sql);
+        }
+
+        // Executes a parameterized SQL query returning dynamic rows (Phase 41)
+        template<typename CellT>
+        [[nodiscard]] auto query_rows(std::string_view sql, std::span<const CellT> params) const
+            requires requires(const ConnectionHandle& c, std::string_view s, std::span<const CellT> p) {
+                c.query_rows(s, p);
+            }
+        {
+            return conn_->query_rows(sql, params);
+        }
+
+        [[nodiscard]] auto query_rows(std::string_view sql) const
+            requires requires(const ConnectionHandle& c, std::string_view s) { c.query_rows(s); }
+        {
+            return conn_->query_rows(sql);
+        }
+
+        // Executes a parameterized SQL statement without result rows (Phase 41)
+        template<typename CellT>
+        [[nodiscard]] auto execute_prepared(std::string_view sql, std::span<const CellT> params)
+            requires requires(ConnectionHandle& c, std::string_view s, std::span<const CellT> p) {
+                c.execute_prepared(s, p);
+            }
+        {
+            return conn_->execute_prepared(sql, params);
+        }
+
+        [[nodiscard]] auto execute_prepared(std::string_view sql)
+            requires requires(ConnectionHandle& c, std::string_view s) { c.execute_prepared(s); }
+        {
+            return conn_->execute_prepared(sql);
         }
 
         // Type alias for zero-boilerplate DbSet declarations inside derived DbContext classes
@@ -874,8 +906,8 @@ export namespace DAL
         }
 
         // Unit of Work save_changes: executes staged operations atomically in a transaction
-        // with automatic rollback on failure, or commits an active explicit transaction.
-        virtual std::expected<void, Core::DbError> save_changes()
+        // (or a savepoint when already inside an outer transaction) with automatic rollback on failure.
+        [[nodiscard]] virtual std::expected<void, Core::DbError> save_changes()
         {
             if (!is_connected())
             {
@@ -886,16 +918,18 @@ export namespace DAL
 
             (void)detect_changes();
 
-            if (!pending_ops_.empty())
+            if (pending_ops_.empty())
             {
-                const bool already_in_tx = in_transaction();
-                if (!already_in_tx)
+                return {};
+            }
+
+            const bool started_tx = !in_transaction();
+            if (started_tx)
+            {
+                auto tx_res = begin_transaction();
+                if (!tx_res)
                 {
-                    auto tx_res = begin_transaction();
-                    if (!tx_res)
-                    {
-                        return tx_res;
-                    }
+                    return tx_res;
                 }
 
                 for (auto& op : pending_ops_)
@@ -920,12 +954,31 @@ export namespace DAL
                 return {};
             }
 
-            if (in_transaction())
+            // Already inside an outer transaction: flush using a savepoint so the outer
+            // transaction remains open and under the caller's control.
+            auto sp_res = acquire_savepoint();
+            if (!sp_res)
             {
-                return commit();
+                return std::unexpected<Core::DbError>{ sp_res.error() };
+            }
+            const std::string& sp_name = *sp_res;
+
+            for (auto& op : pending_ops_)
+            {
+                auto op_res = op();
+                if (!op_res)
+                {
+                    (void)rollback_to_savepoint(sp_name);
+                    release_savepoint_depth();
+                    pending_ops_.clear();
+                    return op_res;
+                }
             }
 
-            return {};
+            pending_ops_.clear();
+            auto rel_res = release_savepoint(sp_name);
+            release_savepoint_depth();
+            return rel_res;
         }
 
         // Scoped transaction helper: begins a transaction, runs fn(), flushes staged changes,
@@ -1129,7 +1182,15 @@ export namespace DAL
 
                 if (!pending_ops_.empty())
                 {
-                    return save_changes();
+                    auto sc_res = save_changes();
+                    if (!sc_res)
+                    {
+                        if (in_transaction())
+                        {
+                            (void)rollback();
+                        }
+                        return sc_res;
+                    }
                 }
 
                 if (in_transaction())
@@ -1151,7 +1212,7 @@ export namespace DAL
 
     protected:
         std::shared_ptr<ConnectionHandle> conn_;
-        std::vector<std::function<std::expected<void, Core::DbError>()>> pending_ops_;
+        std::vector<std::move_only_function<std::expected<void, Core::DbError>()>> pending_ops_;
         bool defer_changes_{ false };
         bool change_tracking_enabled_{ false };
         std::size_t savepoint_depth_{ 0 };
@@ -1261,6 +1322,19 @@ export namespace DAL
                 return rel_res;
             }
             auto res = ctx_->save_changes();
+            if (!res)
+            {
+                if (ctx_->in_transaction())
+                {
+                    (void)ctx_->rollback();
+                }
+                rolled_back_ = true;
+                return res;
+            }
+            if (ctx_->in_transaction())
+            {
+                res = ctx_->commit();
+            }
             if (res)
             {
                 committed_ = true;

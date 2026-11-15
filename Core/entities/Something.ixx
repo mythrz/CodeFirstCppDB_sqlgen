@@ -2,6 +2,7 @@ export module samples:something;
 
 import std;
 import core;
+import :ids;
 
 export namespace Core
 {

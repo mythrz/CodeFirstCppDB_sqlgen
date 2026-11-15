@@ -1,8 +1,9 @@
-add_library(DAL)
-add_library(CodeFirstCppDB::DAL ALIAS DAL)
-add_library(CodeFirst::DAL ALIAS DAL)
+add_library(CodeFirstCppDB_DAL)
+set_target_properties(CodeFirstCppDB_DAL PROPERTIES OUTPUT_NAME DAL)
+add_library(CodeFirstCppDB::DAL ALIAS CodeFirstCppDB_DAL)
+add_library(CodeFirst::DAL ALIAS CodeFirstCppDB_DAL)
 
-target_sources(DAL
+target_sources(CodeFirstCppDB_DAL
     PUBLIC
         FILE_SET CXX_MODULES FILES
             schema/SchemaTraits.ixx
@@ -16,17 +17,18 @@ target_sources(DAL
     PRIVATE
 )
 
-target_link_libraries(DAL 
-    PUBLIC 
-        Core
-        sqlgen 
+target_link_libraries(CodeFirstCppDB_DAL
+    PUBLIC
+        CodeFirstCppDB::Core
+        sqlgen
         SQLite3::SQLite3
 )
 
-target_compile_options(DAL
-    PUBLIC
-        -Wno-expose-global-module-tu-local
-        -Wno-deprecated-literal-operator
+target_compile_options(CodeFirstCppDB_DAL
+    PRIVATE
+        $<$<CXX_COMPILER_ID:GNU>:-Wall;-Wextra;-Wpedantic;-Wshadow>
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-expose-global-module-tu-local>
+        $<$<CXX_COMPILER_ID:GNU>:-Wno-deprecated-literal-operator>
 )
 
 if(CODEFIRST_BUILD_TESTS)

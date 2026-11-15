@@ -62,33 +62,66 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // 2. Stage seed entities via Unit of Work and commit atomically
-    std::println("Staging initial entities via Unit of Work...");
-    db.defer_changes(true);
-
-    Core::Person person1(Core::PersonId{ 1 }, "Rz", "D");
-    Core::Person person2(Core::PersonId{ 2 }, "R First", "D Last");
-    (void)db.people.add(person1);
-    (void)db.people.add(person2);
-
-    Core::Something something1(Core::SomethingId{ 1 }, "Laptop", "Electronics", "Developer Workstation");
-    Core::Something something2(Core::SomethingId{ 2 }, "Coffee Machine", "Appliances", "Espresso Maker");
-    (void)db.somethings.add(something1);
-    (void)db.somethings.add(something2);
-
-    Core::Person_Something link1(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner");
-    Core::Person_Something link2(Core::PersonId{ 2 }, Core::SomethingId{ 2 }, "User");
-    (void)db.personSomethings.add(link1);
-    (void)db.personSomethings.add(link2);
-
-    auto saveRes = db.save_changes();
-    if (!saveRes)
+    // 2. Seed initial entities if database is empty (--no-reset safe)
+    std::optional<Core::Person> person1Opt;
+    if (db.people.count() == 0)
     {
-        std::println(std::cerr, "Database save failed: {}", saveRes.error().to_string());
-        return 1;
+        std::println("Seeding initial entities...");
+        auto p1Res = db.people.add_returning(Core::Person(Core::PersonId{ 0 }, "Rz", "D"));
+        if (!p1Res)
+        {
+            std::println(std::cerr, "Failed to add person1: {}", p1Res.error().to_string());
+            return 1;
+        }
+        auto p2Res = db.people.add_returning(Core::Person(Core::PersonId{ 0 }, "R First", "D Last"));
+        if (!p2Res)
+        {
+            std::println(std::cerr, "Failed to add person2: {}", p2Res.error().to_string());
+            return 1;
+        }
+
+        auto s1Res = db.somethings.add_returning(
+            Core::Something(Core::SomethingId{ 0 }, "Laptop", "Electronics", "Developer Workstation"));
+        if (!s1Res)
+        {
+            std::println(std::cerr, "Failed to add something1: {}", s1Res.error().to_string());
+            return 1;
+        }
+        auto s2Res = db.somethings.add_returning(
+            Core::Something(Core::SomethingId{ 0 }, "Coffee Machine", "Appliances", "Espresso Maker"));
+        if (!s2Res)
+        {
+            std::println(std::cerr, "Failed to add something2: {}", s2Res.error().to_string());
+            return 1;
+        }
+
+        auto link1Res = db.personSomethings.add(
+            Core::Person_Something(p1Res->getId(), s1Res->getId(), "Owner"));
+        if (!link1Res)
+        {
+            std::println(std::cerr, "Failed to add link1: {}", link1Res.error().to_string());
+            return 1;
+        }
+        auto link2Res = db.personSomethings.add(
+            Core::Person_Something(p2Res->getId(), s2Res->getId(), "User"));
+        if (!link2Res)
+        {
+            std::println(std::cerr, "Failed to add link2: {}", link2Res.error().to_string());
+            return 1;
+        }
+
+        person1Opt = *p1Res;
+        std::println("Database setup complete. Created tables and persisted domain records.");
     }
-    db.defer_changes(false);
-    std::println("Database setup complete. Created tables and persisted domain records.");
+    else
+    {
+        std::println("Existing database detected (--no-reset); skipping seed.");
+        auto existingPeople = db.people.to_vector();
+        if (!existingPeople.empty())
+        {
+            person1Opt = existingPeople.front();
+        }
+    }
 
     // 3. Query and verify persisted entities through clean domain layer (No DTO leaks!)
     std::println("\nVerifying persisted entities via DbContext / Core domain models:");
@@ -122,13 +155,16 @@ int main(int argc, char* argv[])
         std::println(" -> {}", item.getName());
     }
 
-    auto ownedByPerson1 = db.query_many_to_many<Core::Something, Core::Person_Something>(person1);
-    if (ownedByPerson1)
+    if (person1Opt)
     {
-        std::println("\nFK Navigation: Person 1 owns {} item(s):", ownedByPerson1->size());
-        for (const auto& item : *ownedByPerson1)
+        auto ownedByPerson1 = db.query_many_to_many<Core::Something, Core::Person_Something>(*person1Opt);
+        if (ownedByPerson1)
         {
-            std::println(" -> {}", item.getName());
+            std::println("\nFK Navigation: Person {} owns {} item(s):", person1Opt->getId(), ownedByPerson1->size());
+            for (const auto& item : *ownedByPerson1)
+            {
+                std::println(" -> {}", item.getName());
+            }
         }
     }
 

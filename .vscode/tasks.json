@@ -14,13 +14,9 @@
       "problemMatcher": []
     },
     {
-      "label": "cmake: configure & build (clang-debug)",
+      "label": "cmake: configure & build (gcc-debug)",
       "type": "shell",
-      "command": "bash",
-      "args": [
-        "-lc",
-        "cmake --preset clang-debug && cmake --build build/linux/arch/clang/debug"
-      ],
+      "command": "cmake --preset gcc-debug && cmake --build --preset build-gcc-debug",
       "problemMatcher": [],
       "group": {
         "kind": "build",
@@ -32,38 +28,23 @@
       }
     },
     {
-      "label": "cmake: configure & build (clang-debug)2",
+      "label": "cmake: test (gcc-debug)",
       "type": "shell",
-      "command": "cmake",
-      "args": [
-        "--preset",
-        "clang-debug",
-        "-DCMAKE_CXX_FLAGS=-stdlib=libc++"
-      ],
+      "command": "ctest --preset test-gcc-debug",
       "problemMatcher": [],
       "group": {
-        "kind": "build",
+        "kind": "test",
         "isDefault": true
       },
       "presentation": {
         "reveal": "always",
         "panel": "shared"
-      },
-      "dependsOn": [
-        {
-          "label": "cmake: build (clang-debug)",
-          "type": "shell"
-        }
-      ]
+      }
     },
     {
-      "label": "cmake: build (clang-debug)",
+      "label": "cmake: build & test (gcc-asan)",
       "type": "shell",
-      "command": "cmake",
-      "args": [
-        "--build",
-        "build/linux/arch/clang/debug"
-      ],
+      "command": "cmake --preset gcc-asan && cmake --build --preset build-gcc-asan && ctest --preset test-gcc-asan",
       "problemMatcher": [],
       "presentation": {
         "reveal": "always",

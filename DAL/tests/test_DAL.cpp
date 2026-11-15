@@ -238,6 +238,37 @@ namespace
             return get_by_composite_id<DTO>(parts...).has_value();
         }
 
+        template<typename DTO, rfl::internal::StringLiteral ColLiteral, typename Val>
+        std::vector<DTO> fetch_where_equal(const Val& val) const
+        {
+            std::vector<DTO> result;
+            for (const auto& item : get_storage<DTO>())
+            {
+                if constexpr (std::is_same_v<DTO, DAL::Schema::PersonDTO> && ColLiteral.string_view() == "last_name")
+                {
+                    if (item.last_name == val)
+                    {
+                        result.push_back(item);
+                    }
+                }
+                else if constexpr (std::is_same_v<DTO, DAL::Schema::Person_SomethingDTO> && ColLiteral.string_view() == "person_id")
+                {
+                    if (item.person_id.value() == val)
+                    {
+                        result.push_back(item);
+                    }
+                }
+                else if constexpr (std::is_same_v<DTO, DAL::Schema::Person_SomethingDTO> && ColLiteral.string_view() == "something_id")
+                {
+                    if (item.something_id.value() == val)
+                    {
+                        result.push_back(item);
+                    }
+                }
+            }
+            return result;
+        }
+
         // Updated to return sqlgen::Result<sqlgen::Nothing> preserving error information
 
         template<typename DTO>
@@ -1824,7 +1855,7 @@ namespace
         auto bobLocal = db.users.find(2);
         ASSERT_TRUE(bobLocal.has_value());
         bobLocal->username = "bob_v2";
-        db.users.track(*bobLocal);
+        [[maybe_unused]] auto trackedBob = db.users.track_copy(*bobLocal);
 
         ASSERT_TRUE(db.save_changes().has_value());
 
@@ -3100,6 +3131,226 @@ namespace
 
         EXPECT_TRUE(db.execute_raw("CREATE INDEX IF NOT EXISTS idx_person_last ON Person (last_name);").has_value());
         EXPECT_FALSE(db.execute_raw("").has_value());
+    }
+
+    // =========================================================================
+    // Phase 39: Transactional Correctness, Strong-ID Safety & Lifecycle Hardening
+    // =========================================================================
+
+    TEST(Phase39HardeningTest, SaveChangesInsideOuterTransactionUsesSavepointAndDoesNotCommitOuter)
+    {
+        static_assert(!std::is_convertible_v<Core::PersonId, int>);
+        static_assert(!std::is_convertible_v<Core::PersonId, Core::SomethingId>);
+        static_assert(static_cast<int>(Core::PersonId{ 42 }) == 42);
+
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.begin_transaction().has_value());
+        db.defer_changes(true);
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Outer", "Person")).has_value());
+        ASSERT_TRUE(db.save_changes().has_value());
+
+        // Outer transaction must STILL be active!
+        EXPECT_TRUE(db.in_transaction());
+        EXPECT_EQ(db.people.count(), 1u);
+
+        // Rolling back outer transaction must undo the save_changes()-flushed row!
+        ASSERT_TRUE(db.rollback().has_value());
+        EXPECT_FALSE(db.in_transaction());
+        EXPECT_EQ(db.people.count(), 0u);
+    }
+
+    TEST(Phase39HardeningTest, TrackCopyAndAtomicUpdateAndClose)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        db.enable_change_tracking(true);
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Grace", "Hopper")).has_value());
+        auto tracked = db.people.track_copy(Core::Person(Core::PersonId{ 1 }, "Grace", "Hopper"));
+        ASSERT_NE(tracked, nullptr);
+        tracked->setLastName("Murray");
+        ASSERT_TRUE(db.save_changes().has_value());
+
+        auto loaded = db.people.find(1);
+        ASSERT_TRUE(loaded.has_value());
+        EXPECT_EQ(loaded->getLastName(), "Murray");
+
+        // Atomic update on non-existent row must fail
+        auto missingUpd = db.people.update(Core::Person(Core::PersonId{ 999 }, "No", "Body"));
+        EXPECT_FALSE(missingUpd.has_value());
+
+        conn->close();
+        EXPECT_FALSE(conn->is_open());
+    }
+
+    // =========================================================================
+    // Phase 40: Native SQLite Extended Codes & SQLiteConnectionOptions
+    // =========================================================================
+
+    TEST(Phase40ErrorCodesAndOptionsTest, ExtendedNativeCodesAndConnectionOptions)
+    {
+        DAL::SQLiteConnectionOptions opts{
+            .foreign_keys = true,
+            .busy_timeout = std::chrono::milliseconds{ 2500 },
+            .wal_mode = false
+        };
+        auto connRes = DAL::SQLiteConnection::connect(":memory:", opts);
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // Trigger foreign key violation and verify native_code is populated (SQLITE_CONSTRAINT_FOREIGNKEY = 787)
+        auto fkErr = db.personSomethings.add(
+            Core::Person_Something(Core::PersonId{ 100 }, Core::SomethingId{ 200 }, "BadFK"));
+        ASSERT_FALSE(fkErr.has_value());
+        EXPECT_EQ(fkErr.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_NE(fkErr.error().native_code, 0);
+    }
+
+    // =========================================================================
+    // Phase 41: Parameterized Dynamic Row Query API (query_rows / execute_prepared)
+    // =========================================================================
+
+    TEST(Phase41DynamicQueryTest, QueryRowsAndExecutePreparedWithAllCellTypes)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+
+        ASSERT_TRUE(db.execute_raw(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, price REAL, note TEXT, payload BLOB);").has_value());
+
+        const std::vector<std::byte> blobData{ std::byte{ 0xDE }, std::byte{ 0xAD }, std::byte{ 0xBE }, std::byte{ 0xEF } };
+        const std::array<DAL::DynamicCell, 5> insertParams{
+            std::int64_t{ 1 },
+            std::string{ "Widget" },
+            19.99,
+            std::monostate{},
+            blobData
+        };
+        ASSERT_TRUE(db.execute_prepared(
+            "INSERT INTO items (id, name, price, note, payload) VALUES (?, ?, ?, ?, ?);",
+            std::span<const DAL::DynamicCell>{ insertParams }).has_value());
+
+        const std::array<DAL::DynamicCell, 1> queryParams{ std::string{ "Widget" } };
+        auto res = db.query_rows(
+            "SELECT id, name, price, note, payload FROM items WHERE name = ?;",
+            std::span<const DAL::DynamicCell>{ queryParams });
+        ASSERT_TRUE(res.has_value()) << res.error().to_string();
+        ASSERT_EQ(res->columns.size(), 5u);
+        EXPECT_EQ(res->columns[1], "name");
+        ASSERT_EQ(res->rows.size(), 1u);
+
+        const auto& cells = res->rows[0].cells;
+        EXPECT_EQ(std::get<std::int64_t>(cells[0]), 1);
+        EXPECT_EQ(std::get<std::string>(cells[1]), "Widget");
+        EXPECT_DOUBLE_EQ(std::get<double>(cells[2]), 19.99);
+        EXPECT_TRUE(std::holds_alternative<std::monostate>(cells[3]));
+        EXPECT_EQ(std::get<std::vector<std::byte>>(cells[4]), blobData);
+    }
+
+    // =========================================================================
+    // Phase 42: P3394 Annotations, define_aggregate & Constructor Hydration
+    // =========================================================================
+
+    struct [[=DAL::Schema::table{ std::define_static_string("AnnotatedWidgets") }]] AnnotatedWidget
+    {
+        [[=DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        [[=DAL::Schema::column{ std::define_static_string("widget_title") }]] std::string title;
+        [[=DAL::Schema::unique{}]] std::string sku;
+    };
+
+    class InvariantProduct
+    {
+    public:
+        InvariantProduct() = default;
+        InvariantProduct(std::int32_t id, std::string sku, bool active)
+            : id_(id)
+            , sku_(std::move(sku))
+            , active_(active)
+            , hydratedViaConstructor_(true)
+        {
+        }
+
+        [[nodiscard]] std::int32_t getId() const noexcept { return id_; }
+        [[nodiscard]] const std::string& getSku() const noexcept { return sku_; }
+        [[nodiscard]] bool isActive() const noexcept { return active_; }
+        [[nodiscard]] bool wasHydratedViaConstructor() const noexcept { return hydratedViaConstructor_; }
+
+    private:
+        std::int32_t id_{ 0 };
+        std::string sku_;
+        bool active_{ false };
+        bool hydratedViaConstructor_{ false };
+    };
+
+    struct InvariantProductDTO
+    {
+        static constexpr auto tablename = "InvariantProduct";
+        sqlgen::PrimaryKey<std::int32_t, true> id{ 0 };
+        std::string sku;
+        bool active = false;
+    };
+
+    TEST(Phase42ReflectionModernizationTest, ConstructorHydrationAndAnnotatedDto)
+    {
+        // 1. P3096 std::meta::parameters_of constructor hydration
+        InvariantProductDTO dto{ .id = 5, .sku = "SKU-99", .active = true };
+        auto hydrated = DAL::Mappers::MapperTraits<InvariantProduct, InvariantProductDTO>::to_domain(dto);
+        EXPECT_EQ(hydrated.getId(), 5);
+        EXPECT_EQ(hydrated.getSku(), "SKU-99");
+        EXPECT_TRUE(hydrated.isActive());
+        EXPECT_TRUE(hydrated.wasHydratedViaConstructor());
+
+        // 2. P3394 [[=table]] + define_aggregate synthesized DTO
+        using SynthDTO = DAL::Schema::SchemaOf_t<AnnotatedWidget>;
+        static_assert(DAL::Schema::HasTableName<SynthDTO>);
+        static_assert(std::string_view(SynthDTO::tablename) == "AnnotatedWidgets");
+    }
+
+    TEST(Phase43ReopenForeignKeyTest, ReopeningExistingDbWithoutEnsureCreatedEnforcesForeignKeys)
+    {
+        const auto tempDir = std::filesystem::temp_directory_path();
+        const auto dbPath = (tempDir / "codefirst_phase43_fk_reopen.db").string();
+        std::filesystem::remove(dbPath);
+
+        {
+            auto connRes = DAL::SQLiteConnection::connect(dbPath);
+            ASSERT_TRUE(connRes.has_value());
+            auto& conn = *connRes.value();
+            ASSERT_TRUE(conn.execute_raw("CREATE TABLE Parent (id INTEGER PRIMARY KEY);").has_value());
+            ASSERT_TRUE(conn.execute_raw("CREATE TABLE Child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES Parent(id));").has_value());
+            ASSERT_TRUE(conn.execute_raw("INSERT INTO Parent (id) VALUES (1);").has_value());
+            conn.close();
+        }
+
+        {
+            // Reopen without calling ensure_created() or any schema DDL
+            auto reopenedRes = DAL::SQLiteConnection::connect(dbPath);
+            ASSERT_TRUE(reopenedRes.has_value());
+            auto& reopened = *reopenedRes.value();
+
+            auto fkRes = reopened.query_rows("PRAGMA foreign_keys;");
+            ASSERT_TRUE(fkRes.has_value());
+            ASSERT_EQ(fkRes->rows.size(), 1u);
+            ASSERT_EQ(std::get<std::int64_t>(fkRes->rows[0].cells[0]), 1);
+
+            // Inserting a child referencing a missing parent must fail with ConstraintViolation
+            auto badInsert = reopened.execute_raw("INSERT INTO Child (id, parent_id) VALUES (10, 999);");
+            ASSERT_FALSE(badInsert.has_value());
+            EXPECT_EQ(badInsert.error().code, Core::DbErrorCode::ConstraintViolation);
+
+            reopened.close();
+        }
+
+        std::filesystem::remove(dbPath);
     }
 
 } // namespace

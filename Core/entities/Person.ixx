@@ -2,6 +2,7 @@ export module samples:person;
 
 import std;
 import core;
+import :ids;
 
 export namespace Core
 {

@@ -295,18 +295,18 @@ Resolve the remaining data-integrity and lifetime bugs verified from [readme5.md
 
 #### Detailed Tasks
 
-- [ ] **Task 39.1: Fix `DbContextBase::save_changes()` Outer-Transaction Bug ([DAL/context/DbContext.ixx:878-929](DAL/context/DbContext.ixx#L878-L929))**
+- [x] **Task 39.1: Fix `DbContextBase::save_changes()` Outer-Transaction Bug ([DAL/context/DbContext.ixx:878-929](DAL/context/DbContext.ixx#L878-L929))**
   - Capture `const bool started_tx = !in_transaction();` at entry.
   - Only call `begin_transaction()` / `commit()` / `rollback()` when `started_tx` is `true`!
   - When `already_in_tx` (`!started_tx`) is `true` and `!pending_ops_.empty()`, flush inside an acquired `SAVEPOINT` (rolling back only to the savepoint on failure and leaving the caller's outer `TransactionScope` / `begin_transaction()` intact).
   - Add regression tests proving `db.save_changes()` inside `TransactionScope` and `begin_transaction()` flushes staged ops without committing the outer transaction.
 
-- [ ] **Task 39.2: Fix `Startup --no-reset` Identity Handling & Enforce Explicit Strong IDs ([Startup/main.cpp](Startup/main.cpp), [Core/Id.ixx:28-33](Core/Id.ixx#L28-L33))**
+- [x] **Task 39.2: Fix `Startup --no-reset` Identity Handling & Enforce Explicit Strong IDs ([Startup/main.cpp](Startup/main.cpp), [Core/Id.ixx:28-33](Core/Id.ixx#L28-L33))**
   - Make `Core::Id<Tag, ValueType>::operator const ValueType&()` **`explicit`** so cross-entity comparisons/arithmetic like `PersonId{1} == SomethingId{1}` fail to compile; update `MapperTraits::to_dto` and `SchemaTraits` unwrapping (`unwrap_id`) to extract `.get()` explicitly.
   - Update [Startup/main.cpp](Startup/main.cpp#L69-L91) to check table count (`if (db.people.count() == 0)`) or query existing rows on `--no-reset`, persist via `add_returning`, link `Person_Something` using returned keys, and check every `std::expected` result instead of casting to `(void)`.
   - Add compile-time / documented clarity on identity strategy (`AutoIncrement` vs `AppAssigned` when `Domain::Key` or explicit non-zero PKs are mapped into `PrimaryKey<T, true>`).
 
-- [ ] **Task 39.3: Harden Pointer Captures, Tracker Eviction & Atomic `update()` / `close()` ([DAL/context/DbSet.ixx](DAL/context/DbSet.ixx), [DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx))**
+- [x] **Task 39.3: Harden Pointer Captures, Tracker Eviction & Atomic `update()` / `close()` ([DAL/context/DbSet.ixx](DAL/context/DbSet.ixx), [DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx))**
   - Replace `[this]` captures in `stage_upsert`, `stage_upsert_range`, and `DbSet::query()`'s `track_cb` (`DbSet.ixx:1641, 1653, 1834`) with value-captured `conn_`, `repo_`, or `std::weak_ptr` / shared tracker state so dangling `DbQuery` or staged closures cannot trigger UB.
   - Deprecate raw-pointer `DbSet::track(Domain&)` in favor of value-owned `track_copy(Domain)` / `find_tracked()` (`std::shared_ptr<Domain>`).
   - Replace the TOCTOU pre-`SELECT` in `SQLiteConnection::update()` (`SQLiteConnection.ixx:494-525`) with direct `UPDATE` + `sqlite3_changes()` zero-row check, and release/close the underlying `conn_` handle safely in `SQLiteConnection::close()` (`SQLiteConnection.ixx:38-57`).
@@ -320,11 +320,11 @@ Eliminate silent error swallowing, replace string-matching error heuristics with
 
 #### Detailed Tasks
 
-- [ ] **Task 40.1: Structured Native Error Codes & Debug Stacktraces ([Core/repositories/DbError.ixx](Core/repositories/DbError.ixx), [DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx))**
+- [x] **Task 40.1: Structured Native Error Codes & Debug Stacktraces ([Core/repositories/DbError.ixx](Core/repositories/DbError.ixx), [DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx))**
   - Add `int native_code{ 0 };` (and optional Debug `std::stacktrace` capture on GCC 16+) to `Core::DbError`.
   - Add a SQLite error-mapping helper inside `DAL:sqlite_connection` inspecting `sqlite3_extended_errcode(...)` (`SQLITE_CONSTRAINT_UNIQUE`, `SQLITE_CONSTRAINT_PRIMARYKEY`, `SQLITE_CONSTRAINT_FOREIGNKEY`, `SQLITE_BUSY`, `SQLITE_CANTOPEN`) before falling back to `DbError::map_from_message()`.
 
-- [ ] **Task 40.2: Consistent `[[nodiscard]]`, Connection Options & Legacy Cleanup**
+- [x] **Task 40.2: Consistent `[[nodiscard]]`, Connection Options & Legacy Cleanup**
   - Add `[[nodiscard]]` on every `std::expected`-returning mutator and DDL/exec method (`add`, `add_range`, `update`, `remove`, `upsert`, `stage_*`, `save_changes`, `commit`, `rollback`, `ensure_created`, `ensure_deleted`, `execute_raw`, `update_where`, `remove_where`).
   - Add `SQLiteConnectionOptions` (`bool foreign_keys = true; std::chrono::milliseconds busy_timeout{ 0 }; bool wal_mode = false;`) overload on `SQLiteConnection::connect(dbPath, options)`.
   - Document the error contract cleanly: **`try_*` monadic methods are the primary supported API**; mark silent-fallback convenience wrappers (`fetch_all`, `get_by_id`, `any()`, `count()`) clearly or provide an opt-in throwing/checked boundary, and prune the dead mock `.query().where().execute()` fallback branch in `Samples`.
@@ -338,14 +338,14 @@ Resolve every remaining downstream consumer friction point identified by Project
 
 #### Detailed Tasks
 
-- [ ] **Task 41.1: Complete Sample Decoupling, Prefix Internal Targets & Clean Up CMake Side Effects ([CMakeLists.txt](CMakeLists.txt), [Core/](Core/), [DAL/](DAL/), [Samples/](Samples/))**
+- [x] **Task 41.1: Complete Sample Decoupling, Prefix Internal Targets & Clean Up CMake Side Effects ([CMakeLists.txt](CMakeLists.txt), [Core/](Core/), [DAL/](DAL/), [Samples/](Samples/))**
   - Move `PersonId` and `SomethingId` out of [Core/Id.ixx:41-42](Core/Id.ixx#L41-L42) into `Samples` (`Samples/samples.ixx` / `SampleIds.ixx`), and optionally relocate the physical sample `.ixx` files (`Core/entities/`, `DAL/schema/*DTO.ixx`, `I*Repository.ixx`, `SQLite*Repo.ixx`) under `Samples/` so `Core/` and `DAL/` contain zero sample files on disk.
   - Rename internal CMake targets from `Core` / `DAL` / `Samples` to `CodeFirstCppDB_Core`, `CodeFirstCppDB_DAL`, and `CodeFirstCppDB_Samples` (keeping `CodeFirstCppDB::Core`, `CodeFirstCppDB::DAL`, `CodeFirstCppDB::Samples` aliases and clean `OUTPUT_NAME`).
   - Change `-Wno-expose-global-module-tu-local` and `-Wno-deprecated-literal-operator` in [DAL/CMakeLists.txt:26-30](DAL/CMakeLists.txt#L26-L30) from `PUBLIC` to **`PRIVATE`** (gated by `$<$<CXX_COMPILER_ID:GNU>:...>`), and change `-freflection` in [Core/CMakeLists.txt:15](Core/CMakeLists.txt#L15) to `$<$<CXX_COMPILER_ID:GNU>:-freflection>`.
   - Guard `reflectcppConfig.cmake` / `SQLite3Config.cmake` writes and `SQLGEN_*` cache overrides inside `if(NOT TARGET sqlgen)` / `if(PROJECT_IS_TOP_LEVEL)` in [CMakeLists.txt:25-52](CMakeLists.txt#L25-L52).
   - Deduplicate `DbContextBase::topological_dbset_order` (`DbContext.ixx:133-168`) and `Schema::topological_dto_order` (`SchemaTraits.ixx:400-423`) into one shared compile-time helper.
 
-- [ ] **Task 41.2: Pure-Module Dynamic Row Reader (`query_rows()`) ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx), [DAL/context/DbContext.ixx](DAL/context/DbContext.ixx))**
+- [x] **Task 41.2: Pure-Module Dynamic Row Reader (`query_rows()`) ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx), [DAL/context/DbContext.ixx](DAL/context/DbContext.ixx))**
   - Export dynamic value/row structs from `dal:sqlite_connection` and forward through `DbContextBase`:
     ```cpp
     using DynamicCell = std::variant<
@@ -368,7 +368,7 @@ Resolve every remaining downstream consumer friction point identified by Project
     ```
   - Add `[[nodiscard]] std::expected<DynamicQueryResult, Core::DbError> query_rows(std::string_view sql, std::span<const DynamicCell> params = {}) const` (plus parameterized `execute_prepared(std::string_view sql, std::span<const DynamicCell> params)`) using `sqlite3_prepare_v2` + `sqlite3_bind_*` / `sqlite3_column_*` strictly inside the GMF-backed implementation unit so arbitrary-table UI explorers need zero `<sqlite3.h>` includes and stay SQL-injection safe!
 
-- [ ] **Task 41.3: Add CMake `install()` & `CodeFirstCppDBConfig.cmake` Packaging**
+- [x] **Task 41.3: Add CMake `install()` & `CodeFirstCppDBConfig.cmake` Packaging**
   - Add `CMakePackageConfigHelpers` + `install(TARGETS CodeFirstCppDB_Core CodeFirstCppDB_DAL EXPORT CodeFirstCppDBTargets FILE_SET CXX_MODULES DESTINATION ...)` + `CodeFirstCppDBConfig.cmake` / `CodeFirstCppDBConfigVersion.cmake` guarded by `CODEFIRST_INSTALL` so external consumers can adopt via `find_package(CodeFirstCppDB CONFIG)` once toolchain module export settles.
 
 ---
@@ -380,7 +380,7 @@ Leverage the full power of **ISO C++26 on GCC 16.2+** (validated in [readme5.md]
 
 #### Detailed Tasks
 
-- [ ] **Task 42.1: Optional Single-Class Entities via P3394 Annotations (`[[=...]]`) & `std::meta::define_aggregate` (`DAL/schema/`)**
+- [x] **Task 42.1: Optional Single-Class Entities via P3394 Annotations (`[[=...]]`) & `std::meta::define_aggregate` (`DAL/schema/`)**
   - Introduce lightweight `DAL::Schema` / `Core` annotation tags using structural literals (`std::define_static_string`):
     ```cpp
     struct table       { const char* name; };
@@ -392,14 +392,14 @@ Leverage the full power of **ISO C++26 on GCC 16.2+** (validated in [readme5.md]
   - When a `Domain` type carries `[[=table("...")]]` (`std::meta::annotations_of_with_type`), automatically synthesize the matching `sqlgen` DTO via `std::meta::define_aggregate`—so authors using annotations need **one class and zero separate DTO**!
   - Keep existing pure aggregate structs (`PersonRecord` with `m_` fields + zero DB headers) + `SchemaOf<Domain>` working unchanged! *(Per [readme5.md](readme5.md), do not gate P3394 annotations behind `#ifdef __cpp_annotations` on GCC 16.2.)*
 
-- [ ] **Task 42.2: Exact Reflection Wrapper Checks, Constructor Hydration & C++26 Idiom Cleanups**
+- [x] **Task 42.2: Exact Reflection Wrapper Checks, Constructor Hydration & C++26 Idiom Cleanups**
   - **Exact wrapper detection ([DAL/schema/SchemaTraits.ixx](DAL/schema/SchemaTraits.ixx)):** Replace duck-typed `SqlgenPrimaryKeyField` / `SqlgenForeignKeyField` with exact `std::meta::has_template_arguments(t) && std::meta::template_of(t) == ^^sqlgen::PrimaryKey` / `^^sqlgen::ForeignKey`.
   - **Constructor hydration (`std::meta::parameters_of`, P3096) in [DAL/mappers/MapperTraits.ixx](DAL/mappers/MapperTraits.ixx):** When a `Domain` class exposes a constructor whose parameter names/types match its schema fields, construct it directly through that constructor in `to_domain()` so class invariants always execute on load (falling back to aggregate initialization / `access_context::unchecked()` when no matching constructor exists).
   - **Reflection & C++26/23 cleanups:**
     - Guard `name.size() > 2` in `MapperTraits::strip_member_affixes()` (`MapperTraits.ixx:26`).
     - Centralize repeated `std::define_static_array(nonstatic_data_members_of(...))` into one `Schema::members_v<T>` variable template, replace `col_literal_of` char loop with `std::define_static_string`, replace `std::apply` with C++26 **structured-binding packs** (`const auto& [...parts] = id.tuple();`), replace `infer_key_type_helper` index dance with **pack indexing** (`Ts...[I]`), use `= delete("...")` reasons on non-copyable context/scope types, adopt `std::move_only_function` for `pending_ops_` and `std::ranges::to<std::vector>()`, and add `find_tracked_ref()` returning `std::optional<Domain&>`.
 
-- [ ] **Task 42.3: Opt-In C++26 Contracts (`-fcontracts`, P2900)**
+- [x] **Task 42.3: Opt-In C++26 Contracts (`-fcontracts`, P2900)**
   - Add `option(CODEFIRST_ENABLE_CONTRACTS "Enable C++26 pre/post contracts on invariant checks" OFF)` for `pre(limit > 0)` on `DbQuery::page()`, open-handle contracts, and `TransactionScope` state checks—strictly for programmer logic errors, keeping `std::expected<T, Core::DbError>` for all runtime/database errors.
 
 ---
@@ -411,12 +411,12 @@ Bring presets, compiler warnings, sanitizers, formatting, test organization, CI,
 
 #### Detailed Tasks
 
-- [ ] **Task 43.1: Fix Presets, Tasks, Strict Warnings & Format Consistency ([CMakePresets.json](CMakePresets.json), [.vscode/tasks.json](.vscode/tasks.json), [Core/repositories/DbError.ixx](Core/repositories/DbError.ixx))**
+- [x] **Task 43.1: Fix Presets, Tasks, Strict Warnings & Format Consistency ([CMakePresets.json](CMakePresets.json), [.vscode/tasks.json](.vscode/tasks.json), [Core/repositories/DbError.ixx](Core/repositories/DbError.ixx))**
   - Update [CMakePresets.json](CMakePresets.json) and [.vscode/tasks.json](.vscode/tasks.json) so `gcc-debug` is the default build task, remove or clearly mark unsupported Clang presets (since `<meta>` requires GCC 16+), add a `gcc-asan` preset (`-fsanitize=address,undefined -D_GLIBCXX_ASSERTIONS`), and add `testPresets` with `gtest_discover_tests`.
   - Enable strict **`PRIVATE`** warnings (`-Wall -Wextra -Wpedantic -Wshadow`) on `Core`, `DAL`, `Samples`, and `Startup` while marking `extern/` headers `SYSTEM`.
   - Convert [Core/repositories/DbError.ixx](Core/repositories/DbError.ixx) from K&R braces to Allman braces per [CODING_STANDARDS.md](CODING_STANDARDS.md).
 
-- [ ] **Task 43.2: Modularize `test_DAL`, Expand Coverage, Add `README.md` & GCC 16 CI**
+- [x] **Task 43.2: Modularize `test_DAL`, Expand Coverage, Add `README.md` & GCC 16 CI**
   - Split `DAL/tests/test_DAL.cpp` (currently 3,105 lines) into focused feature test suites (`test_keys_and_mapper.cpp`, `test_query_pushdown.cpp`, `test_uow_and_transactions.cpp`, `test_introspection_and_schema.cpp`) running behavioral tests primarily against real `:memory:` / temp-file SQLite databases (reserving `TestDatabaseConnection` mocks for failure injection).
   - Add missing Phase 37 tests: `Person_Something` composite `.upsert()` verifying single-row replacement, and reopening an existing on-disk DB file via `SQLiteConnection::connect()` without calling `ensure_created()` to verify connection-level FK enforcement.
   - Add a concise user-facing root `README.md` (GCC 16.1+ requirement, 20-line quick start, `FetchContent` guide, identity strategy guide, and explicit non-thread-safe `DbContext` documentation) plus a GitHub Actions GCC 16 workflow running `gcc-debug`, `gcc-asan`, and `ctest`.

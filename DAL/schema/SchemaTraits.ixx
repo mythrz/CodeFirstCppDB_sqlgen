@@ -2,6 +2,7 @@ module;
 #include <meta>
 #include <sqlgen/PrimaryKey.hpp>
 #include <sqlgen/ForeignKey.hpp>
+#include <sqlgen/Unique.hpp>
 #include <sqlgen/col.hpp>
 
 export module dal:schema_traits;
@@ -11,27 +12,39 @@ import core;
 
 export namespace DAL::Schema
 {
+    // P3394 C++26 Annotation tags for optional single-class entities (Phase 42)
+    struct table       { const char* name; };
+    struct column      { const char* name; };
+    struct primary_key { bool auto_increment = false; };
+    struct unique      {};
+    template<typename Parent> struct references { const char* col = "id"; };
+
+    template<typename T>
+    inline constexpr auto members_v = std::define_static_array(
+        std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::current()));
+
     template<typename T>
     concept HasTableName = requires {
         { T::tablename } -> std::convertible_to<std::string_view>;
     };
 
-    // Detects sqlgen::PrimaryKey<V, auto_incr> fields via static reflection
+    // Detects sqlgen::PrimaryKey<V, auto_incr> fields (exact type match)
     template<typename F>
-    concept SqlgenPrimaryKeyField = requires(const F& f) {
-        typename F::ReflectionType;
-        { F::auto_incr } -> std::convertible_to<bool>;
-        { f.value() };
-    };
+    inline constexpr bool is_sqlgen_primary_key_v = false;
+    template<typename T, bool AutoIncr>
+    inline constexpr bool is_sqlgen_primary_key_v<sqlgen::PrimaryKey<T, AutoIncr>> = true;
 
-    // Detects sqlgen::ForeignKey<V, Table, Col> fields via static reflection
     template<typename F>
-    concept SqlgenForeignKeyField = requires(const F& f) {
-        typename F::ReflectionType;
-        typename F::ForeignTableType;
-        typename F::ColumnType;
-        { f.value() };
-    };
+    concept SqlgenPrimaryKeyField = is_sqlgen_primary_key_v<std::remove_cvref_t<F>>;
+
+    // Detects sqlgen::ForeignKey<V, Table, Col> fields (exact type match)
+    template<typename F>
+    inline constexpr bool is_sqlgen_foreign_key_v = false;
+    template<typename T, typename ForeignTableType, rfl::internal::StringLiteral ColName>
+    inline constexpr bool is_sqlgen_foreign_key_v<sqlgen::ForeignKey<T, ForeignTableType, ColName>> = true;
+
+    template<typename F>
+    concept SqlgenForeignKeyField = is_sqlgen_foreign_key_v<std::remove_cvref_t<F>>;
 
     template<typename T>
     consteval std::size_t primary_key_count()
@@ -84,11 +97,118 @@ export namespace DAL::Schema
     concept RelationalEntity = HasTableName<T> && (SinglePrimaryKey<T> || CompositePrimaryKey<T>);
 
     // Trait mapping a Domain entity type to its persistence DTO schema type.
-    // Defaults to Domain itself (for self-describing DTOs); specialize for Domain/DTO pairs.
+    // Supports optional P3394 [[=table{"..."}]] single-class entities via define_aggregate,
+    // explicit SchemaOf<Domain> specializations, or zero-DTO aggregates (Domain == DTO).
+    template<typename T>
+    consteval bool has_table_annotation()
+    {
+        return !std::meta::annotations_of_with_type(^^T, ^^table).empty();
+    }
+
+    template<typename T>
+        requires (has_table_annotation<T>())
+    consteval std::string_view annotated_table_name()
+    {
+        auto anns = std::meta::annotations_of_with_type(^^T, ^^table);
+        return std::meta::extract<table>(anns[0]).name;
+    }
+
+    template<typename Domain>
+    struct AnnotatedDtoFields;
+
+    template<typename T>
+    using AnnotatedPkAuto = sqlgen::PrimaryKey<T, true>;
+    template<typename T>
+    using AnnotatedPkManual = sqlgen::PrimaryKey<T, false>;
+
+    template<typename Domain>
+        requires (has_table_annotation<Domain>())
+    consteval void synthesize_annotated_dto_fields(std::meta::info target_fields_struct)
+    {
+        constexpr auto dom_members = std::define_static_array(
+            std::meta::nonstatic_data_members_of(^^Domain, std::meta::access_context::unchecked()));
+        std::vector<std::meta::info> specs;
+        specs.reserve(dom_members.size());
+
+        for (auto m : dom_members)
+        {
+            auto field_type = std::meta::remove_cvref(std::meta::type_of(m));
+            std::meta::info target_type = field_type;
+
+            auto pk_anns = std::meta::annotations_of_with_type(m, ^^primary_key);
+            auto uniq_anns = std::meta::annotations_of_with_type(m, ^^unique);
+            if (!pk_anns.empty())
+            {
+                auto pk = std::meta::extract<primary_key>(pk_anns[0]);
+                target_type = std::meta::substitute(
+                    pk.auto_increment ? ^^AnnotatedPkAuto : ^^AnnotatedPkManual,
+                    { field_type });
+            }
+            else if (!uniq_anns.empty())
+            {
+                target_type = std::meta::substitute(^^sqlgen::Unique, { field_type });
+            }
+
+            std::string_view col_name = std::meta::identifier_of(m);
+            auto col_anns = std::meta::annotations_of_with_type(m, ^^column);
+            if (!col_anns.empty())
+            {
+                col_name = std::meta::extract<column>(col_anns[0]).name;
+            }
+            else
+            {
+                if (col_name.size() > 2 && (col_name.starts_with("m_") || col_name.starts_with("M_")))
+                {
+                    col_name.remove_prefix(2);
+                }
+                if (col_name.ends_with("_") && col_name.size() > 1)
+                {
+                    col_name.remove_suffix(1);
+                }
+            }
+
+            std::string safe_col_name;
+            safe_col_name.reserve(col_name.size());
+            for (char ch : col_name)
+            {
+                safe_col_name.push_back(ch);
+            }
+
+            specs.push_back(std::meta::data_member_spec(target_type, { .name = std::move(safe_col_name) }));
+        }
+
+        std::meta::define_aggregate(target_fields_struct, specs);
+    }
+
+    template<typename Domain>
+        requires (has_table_annotation<Domain>())
+    struct AnnotatedDtoHolder
+    {
+        struct Fields;
+        consteval
+        {
+            synthesize_annotated_dto_fields<Domain>(^^Fields);
+        }
+    };
+
+    template<typename Domain>
+        requires (has_table_annotation<Domain>())
+    struct AnnotatedDto : public AnnotatedDtoHolder<Domain>::Fields
+    {
+        static constexpr auto tablename = std::define_static_string(annotated_table_name<Domain>());
+    };
+
     template<typename Domain>
     struct SchemaOf
     {
         using type = Domain;
+    };
+
+    template<typename Domain>
+        requires (has_table_annotation<Domain>())
+    struct SchemaOf<Domain>
+    {
+        using type = AnnotatedDto<Domain>;
     };
 
     template<typename Domain>
