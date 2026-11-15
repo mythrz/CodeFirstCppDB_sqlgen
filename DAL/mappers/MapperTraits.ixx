@@ -1,5 +1,6 @@
 module;
 #include <meta>
+#include <rfl/internal/StringLiteral.hpp>
 
 export module dal:mappers;
 
@@ -255,5 +256,87 @@ export namespace DAL::Mappers
         { MapperTraits<Domain, DTO>::to_domain(dto) } -> std::same_as<Domain>;
         { MapperTraits<Domain, DTO>::to_dto(domain) } -> std::same_as<DTO>;
     };
+
+    // =========================================================================
+    // Phase 16: Compile-Time Domain-to-DTO Column Resolution & Validation
+    // =========================================================================
+
+    template<typename Domain, typename DTO, rfl::internal::StringLiteral ColOrField>
+    consteval bool is_valid_query_column()
+    {
+        constexpr std::string_view name = ColOrField.string_view();
+        constexpr auto dto_ctx = std::meta::access_context::current();
+        constexpr auto dto_members = std::define_static_array(
+            std::meta::nonstatic_data_members_of(^^DTO, dto_ctx));
+
+        for (auto m : dto_members)
+        {
+            if (std::meta::identifier_of(m) == name)
+            {
+                return true;
+            }
+        }
+
+        if constexpr (!std::is_same_v<Domain, DTO>)
+        {
+            constexpr auto dom_ctx = std::meta::access_context::unchecked();
+            constexpr auto dom_members = std::define_static_array(
+                std::meta::nonstatic_data_members_of(^^Domain, dom_ctx));
+            for (auto dm : dom_members)
+            {
+                std::string_view d_name = std::meta::identifier_of(dm);
+                if (d_name == name ||
+                    (d_name.size() == name.size() + 1 && d_name.starts_with(name) && d_name.ends_with("_")))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    template<typename Domain, typename DTO, rfl::internal::StringLiteral ColOrField>
+    concept ValidQueryColumn = is_valid_query_column<Domain, DTO, ColOrField>();
+
+    template<typename Domain, typename DTO, rfl::internal::StringLiteral ColOrField>
+        requires ValidQueryColumn<Domain, DTO, ColOrField>
+    consteval std::meta::info resolve_dto_member()
+    {
+        constexpr std::string_view name = ColOrField.string_view();
+        constexpr auto dto_ctx = std::meta::access_context::current();
+        static constexpr auto dto_members = std::define_static_array(
+            std::meta::nonstatic_data_members_of(^^DTO, dto_ctx));
+
+        for (auto m : dto_members)
+        {
+            if (std::meta::identifier_of(m) == name)
+            {
+                return m;
+            }
+        }
+
+        if constexpr (!std::is_same_v<Domain, DTO>)
+        {
+            constexpr auto dom_ctx = std::meta::access_context::unchecked();
+            static constexpr auto dom_members = std::define_static_array(
+                std::meta::nonstatic_data_members_of(^^Domain, dom_ctx));
+            for (auto dm : dom_members)
+            {
+                std::string_view d_name = std::meta::identifier_of(dm);
+                if (d_name == name ||
+                    (d_name.size() == name.size() + 1 && d_name.starts_with(name) && d_name.ends_with("_")))
+                {
+                    for (auto dto_m : dto_members)
+                    {
+                        if (detail::find_matching_domain_member(dto_m, dom_members) == dm)
+                        {
+                            return dto_m;
+                        }
+                    }
+                }
+            }
+        }
+        throw std::invalid_argument("Invalid query column or domain field name");
+    }
 
 } // namespace DAL::Mappers

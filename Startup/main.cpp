@@ -111,14 +111,24 @@ int main(int argc, char* argv[])
                      link.getPersonId(), link.getSomethingId(), link.getAssociationType());
     }
 
-    // 4. Demonstrate LINQ-style query
-    auto devItems = db.somethings.where([](const Core::Something& item) {
-        return item.getCategory() == "Electronics";
-    });
+    // 4. Demonstrate server-side DbQuery filtering & compile-time FK navigation
+    auto devItems = db.somethings
+        .where_equal<"category">("Electronics")
+        .to_vector();
     std::println("\nQuery: Found {} Electronics item(s):", devItems.size());
     for (const auto& item : devItems)
     {
         std::println(" -> {}", item.getName());
+    }
+
+    auto ownedByPerson1 = db.query_many_to_many<Core::Something, Core::Person_Something>(person1);
+    if (ownedByPerson1)
+    {
+        std::println("\nFK Navigation: Person 1 owns {} item(s):", ownedByPerson1->size());
+        for (const auto& item : *ownedByPerson1)
+        {
+            std::println(" -> {}", item.getName());
+        }
     }
 
     std::println("\nDatabase successfully saved to: {}", std::filesystem::absolute(dbPath).string());

@@ -51,6 +51,7 @@ export namespace DAL
     public:
         using RepoType = Repositories::GenericRepository<Domain, DTO, ConnectionHandle, KeyType>;
         using TrackFn = std::function<void(const Domain&)>;
+        using ClearTrackFn = std::function<void()>;
 
         DbQuery(std::shared_ptr<RepoType> repo,
                 std::shared_ptr<ConnectionHandle> conn,
@@ -58,7 +59,8 @@ export namespace DAL
                 OrderByT order_by = {},
                 std::optional<std::size_t> limit = std::nullopt,
                 std::optional<std::size_t> offset = std::nullopt,
-                TrackFn track_fn = {})
+                TrackFn track_fn = {},
+                ClearTrackFn clear_track_fn = {})
             : repo_(std::move(repo))
             , conn_(std::move(conn))
             , where_cond_(std::move(where_cond))
@@ -66,6 +68,7 @@ export namespace DAL
             , limit_(limit)
             , offset_(offset)
             , track_fn_(std::move(track_fn))
+            , clear_track_fn_(std::move(clear_track_fn))
         {
         }
 
@@ -75,14 +78,14 @@ export namespace DAL
             if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
             {
                 return DbQuery<Domain, DTO, ConnectionHandle, KeyType, Condition, OrderByT>(
-                    repo_, conn_, std::move(cond), order_by_, limit_, offset_, track_fn_);
+                    repo_, conn_, std::move(cond), order_by_, limit_, offset_, track_fn_, clear_track_fn_);
             }
             else
             {
                 auto combined = where_cond_ && std::move(cond);
                 using CombinedT = decltype(combined);
                 return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
-                    repo_, conn_, std::move(combined), order_by_, limit_, offset_, track_fn_);
+                    repo_, conn_, std::move(combined), order_by_, limit_, offset_, track_fn_, clear_track_fn_);
             }
         }
 
@@ -98,89 +101,123 @@ export namespace DAL
                 auto combined = where_cond_ || std::move(cond);
                 using CombinedT = decltype(combined);
                 return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
-                    repo_, conn_, std::move(combined), order_by_, limit_, offset_, track_fn_);
+                    repo_, conn_, std::move(combined), order_by_, limit_, offset_, track_fn_, clear_track_fn_);
             }
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_equal(const Val& val) const
         {
-            return where_sql(sqlgen::Col<ColLiteral>{} == detail::normalize_query_val(val));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(Schema::col_of<dto_m> == detail::normalize_query_val(val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto or_where_equal(const Val& val) const
         {
-            return or_where_sql(sqlgen::Col<ColLiteral>{} == detail::normalize_query_val(val));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(Schema::col_of<dto_m> == detail::normalize_query_val(val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_not_equal(const Val& val) const
         {
-            return where_sql(sqlgen::Col<ColLiteral>{} != detail::normalize_query_val(val));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(Schema::col_of<dto_m> != detail::normalize_query_val(val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_lt(const Val& val) const
         {
-            return where_sql(sqlgen::Col<ColLiteral>{} < detail::normalize_query_val(val));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(Schema::col_of<dto_m> < detail::normalize_query_val(val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_le(const Val& val) const
         {
-            return where_sql(sqlgen::Col<ColLiteral>{} <= detail::normalize_query_val(val));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(Schema::col_of<dto_m> <= detail::normalize_query_val(val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_gt(const Val& val) const
         {
-            return where_sql(sqlgen::Col<ColLiteral>{} > detail::normalize_query_val(val));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(Schema::col_of<dto_m> > detail::normalize_query_val(val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_ge(const Val& val) const
         {
-            return where_sql(sqlgen::Col<ColLiteral>{} >= detail::normalize_query_val(val));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(Schema::col_of<dto_m> >= detail::normalize_query_val(val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_like(std::string_view pattern) const
         {
-            return where_sql(sqlgen::Col<ColLiteral>{}.like(std::string(pattern)));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(Schema::col_of<dto_m>.like(std::string(pattern)));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
-            requires (sizeof...(Ts) > 0)
+            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_in(const Ts&... vals) const
         {
-            return where_sql(sqlgen::Col<ColLiteral>{}.in(detail::normalize_query_val(vals)...));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(Schema::col_of<dto_m>.in(detail::normalize_query_val(vals)...));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_in_vec(const std::vector<Val>& vals) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using NormalizedT = std::remove_cvref_t<decltype(detail::normalize_query_val(std::declval<const Val&>()))>;
+            std::vector<NormalizedT> normalized;
+            normalized.reserve(vals.size());
+            for (const auto& v : vals)
+            {
+                normalized.push_back(detail::normalize_query_val(v));
+            }
+            return where_sql(Schema::col_of<dto_m>.in(normalized));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto order_by(bool desc = false) const
         {
-            using AscT = decltype(sqlgen::order_by(sqlgen::Col<ColLiteral>{}));
-            using DescT = decltype(sqlgen::order_by(sqlgen::Col<ColLiteral>{}.desc()));
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using AscT = decltype(sqlgen::order_by(Schema::col_of<dto_m>));
+            using DescT = decltype(sqlgen::order_by(Schema::col_of<dto_m>.desc()));
             using VarT = std::variant<AscT, DescT>;
             VarT ob = desc ? VarT{ DescT{} } : VarT{ AscT{} };
             return DbQuery<Domain, DTO, ConnectionHandle, KeyType, WhereCondT, VarT>(
-                repo_, conn_, where_cond_, std::move(ob), limit_, offset_, track_fn_);
+                repo_, conn_, where_cond_, std::move(ob), limit_, offset_, track_fn_, clear_track_fn_);
         }
 
         [[nodiscard]] DbQuery limit(std::size_t limit_count) const
         {
-            return DbQuery(repo_, conn_, where_cond_, order_by_, limit_count, offset_, track_fn_);
+            return DbQuery(repo_, conn_, where_cond_, order_by_, limit_count, offset_, track_fn_, clear_track_fn_);
         }
 
         [[nodiscard]] DbQuery offset(std::size_t offset_count) const
         {
-            return DbQuery(repo_, conn_, where_cond_, order_by_, limit_, offset_count, track_fn_);
+            return DbQuery(repo_, conn_, where_cond_, order_by_, limit_, offset_count, track_fn_, clear_track_fn_);
         }
 
         [[nodiscard]] DbQuery page(std::size_t limit_count, std::size_t offset_count = 0) const
         {
-            return DbQuery(repo_, conn_, where_cond_, order_by_, limit_count, offset_count, track_fn_);
+            return DbQuery(repo_, conn_, where_cond_, order_by_, limit_count, offset_count, track_fn_, clear_track_fn_);
         }
 
         [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> try_to_vector() const
@@ -303,7 +340,12 @@ export namespace DAL
                 c.template delete_where<DTO>(where_cond_);
             })
             {
-                return conn_->template delete_where<DTO>(where_cond_);
+                auto del_res = conn_->template delete_where<DTO>(where_cond_);
+                if (del_res && clear_track_fn_)
+                {
+                    clear_track_fn_();
+                }
+                return del_res;
             }
             else
             {
@@ -320,6 +362,10 @@ export namespace DAL
                     {
                         return del_res;
                     }
+                }
+                if (clear_track_fn_)
+                {
+                    clear_track_fn_();
                 }
                 return {};
             }
@@ -386,6 +432,7 @@ export namespace DAL
         std::optional<std::size_t> limit_{};
         std::optional<std::size_t> offset_{};
         TrackFn track_fn_{};
+        ClearTrackFn clear_track_fn_{};
     };
     // DbSet<Domain, DTO, ConnectionHandle, KeyType> provides an Entity Framework-style strongly-typed
     // entity set abstraction over a relational table, eliminating manual repository wiring.
@@ -447,6 +494,9 @@ export namespace DAL
                 };
                 untrack_fn_ = [ctx](std::type_index type, const std::string& key_repr) {
                     ctx->untrack_key(type, key_repr);
+                };
+                untrack_type_fn_ = [ctx](std::type_index type) {
+                    ctx->untrack_type(type);
                 };
                 find_tracked_fn_ = [ctx](std::type_index type, const std::string& key_repr) {
                     return ctx->find_tracked_instance(type, key_repr);
@@ -789,12 +839,17 @@ export namespace DAL
         [[nodiscard]] auto query() const
         {
             std::function<void(const Domain&)> track_cb{};
+            std::function<void()> clear_cb{};
             if (is_tracking_enabled())
             {
                 track_cb = [this](const Domain& entity) { record_snapshot(entity); };
+                if (untrack_type_fn_)
+                {
+                    clear_cb = [fn = untrack_type_fn_]() { fn(std::type_index(typeid(Domain))); };
+                }
             }
             return DbQuery<Domain, DTO, ConnectionHandle, KeyType>(
-                repo_, conn_, rfl::Nothing{}, rfl::Nothing{}, std::nullopt, std::nullopt, std::move(track_cb));
+                repo_, conn_, rfl::Nothing{}, rfl::Nothing{}, std::nullopt, std::nullopt, std::move(track_cb), std::move(clear_cb));
         }
 
         template<typename Condition>
@@ -804,55 +859,70 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_equal(const Val& val) const
         {
             return query().template where_equal<ColLiteral>(val);
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_not_equal(const Val& val) const
         {
             return query().template where_not_equal<ColLiteral>(val);
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_lt(const Val& val) const
         {
             return query().template where_lt<ColLiteral>(val);
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_le(const Val& val) const
         {
             return query().template where_le<ColLiteral>(val);
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_gt(const Val& val) const
         {
             return query().template where_gt<ColLiteral>(val);
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_ge(const Val& val) const
         {
             return query().template where_ge<ColLiteral>(val);
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_like(std::string_view pattern) const
         {
             return query().template where_like<ColLiteral>(pattern);
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
-            requires (sizeof...(Ts) > 0)
+            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_in(const Ts&... vals) const
         {
             return query().template where_in<ColLiteral>(vals...);
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_in_vec(const std::vector<Val>& vals) const
+        {
+            return query().template where_in_vec<ColLiteral>(vals);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, typename Val>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         std::expected<void, Core::DbError> remove_where_equal(const Val& val) const
         {
             return where_equal<ColLiteral>(val).remove_where();
@@ -867,6 +937,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto order_by(bool desc = false) const
         {
             return query().template order_by<ColLiteral>(desc);
@@ -1171,6 +1242,7 @@ export namespace DAL
             std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
                 const std::shared_ptr<void>&, const void*)>)> upsert_tracked_fn_{};
         std::function<void(std::type_index, const std::string&)> untrack_fn_{};
+        std::function<void(std::type_index)> untrack_type_fn_{};
         std::function<std::shared_ptr<void>(std::type_index, const std::string&)> find_tracked_fn_{};
     };
 

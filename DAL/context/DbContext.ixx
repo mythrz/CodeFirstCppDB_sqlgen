@@ -330,6 +330,13 @@ export namespace DAL
             tracked_entries_.erase(std::pair<std::type_index, std::string>{ type, key_repr });
         }
 
+        void untrack_type(std::type_index type) noexcept
+        {
+            std::erase_if(tracked_entries_, [type](const auto& kv) {
+                return kv.first.first == type;
+            });
+        }
+
         void upsert_tracked_entry(
             std::type_index type,
             std::string key_repr,
@@ -473,6 +480,11 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ junctions_res.error() };
             }
 
+            if (junctions_res.value().empty())
+            {
+                return std::vector<TargetDomain>{};
+            }
+
             auto& junction_set = self.template find_dbset<JunctionDomain>();
             auto& target_set = self.template find_dbset<TargetDomain>();
             using JunctionSetType = std::remove_cvref_t<decltype(junction_set)>;
@@ -480,23 +492,40 @@ export namespace DAL
             using JunctionDTO = typename JunctionSetType::DTOType;
             using TargetDTO = typename TargetSetType::DTOType;
 
-            std::vector<TargetDomain> results;
-            results.reserve(junctions_res.value().size());
-            for (const auto& junction : junctions_res.value())
+            if constexpr (Schema::SinglePrimaryKey<TargetDTO>)
             {
-                const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
-                const auto target_fk = Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto);
-                auto target_res = target_set.try_find(target_fk);
-                if (!target_res)
+                constexpr auto pk_m = Schema::primary_key_member<TargetDTO>();
+                using FkValueType = std::remove_cvref_t<decltype(
+                    Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
+                std::vector<FkValueType> target_fks;
+                target_fks.reserve(junctions_res.value().size());
+                for (const auto& junction : junctions_res.value())
                 {
-                    return std::unexpected<Core::DbError>{ target_res.error() };
+                    const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
+                    target_fks.push_back(Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto));
                 }
-                if (target_res.value().has_value())
-                {
-                    results.push_back(std::move(*target_res.value()));
-                }
+                return target_set.where_sql(Schema::col_of<pk_m>.in(target_fks)).try_to_vector();
             }
-            return results;
+            else
+            {
+                std::vector<TargetDomain> results;
+                results.reserve(junctions_res.value().size());
+                for (const auto& junction : junctions_res.value())
+                {
+                    const JunctionDTO j_dto = DAL::Mappers::MapperTraits<JunctionDomain, JunctionDTO>::to_dto(junction);
+                    const auto target_fk = Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto);
+                    auto target_res = target_set.try_find(target_fk);
+                    if (!target_res)
+                    {
+                        return std::unexpected<Core::DbError>{ target_res.error() };
+                    }
+                    if (target_res.value().has_value())
+                    {
+                        results.push_back(std::move(*target_res.value()));
+                    }
+                }
+                return results;
+            }
         }
 
         std::expected<void, Core::DbError> begin_transaction()

@@ -23,7 +23,18 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::vector<Core::Person> find_by_last_name(const std::string& lastName) const override
         {
-            auto dtos = this->conn_->template query<DAL::Schema::PersonDTO>().where("last_name", lastName).execute();
+            auto dtos = [this, &lastName]() {
+                if constexpr (requires {
+                    this->conn_->template fetch_where_equal<DAL::Schema::PersonDTO, "last_name">(lastName);
+                })
+                {
+                    return this->conn_->template fetch_where_equal<DAL::Schema::PersonDTO, "last_name">(lastName);
+                }
+                else
+                {
+                    return this->conn_->template query<DAL::Schema::PersonDTO>().where("last_name", lastName).execute();
+                }
+            }();
 
             auto domain_view = dtos | std::views::transform(DAL::Mappers::MapperTraits<Core::Person, DAL::Schema::PersonDTO>::to_domain);
             return std::vector<Core::Person>(domain_view.begin(), domain_view.end());

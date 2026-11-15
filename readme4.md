@@ -316,7 +316,7 @@ Remove all hardcoded `std::int32_t` primary-key casts in `Core::Id`, `GenericRep
 
 #### Detailed Tasks
 
-- [ ] **Task 15.1: Generalize `Core::Id<Tag, ValueType = std::int32_t>` (`Core/Id.ixx`)**
+- [x] **Task 15.1: Generalize `Core::Id<Tag, ValueType = std::int32_t>` (`Core/Id.ixx`)**
   - Update `Core::Id` in [Core/Id.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/Core/Id.ixx#L10-L53) to accept an optional underlying `ValueType` defaulting to `std::int32_t` (preserving 100% backward compatibility with `using PersonId = Id<struct PersonTag>;`):
     ```cpp
     template<typename Tag, typename ValueType = std::int32_t>
@@ -340,7 +340,7 @@ Remove all hardcoded `std::int32_t` primary-key casts in `Core::Id`, `GenericRep
     ```
   - Update `std::formatter<Core::Id<Tag, ValueType>> : std::formatter<ValueType>` to format `id.value` for any `ValueType`.
 
-- [ ] **Task 15.2: Type-Preserving Key Unwrapping in `GenericRepository` & `SQLiteConnection` (`GenericRepository.ixx` & `SQLiteConnection.ixx`)**
+- [x] **Task 15.2: Type-Preserving Key Unwrapping in `GenericRepository` & `SQLiteConnection` (`GenericRepository.ixx` & `SQLiteConnection.ixx`)**
   - In [DAL/repositories/GenericRepository.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/repositories/GenericRepository.ixx#L287-L298), replace `unwrap_single_key` (which casts to `std::int32_t`) and `static_cast<std::int32_t>(parts)...` with a recursive, type-preserving `unwrap_key_part`:
     ```cpp
     template<typename Part>
@@ -363,7 +363,7 @@ Remove all hardcoded `std::int32_t` primary-key casts in `Core::Id`, `GenericRep
   - Use `unwrap_key_part(parts)...` in `get_by_id`, `try_get_by_id`, `delete_by_id`, and `exists_by_id` inside `GenericRepository`, and update the `if constexpr (requires ...)` probes on line 165 to pass `unwrap_key_part(id)` instead of `std::int32_t{}`.
   - In [DAL/context/SQLiteConnection.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L231-L264) (and [lines 414–444](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/SQLiteConnection.ixx#L414-L444)), change `try_get_by_id`, `get_by_id`, `delete_by_id`, and `exists` from `std::int32_t id` to `template<typename DTO, typename IdType> ... (const IdType& id)`.
 
-- [ ] **Task 15.3: Phase 15 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 15.3: Phase 15 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test a POCO and/or encapsulated entity with `sqlgen::PrimaryKey<std::string>` (e.g., `PocoDocument` with `std::string doc_slug`), `sqlgen::PrimaryKey<std::int64_t>`, `Core::Id<struct DocTag, std::string>`, and a composite key `CompositeKey<std::string, std::int64_t>` across `add`, `find`, `try_find`, `update`, `upsert`, `contains`, `find_tracked`, and `remove`.
 
 ---
@@ -375,7 +375,7 @@ Allow `DbSet` and `DbQuery` column-based methods (`where_equal<"col">`, `where_g
 
 #### Detailed Tasks
 
-- [ ] **Task 16.1: `consteval` Column Validator & Domain-to-DTO Name Resolver (`DAL/mappers/MapperTraits.ixx`)**
+- [x] **Task 16.1: `consteval` Column Validator & Domain-to-DTO Name Resolver (`DAL/mappers/MapperTraits.ixx`)**
   - In [DAL/mappers/MapperTraits.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/mappers/MapperTraits.ixx), add `consteval` helpers that check whether a `StringLiteral` matches a DTO member directly or matches a Domain member (which maps to a DTO member via `find_matching_dto_member`):
     ```cpp
     template<typename Domain, typename DTO, rfl::internal::StringLiteral ColOrField>
@@ -444,11 +444,11 @@ Allow `DbSet` and `DbQuery` column-based methods (`where_equal<"col">`, `where_g
     }
     ```
 
-- [ ] **Task 16.2: Constrain & Resolve Column Literals in `DbQuery` and `DbSet` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 16.2: Constrain & Resolve Column Literals in `DbQuery` and `DbSet` (`DAL/context/DbSet.ixx`)**
   - Constrain `where_equal`, `or_where_equal`, `where_not_equal`, `where_lt`, `where_le`, `where_gt`, `where_ge`, `where_like`, `where_in`, `order_by`, and `remove_where_equal` on `DbQuery` and `DbSet` with `requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>`.
   - Use `Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>()` instead of raw `sqlgen::Col<ColLiteral>{}` so callers can query `Core::Person` using either `"firstName"` (domain property), `"firstName_"` (private domain field), or `"first_name"` (DTO column).
 
-- [ ] **Task 16.3: Phase 16 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 16.3: Phase 16 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Verify `static_assert(DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "firstName">)` and `static_assert(!DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "nonExistentCol">)`.
   - Verify querying `db.people.where_equal<"lastName">("Smith").order_by<"firstName">(false).to_vector()` in SQLite.
 
@@ -461,7 +461,7 @@ Replace the $O(N)$ per-row `try_find` loop in `DbContextBase::query_many_to_many
 
 #### Detailed Tasks
 
-- [ ] **Task 17.1: Add `where_in_vec<ColLiteral>(const std::vector<Val>&)` to `DbQuery` and `DbSet` (`DAL/context/DbSet.ixx`)**
+- [x] **Task 17.1: Add `where_in_vec<ColLiteral>(const std::vector<Val>&)` to `DbQuery` and `DbSet` (`DAL/context/DbSet.ixx`)**
   - Add a vector-based `IN` predicate helper on `DbQuery` and `DbSet`:
     ```cpp
     template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -480,14 +480,14 @@ Replace the $O(N)$ per-row `try_find` loop in `DbContextBase::query_many_to_many
     }
     ```
 
-- [ ] **Task 17.2: Refactor `DbContextBase::query_many_to_many` to Use Batched `IN` Query (`DAL/context/DbContext.ixx`)**
+- [x] **Task 17.2: Refactor `DbContextBase::query_many_to_many` to Use Batched `IN` Query (`DAL/context/DbContext.ixx`)**
   - In `DbContextBase::query_many_to_many` ([DAL/context/DbContext.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/context/DbContext.ixx#L465-L500)):
     - If `junctions_res.value().empty()`, return `std::vector<TargetDomain>{}` immediately.
     - When `Schema::SinglePrimaryKey<TargetDTO>` is true, extract all `target_fk` values into `std::vector<FkValueType> target_fks`, build `constexpr auto pk_m = Schema::primary_key_member<TargetDTO>();`, and execute a single query:
       `return target_set.where_sql(Schema::col_of<pk_m>.in(target_fks)).try_to_vector();`
     - Also ensure `DbQuery::remove_where()` clears/invalidates tracked entries for `Domain` when change tracking is enabled so deleted entities are never resurrected by `save_changes()`.
 
-- [ ] **Task 17.3: Phase 17 Verification Tests (`DAL/tests/test_DAL.cpp`)**
+- [x] **Task 17.3: Phase 17 Verification Tests (`DAL/tests/test_DAL.cpp`)**
   - Test `where_in_vec<"id">(std::vector<int>{ 1, 3, 5 })` and `where_in_vec<"id">(std::vector<Core::PersonId>{ ... })`.
   - Test `query_many_to_many` when a source entity has 0, 1, and multiple linked targets.
 
@@ -500,13 +500,13 @@ Bring the legacy repository classes (`SQLitePersonRepo` and `SQLitePerson_Someth
 
 #### Detailed Tasks
 
-- [ ] **Task 18.1: Fix `SQLitePersonRepo::find_by_last_name` for `SQLiteConnection` (`DAL/repositories/SQLitePersonRepo.ixx`)**
+- [x] **Task 18.1: Fix `SQLitePersonRepo::find_by_last_name` for `SQLiteConnection` (`DAL/repositories/SQLitePersonRepo.ixx`)**
   - Update [DAL/repositories/SQLitePersonRepo.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/repositories/SQLitePersonRepo.ixx#L24-L30) to dispatch via `if constexpr` to `fetch_where_equal<DAL::Schema::PersonDTO, "last_name">(lastName)` when available on `ConnectionHandle` (like `SQLiteConnection`), falling back to `.query<PersonDTO>()` on `TestDatabaseConnection`.
 
-- [ ] **Task 18.2: Deduplicate `SQLitePerson_SomethingRepo` via `GenericRepository` Inheritance (`DAL/repositories/SQLitePerson_SomethingRepo.ixx`)**
+- [x] **Task 18.2: Deduplicate `SQLitePerson_SomethingRepo` via `GenericRepository` Inheritance (`DAL/repositories/SQLitePerson_SomethingRepo.ixx`)**
   - Refactor [DAL/repositories/SQLitePerson_SomethingRepo.ixx](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/DAL/repositories/SQLitePerson_SomethingRepo.ixx) to inherit from `GenericRepository<Core::Person_Something, DAL::Schema::Person_SomethingDTO, ConnectionHandle, Core::Person_Something::Key>` and `Core::IPerson_SomethingRepository`, delegating `get_by_composite_id`, `delete_by_composite_id`, and `exists_by_composite_id` to `this->get_by_id(...)`, `this->delete_by_id(...)`, and `this->exists_by_id(...)`.
 
-- [ ] **Task 18.3: Modernize `Startup/main.cpp` & Add Phase 18 Tests (`Startup/main.cpp` & `DAL/tests/test_DAL.cpp`)**
+- [x] **Task 18.3: Modernize `Startup/main.cpp` & Add Phase 18 Tests (`Startup/main.cpp` & `DAL/tests/test_DAL.cpp`)**
   - Update [Startup/main.cpp](file:///home/d5/Developer09/CodeFirstCppDB_sqlgen/Startup/main.cpp#L114-L123) to demonstrate server-side `DbQuery` filtering (`db.somethings.where_equal<"category">("Electronics").to_vector()`) and compile-time relationship navigation (`db.query_many_to_many<Core::Something, Core::Person_Something>(person1)`).
   - Add a GoogleTest verifying `SQLitePersonRepo<DAL::SQLiteConnection>::find_by_last_name` against a live `:memory:` SQLite connection.
 

@@ -7,24 +7,27 @@ export namespace Core
     // Generic zero-overhead strongly-typed ID wrapper.
     // Usage:
     //   using PersonId = Id<struct PersonTag>;
-    template<typename Tag>
+    //   using DocId = Id<struct DocTag, std::string>;
+    template<typename Tag, typename ValueType = std::int32_t>
     struct Id
     {
-        std::int32_t value{ 0 };
+        using value_type = ValueType;
+        ValueType value{};
 
-        constexpr explicit Id(std::int32_t v = 0) noexcept
-            : value(v)
+        constexpr Id() = default;
+        constexpr explicit Id(ValueType v) noexcept(std::is_nothrow_move_constructible_v<ValueType>)
+            : value(std::move(v))
         {
         }
 
-        [[nodiscard]] constexpr std::int32_t get() const noexcept
+        [[nodiscard]] constexpr const ValueType& get() const noexcept
         {
             return value;
         }
 
         // Implicit conversion to underlying type allows static_cast in reflection
-        // mappers and interop with sqlgen/SQLite (which use signed integers).
-        constexpr operator std::int32_t() const noexcept
+        // mappers and interop with sqlgen/SQLite.
+        constexpr operator const ValueType&() const noexcept
         {
             return value;
         }
@@ -40,14 +43,14 @@ export namespace Core
 
 } // namespace Core
 
-// std::formatter specialisation — allows Id<Tag> to be used directly
-// in std::format / std::println as if it were a plain std::int32_t.
-template<typename Tag>
-struct std::formatter<Core::Id<Tag>> : std::formatter<std::int32_t>
+// std::formatter specialisation — allows Id<Tag, ValueType> to be used directly
+// in std::format / std::println as if it were ValueType.
+template<typename Tag, typename ValueType>
+struct std::formatter<Core::Id<Tag, ValueType>> : std::formatter<ValueType>
 {
     template<typename FormatContext>
-    auto format(const Core::Id<Tag>& id, FormatContext& ctx) const
+    auto format(const Core::Id<Tag, ValueType>& id, FormatContext& ctx) const
     {
-        return std::formatter<std::int32_t>::format(id.value, ctx);
+        return std::formatter<ValueType>::format(id.value, ctx);
     }
 };

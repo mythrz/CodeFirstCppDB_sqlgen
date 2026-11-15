@@ -228,8 +228,8 @@ export namespace DAL
             return {};
         }
 
-        template<typename DTO>
-        [[nodiscard]] std::expected<std::optional<DTO>, Core::DbError> try_get_by_id(std::int32_t id) const
+        template<typename DTO, typename IdType>
+        [[nodiscard]] std::expected<std::optional<DTO>, Core::DbError> try_get_by_id(const IdType& id) const
         {
             if (!is_open())
             {
@@ -252,8 +252,8 @@ export namespace DAL
             return std::optional<DTO>{ std::move(res.value().front()) };
         }
 
-        template<typename DTO>
-        [[nodiscard]] std::optional<DTO> get_by_id(std::int32_t id) const
+        template<typename DTO, typename IdType>
+        [[nodiscard]] std::optional<DTO> get_by_id(const IdType& id) const
         {
             auto res = try_get_by_id<DTO>(id);
             if (res)
@@ -411,8 +411,8 @@ export namespace DAL
             }
         }
 
-        template<typename DTO>
-        auto delete_by_id(std::int32_t id)
+        template<typename DTO, typename IdType>
+        auto delete_by_id(const IdType& id)
         {
             if (!is_open())
             {
@@ -437,8 +437,8 @@ export namespace DAL
                   | sqlgen::where(DAL::Schema::make_composite_where<DTO>(parts...)))(conn_);
         }
 
-        template<typename DTO>
-        [[nodiscard]] bool exists(std::int32_t id) const
+        template<typename DTO, typename IdType>
+        [[nodiscard]] bool exists(const IdType& id) const
         {
             return get_by_id<DTO>(id).has_value();
         }

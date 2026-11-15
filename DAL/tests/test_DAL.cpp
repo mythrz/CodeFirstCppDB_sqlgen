@@ -2088,4 +2088,221 @@ namespace
         }
     }
 
+    // =========================================================================
+    // Phase 15: Universal STL & Strong-ID Primary Keys
+    // =========================================================================
+
+    struct PocoDocument
+    {
+        static constexpr auto tablename = "PocoDocuments";
+        sqlgen::PrimaryKey<std::string> doc_slug;
+        std::string title;
+    };
+
+    struct PocoEvent
+    {
+        static constexpr auto tablename = "PocoEvents";
+        sqlgen::PrimaryKey<std::int64_t, false> event_id{ 0 };
+        std::string name;
+    };
+
+    struct PocoTenantMetric
+    {
+        static constexpr auto tablename = "PocoTenantMetrics";
+        sqlgen::ForeignKey<std::string, PocoDocument, "doc_slug"> tenant;
+        sqlgen::ForeignKey<std::int64_t, PocoEvent, "event_id"> metric_id{ 0 };
+        std::string label;
+    };
+
+    struct UniversalKeyDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<PocoDocument> documents{ this };
+        Set<PocoEvent> events{ this };
+        Set<PocoTenantMetric> metrics{ this };
+
+        explicit UniversalKeyDbContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {}
+    };
+
+    TEST(Phase15UniversalPrimaryKeysTest, String_Int64_StrongId_And_HeterogeneousCompositeKeys)
+    {
+        using DocId = Core::Id<struct DocTag, std::string>;
+        DocId strongDocId("doc-alpha");
+        EXPECT_EQ(strongDocId.get(), "doc-alpha");
+        EXPECT_EQ(std::format("{}", strongDocId), "doc-alpha");
+
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        UniversalKeyDbContext db(connRes.value());
+        auto ensureRes = db.ensure_created();
+        ASSERT_TRUE(ensureRes.has_value()) << ensureRes.error().to_string();
+        db.enable_change_tracking(true);
+
+        // 1. std::string PrimaryKey
+        ASSERT_TRUE(db.documents.add(PocoDocument{ .doc_slug = "readme", .title = "Intro" }).has_value());
+        EXPECT_TRUE(db.documents.contains(std::string("readme")));
+        auto docFind = db.documents.try_find(std::string("readme"));
+        ASSERT_TRUE(docFind.has_value());
+        ASSERT_TRUE(docFind->has_value());
+        EXPECT_EQ((*docFind)->title, "Intro");
+
+        auto trackedDoc = db.documents.find_tracked(std::string("readme"));
+        ASSERT_NE(trackedDoc, nullptr);
+        trackedDoc->title = "Intro V2";
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.documents.find(std::string("readme"))->title, "Intro V2");
+
+        ASSERT_TRUE(db.documents.upsert(PocoDocument{ .doc_slug = "readme", .title = "Intro V3" }).has_value());
+        EXPECT_EQ(db.documents.find(std::string("readme"))->title, "Intro V3");
+
+        ASSERT_TRUE(db.documents.remove(std::string("readme")).has_value());
+        EXPECT_FALSE(db.documents.contains(std::string("readme")));
+
+        // 2. std::int64_t PrimaryKey (large 64-bit value beyond int32_t range)
+        const std::int64_t bigId = 5'000'000'123LL;
+        ASSERT_TRUE(db.events.add(PocoEvent{ .event_id = bigId, .name = "Launch" }).has_value());
+        EXPECT_TRUE(db.events.contains(bigId));
+        auto ev = db.events.find(bigId);
+        ASSERT_TRUE(ev.has_value());
+        EXPECT_EQ(ev->name, "Launch");
+
+        // 3. Heterogeneous CompositeKey<std::string, std::int64_t>
+        ASSERT_TRUE(db.documents.add(PocoDocument{ .doc_slug = "acme", .title = "Acme" }).has_value());
+        ASSERT_TRUE(db.metrics.add(PocoTenantMetric{
+            .tenant = "acme",
+            .metric_id = bigId,
+            .label = "requests"
+        }).has_value());
+        EXPECT_TRUE(db.metrics.contains(std::string("acme"), bigId));
+        auto metric = db.metrics.find(std::string("acme"), bigId);
+        ASSERT_TRUE(metric.has_value());
+        EXPECT_EQ(metric->label, "requests");
+        ASSERT_TRUE(db.metrics.remove(std::string("acme"), bigId).has_value());
+        EXPECT_FALSE(db.metrics.contains(std::string("acme"), bigId));
+    }
+
+    // =========================================================================
+    // Phase 16: Compile-Time Domain-to-DTO Column Resolution & Validation
+    // =========================================================================
+
+    TEST(Phase16DomainColumnResolutionTest, ValidQueryColumnConceptAndDomainFieldQueryPushdown)
+    {
+        static_assert(DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "first_name">);
+        static_assert(DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "firstName">);
+        static_assert(DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "firstName_">);
+        static_assert(!DAL::Mappers::ValidQueryColumn<Core::Person, DAL::Schema::PersonDTO, "nonExistentCol">);
+
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        struct PersonColDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+        {
+            Set<Core::Person> people{ this };
+            explicit PersonColDbContext(std::shared_ptr<DAL::SQLiteConnection> c)
+                : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+            {}
+        };
+
+        PersonColDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Charlie", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 3 }, "Diana", "Jones")).has_value());
+
+        auto smiths = db.people
+            .where_equal<"lastName">("Smith")
+            .order_by<"firstName">(false)
+            .to_vector();
+        ASSERT_EQ(smiths.size(), 2u);
+        EXPECT_EQ(smiths[0].getFirstName(), "Alice");
+        EXPECT_EQ(smiths[1].getFirstName(), "Charlie");
+    }
+
+    // =========================================================================
+    // Phase 17: Batched WHERE pk IN (vector) & remove_where Tracker Sync
+    // =========================================================================
+
+    TEST(Phase17BatchedManyToManyAndRemoveWhereSyncTest, WhereInVec_BatchedManyToMany_And_TrackerEviction)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+
+        struct NavBatchDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+        {
+            Set<Core::Person> people{ this };
+            Set<Core::Something> somethings{ this };
+            Set<Core::Person_Something> personSomethings{ this };
+
+            explicit NavBatchDbContext(std::shared_ptr<DAL::SQLiteConnection> c)
+                : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+            {}
+        };
+
+        NavBatchDbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        db.enable_change_tracking(true);
+
+        Core::Person p1(Core::PersonId{ 1 }, "Alice", "Smith");
+        Core::Person p2(Core::PersonId{ 2 }, "Bob", "Smith");
+        Core::Person p3(Core::PersonId{ 3 }, "Charlie", "Jones");
+        Core::Person p4(Core::PersonId{ 4 }, "Diana", "Jones");
+        Core::Person p5(Core::PersonId{ 5 }, "Eve", "Brown");
+        ASSERT_TRUE(db.people.add_range({ p1, p2, p3, p4, p5 }).has_value());
+
+        // where_in_vec with raw ints and Core::PersonId
+        auto byInts = db.people.where_in_vec<"id">(std::vector<int>{ 1, 3, 5 }).order_by<"id">(false).to_vector();
+        ASSERT_EQ(byInts.size(), 3u);
+        EXPECT_EQ(byInts[0].getFirstName(), "Alice");
+        EXPECT_EQ(byInts[1].getFirstName(), "Charlie");
+        EXPECT_EQ(byInts[2].getFirstName(), "Eve");
+
+        auto byIds = db.people.where_in_vec<"id">(std::vector<Core::PersonId>{ Core::PersonId{ 2 }, Core::PersonId{ 4 } }).to_vector();
+        ASSERT_EQ(byIds.size(), 2u);
+
+        // Batched query_many_to_many with 0, 1, and 2 targets
+        Core::Something s1(Core::SomethingId{ 1 }, "Laptop", "Electronics", "Work");
+        Core::Something s2(Core::SomethingId{ 2 }, "Desk", "Furniture", "Office");
+        ASSERT_TRUE(db.somethings.add_range({ s1, s2 }).has_value());
+        ASSERT_TRUE(db.personSomethings.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner")).has_value());
+        ASSERT_TRUE(db.personSomethings.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 2 }, "Owner")).has_value());
+        ASSERT_TRUE(db.personSomethings.add(Core::Person_Something(Core::PersonId{ 2 }, Core::SomethingId{ 1 }, "User")).has_value());
+
+        EXPECT_EQ((db.query_many_to_many<Core::Something, Core::Person_Something>(p1)->size()), 2u);
+        EXPECT_EQ((db.query_many_to_many<Core::Something, Core::Person_Something>(p2)->size()), 1u);
+        EXPECT_EQ((db.query_many_to_many<Core::Something, Core::Person_Something>(p3)->size()), 0u);
+
+        // remove_where() invalidates tracked entries so save_changes() does not resurrect them
+        auto trackedP5 = db.people.find_tracked(5);
+        ASSERT_NE(trackedP5, nullptr);
+        trackedP5->setFirstName("EveMutated");
+        auto remRes = db.people.where_equal<"lastName">("Brown").remove_where();
+        ASSERT_TRUE(remRes.has_value()) << remRes.error().to_string();
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_FALSE(db.people.find(5).has_value());
+        EXPECT_EQ(db.people.count(), 4u);
+    }
+
+    // =========================================================================
+    // Phase 18: Repository Modernization & SQLitePersonRepo Pushdown Fix
+    // =========================================================================
+
+    TEST(Phase18RepositoryModernizationTest, SQLitePersonRepo_FindByLastName_WithLiveSQLite)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        ASSERT_TRUE(connRes.value()->ensure_table_created<DAL::Schema::PersonDTO>().has_value());
+
+        DAL::Repositories::SQLitePersonRepo<DAL::SQLiteConnection> repo(connRes.value());
+        ASSERT_TRUE(repo.insert_one(Core::Person(Core::PersonId{ 1 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(repo.insert_one(Core::Person(Core::PersonId{ 2 }, "Bob", "Jones")).has_value());
+        ASSERT_TRUE(repo.insert_one(Core::Person(Core::PersonId{ 3 }, "Charlie", "Smith")).has_value());
+
+        auto smiths = repo.find_by_last_name("Smith");
+        ASSERT_EQ(smiths.size(), 2u);
+        EXPECT_EQ(smiths[0].getFirstName(), "Alice");
+        EXPECT_EQ(smiths[1].getFirstName(), "Charlie");
+    }
+
 } // namespace

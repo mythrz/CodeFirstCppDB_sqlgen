@@ -77,10 +77,10 @@ export namespace DAL::Repositories
                 return std::apply(
                     [this, &id](const auto&... parts) -> std::optional<Domain> {
                         if constexpr (requires {
-                                          conn_->template get_by_composite_id<DTO>(static_cast<std::int32_t>(parts)...);
+                                          conn_->template get_by_composite_id<DTO>(unwrap_key_part(parts)...);
                                       })
                         {
-                            return conn_->template get_by_composite_id<DTO>(static_cast<std::int32_t>(parts)...)
+                            return conn_->template get_by_composite_id<DTO>(unwrap_key_part(parts)...)
                                 .transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
                         }
                         else
@@ -100,7 +100,7 @@ export namespace DAL::Repositories
             }
             else
             {
-                return conn_->template get_by_id<DTO>(unwrap_single_key(id)).transform(
+                return conn_->template get_by_id<DTO>(unwrap_key_part(id)).transform(
                     DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
             }
         }
@@ -112,10 +112,10 @@ export namespace DAL::Repositories
                 return std::apply(
                     [this, &id](const auto&... parts) -> std::expected<std::optional<Domain>, Core::DbError> {
                         if constexpr (requires {
-                                          conn_->template try_get_by_composite_id<DTO>(static_cast<std::int32_t>(parts)...);
+                                          conn_->template try_get_by_composite_id<DTO>(unwrap_key_part(parts)...);
                                       })
                         {
-                            auto res = conn_->template try_get_by_composite_id<DTO>(static_cast<std::int32_t>(parts)...);
+                            auto res = conn_->template try_get_by_composite_id<DTO>(unwrap_key_part(parts)...);
                             if (!res)
                             {
                                 return std::unexpected<Core::DbError>{ res.error() };
@@ -162,9 +162,9 @@ export namespace DAL::Repositories
             }
             else
             {
-                if constexpr (requires { conn_->template try_get_by_id<DTO>(std::int32_t{}); })
+                if constexpr (requires { conn_->template try_get_by_id<DTO>(unwrap_key_part(id)); })
                 {
-                    auto res = conn_->template try_get_by_id<DTO>(unwrap_single_key(id));
+                    auto res = conn_->template try_get_by_id<DTO>(unwrap_key_part(id));
                     if (!res)
                     {
                         return std::unexpected<Core::DbError>{ res.error() };
@@ -225,14 +225,14 @@ export namespace DAL::Repositories
                 auto res = std::apply(
                     [this](const auto&... parts) {
                         if constexpr (requires {
-                                          conn_->template delete_by_composite_id<DTO>(static_cast<std::int32_t>(parts)...);
+                                          conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...);
                                       })
                         {
-                            return conn_->template delete_by_composite_id<DTO>(static_cast<std::int32_t>(parts)...);
+                            return conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...);
                         }
                         else
                         {
-                            return conn_->delete_by_composite_id(static_cast<std::int32_t>(parts)...);
+                            return conn_->delete_by_composite_id(unwrap_key_part(parts)...);
                         }
                     },
                     id.tuple());
@@ -244,7 +244,7 @@ export namespace DAL::Repositories
             }
             else
             {
-                auto res = conn_->template delete_by_id<DTO>(unwrap_single_key(id));
+                auto res = conn_->template delete_by_id<DTO>(unwrap_key_part(id));
                 if (!res)
                 {
                     return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
@@ -260,10 +260,10 @@ export namespace DAL::Repositories
                 return std::apply(
                     [this, &id](const auto&... parts) {
                         if constexpr (requires {
-                                          conn_->template exists_by_composite_id<DTO>(static_cast<std::int32_t>(parts)...);
+                                          conn_->template exists_by_composite_id<DTO>(unwrap_key_part(parts)...);
                                       })
                         {
-                            return conn_->template exists_by_composite_id<DTO>(static_cast<std::int32_t>(parts)...);
+                            return conn_->template exists_by_composite_id<DTO>(unwrap_key_part(parts)...);
                         }
                         else
                         {
@@ -274,7 +274,7 @@ export namespace DAL::Repositories
             }
             else
             {
-                return conn_->template exists<DTO>(unwrap_single_key(id));
+                return conn_->template exists<DTO>(unwrap_key_part(id));
             }
         }
 
@@ -284,15 +284,20 @@ export namespace DAL::Repositories
         }
 
     protected:
-        [[nodiscard]] static constexpr std::int32_t unwrap_single_key(const KeyType& id) noexcept
+        template<typename Part>
+        [[nodiscard]] static constexpr decltype(auto) unwrap_key_part(const Part& part) noexcept
         {
-            if constexpr (Core::SingleKeyType<KeyType>)
+            if constexpr (Core::SingleKeyType<std::remove_cvref_t<Part>>)
             {
-                return static_cast<std::int32_t>(id.get());
+                return unwrap_key_part(part.get());
+            }
+            else if constexpr (requires { part.get(); })
+            {
+                return part.get();
             }
             else
             {
-                return static_cast<std::int32_t>(id);
+                return part;
             }
         }
 
