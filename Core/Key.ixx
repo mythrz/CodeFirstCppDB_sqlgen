@@ -60,7 +60,7 @@ export namespace Core
     // Provides compile-time metadata indicating arity >= 2 and is_composite = true.
     // =========================================================================
     template<typename... KeyTypes>
-        requires (sizeof...(KeyTypes) >= 2)
+        requires(sizeof...(KeyTypes) >= 2)
     struct CompositeKey
     {
         static constexpr bool is_composite = true;
@@ -71,28 +71,26 @@ export namespace Core
 
         constexpr CompositeKey() = default;
 
-        constexpr explicit CompositeKey(KeyTypes... args) noexcept(
-            (std::is_nothrow_move_constructible_v<KeyTypes> && ...))
+        constexpr explicit CompositeKey(KeyTypes... args) noexcept((std::is_nothrow_move_constructible_v<KeyTypes> && ...))
             : values(std::move(args)...)
         {
         }
 
-        constexpr explicit CompositeKey(std::tuple<KeyTypes...> t) noexcept(
-            std::is_nothrow_move_constructible_v<std::tuple<KeyTypes...>>)
+        constexpr explicit CompositeKey(std::tuple<KeyTypes...> t) noexcept(std::is_nothrow_move_constructible_v<std::tuple<KeyTypes...>>)
             : values(std::move(t))
         {
         }
 
         // Indexed element access: key.get<0>()
         template<std::size_t Index>
-            requires (Index < sizeof...(KeyTypes))
+            requires(Index < sizeof...(KeyTypes))
         [[nodiscard]] constexpr decltype(auto) get() const noexcept
         {
             return std::get<Index>(values);
         }
 
         template<std::size_t Index>
-            requires (Index < sizeof...(KeyTypes))
+            requires(Index < sizeof...(KeyTypes))
         [[nodiscard]] constexpr decltype(auto) get() noexcept
         {
             return std::get<Index>(values);
@@ -133,19 +131,27 @@ export namespace Core
     // Type Traits & Concepts
     // =========================================================================
     template<typename T>
-    struct is_single_key : std::false_type {};
+    struct is_single_key : std::false_type
+    {
+    };
 
     template<typename KeyType>
-    struct is_single_key<SingleKey<KeyType>> : std::true_type {};
+    struct is_single_key<SingleKey<KeyType>> : std::true_type
+    {
+    };
 
     template<typename T>
     inline constexpr bool is_single_key_v = is_single_key<T>::value;
 
     template<typename T>
-    struct is_composite_key : std::false_type {};
+    struct is_composite_key : std::false_type
+    {
+    };
 
     template<typename... KeyTypes>
-    struct is_composite_key<CompositeKey<KeyTypes...>> : std::true_type {};
+    struct is_composite_key<CompositeKey<KeyTypes...>> : std::true_type
+    {
+    };
 
     template<typename T>
     inline constexpr bool is_composite_key_v = is_composite_key<T>::value;
@@ -193,8 +199,9 @@ export namespace Core
 // Structured Binding Support for Core::CompositeKey
 // =========================================================================
 template<typename... KeyTypes>
-struct std::tuple_size<Core::CompositeKey<KeyTypes...>>
-    : std::integral_constant<std::size_t, sizeof...(KeyTypes)> {};
+struct std::tuple_size<Core::CompositeKey<KeyTypes...>> : std::integral_constant<std::size_t, sizeof...(KeyTypes)>
+{
+};
 
 template<std::size_t Index, typename... KeyTypes>
 struct std::tuple_element<Index, Core::CompositeKey<KeyTypes...>>
@@ -222,10 +229,13 @@ struct std::formatter<Core::CompositeKey<KeyTypes...>> : std::formatter<std::str
     auto format(const Core::CompositeKey<KeyTypes...>& key, FormatContext& ctx) const
     {
         std::string str = "CompositeKey(";
-        std::apply([&str](const auto&... args) {
-            std::size_t idx = 0;
-            ((str += (idx++ > 0 ? ", " : "") + std::format("{}", args)), ...);
-        }, key.values);
+        std::apply(
+            [&str](const auto&... args)
+            {
+                std::size_t idx = 0;
+                ((str += (idx++ > 0 ? ", " : "") + std::format("{}", args)), ...);
+            },
+            key.values);
         str += ")";
         return std::formatter<std::string>::format(str, ctx);
     }

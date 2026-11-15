@@ -9,8 +9,6 @@
       "binaryDir": "${sourceDir}/build/linux/arch/gcc/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_C_COMPILER": "/usr/bin/gcc",
-        "CMAKE_CXX_COMPILER": "/usr/bin/g++",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },
@@ -22,8 +20,6 @@
       "binaryDir": "${sourceDir}/build/linux/arch/gcc/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_C_COMPILER": "/usr/bin/gcc",
-        "CMAKE_CXX_COMPILER": "/usr/bin/g++",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },
@@ -35,8 +31,6 @@
       "binaryDir": "${sourceDir}/build/linux/arch/gcc/asan",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_C_COMPILER": "/usr/bin/gcc",
-        "CMAKE_CXX_COMPILER": "/usr/bin/g++",
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS",
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"

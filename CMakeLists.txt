@@ -28,10 +28,6 @@ set(SQLGEN_USE_VCPKG OFF CACHE BOOL "" FORCE)
 # reflect-cpp (Submodule)
 if(NOT TARGET reflectcpp)
     add_subdirectory(extern/reflect-cpp SYSTEM)
-    if(PROJECT_IS_TOP_LEVEL)
-        set(reflectcpp_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "" FORCE)
-        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/reflectcppConfig.cmake" "")
-    endif()
 endif()
 
 # sqlite3 (System Dependency)
@@ -40,14 +36,18 @@ if(NOT TARGET SQLite::SQLite3)
     add_library(SQLite::SQLite3 INTERFACE IMPORTED)
     target_link_libraries(SQLite::SQLite3 INTERFACE SQLite3::SQLite3)
 endif()
-if(PROJECT_IS_TOP_LEVEL)
-    set(SQLite3_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "" FORCE)
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/SQLite3Config.cmake" "include_directories(\"${SQLite3_INCLUDE_DIRS}\")")
-endif()
 
 # sqlgen (submodule)
 option(CODEFIRST_ENABLE_POSTGRES "Enable sqlgen PostgreSQL driver" OFF)
 if(NOT TARGET sqlgen)
+    if(NOT DEFINED reflectcpp_DIR OR NOT EXISTS "${reflectcpp_DIR}/reflectcppConfig.cmake")
+        set(reflectcpp_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "" FORCE)
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/reflectcppConfig.cmake" "")
+    endif()
+    if(NOT DEFINED SQLite3_DIR OR NOT EXISTS "${SQLite3_DIR}/SQLite3Config.cmake")
+        set(SQLite3_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "" FORCE)
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/SQLite3Config.cmake" "include_directories(\"${SQLite3_INCLUDE_DIRS}\")")
+    endif()
     set(SQLGEN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(SQLGEN_POSTGRES ${CODEFIRST_ENABLE_POSTGRES} CACHE BOOL "" FORCE)
     set(SQLGEN_MYSQL OFF CACHE BOOL "" FORCE)
@@ -87,6 +87,39 @@ if(CODEFIRST_INSTALL)
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
         LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     )
+
+    if(TARGET sqlgen)
+        get_target_property(_sqlgen_imported sqlgen IMPORTED)
+        if(NOT _sqlgen_imported)
+            install(
+                TARGETS sqlgen
+                EXPORT CodeFirstCppDBTargets
+                ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+                LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+            )
+            install(
+                DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/extern/sqlgen/include/"
+                DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+            )
+        endif()
+    endif()
+
+    if(TARGET reflectcpp)
+        get_target_property(_rfl_imported reflectcpp IMPORTED)
+        if(NOT _rfl_imported)
+            target_include_directories(reflectcpp PUBLIC "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/rfl/thirdparty>")
+            install(
+                TARGETS reflectcpp
+                EXPORT CodeFirstCppDBTargets
+                ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+                LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+            )
+            install(
+                DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/extern/reflect-cpp/include/"
+                DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+            )
+        endif()
+    endif()
 
     install(
         EXPORT CodeFirstCppDBTargets

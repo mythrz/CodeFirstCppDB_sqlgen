@@ -7,6 +7,19 @@ on:
     branches: [main]
 
 jobs:
+  format-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+      - name: Verify C++ formatting
+        run: |
+          find Core DAL Samples Startup \( -name '*.ixx' -o -name '*.cpp' -o -name '*.hpp' \) -print0 \
+            | xargs -0 clang-format --dry-run -Werror
+
   build-and-test:
     runs-on: ubuntu-24.04
     strategy:
@@ -34,7 +47,63 @@ jobs:
         run: cmake --preset ${{ matrix.preset }}
 
       - name: Build (${{ matrix.preset }})
-        run: cmake --build --preset build-${{ matrix.preset }}
+        run: cmake --build --preset build-${{ matrix.preset }} -j 2
 
       - name: Test (${{ matrix.preset }})
         run: ctest --preset test-${{ matrix.preset }} --output-on-failure
+
+  contracts-and-packaging:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install GCC 16 and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common ninja-build libsqlite3-dev
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-16 g++-16
+
+      - name: Configure, build, and test with P2900 contracts enabled
+        env:
+          CC: gcc-16
+          CXX: g++-16
+        run: |
+          cmake -S . -B build-contracts -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEFIRST_ENABLE_CONTRACTS=ON
+          cmake --build build-contracts -j 2
+          ctest --test-dir build-contracts --output-on-failure
+
+      - name: Install and verify find_package consumer
+        env:
+          CC: gcc-16
+          CXX: g++-16
+        run: |
+          cmake -S . -B build-install -G Ninja -DCMAKE_BUILD_TYPE=Release -DCODEFIRST_BUILD_TESTS=OFF -DCODEFIRST_BUILD_SAMPLES=OFF -DCODEFIRST_INSTALL=ON -DCMAKE_INSTALL_PREFIX=/tmp/cf_prefix
+          cmake --build build-install -j 2
+          cmake --install build-install
+          mkdir -p /tmp/cf_consumer
+          cat <<'EOF' > /tmp/cf_consumer/CMakeLists.txt
+          cmake_minimum_required(VERSION 3.30)
+          project(consumer LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 26)
+          set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+          find_package(CodeFirstCppDB CONFIG REQUIRED)
+          add_executable(consumer main.cpp)
+          target_link_libraries(consumer PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
+          EOF
+          cat <<'EOF' > /tmp/cf_consumer/main.cpp
+          import std;
+          import core;
+          import dal;
+          int main()
+          {
+              auto conn = DAL::SQLiteConnection::connect(":memory:");
+              return conn ? 0 : 1;
+          }
+          EOF
+          cmake -S /tmp/cf_consumer -B /tmp/cf_consumer/build -G Ninja -DCMAKE_PREFIX_PATH=/tmp/cf_prefix
+          cmake --build /tmp/cf_consumer/build -j 2
+          /tmp/cf_consumer/build/consumer

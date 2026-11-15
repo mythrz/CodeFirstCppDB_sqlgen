@@ -24,25 +24,21 @@ export namespace DAL::Schema
 
         static consteval auto column_names()
         {
-            static constexpr auto members = std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
-            std::array<std::string_view, members.size()> names{};
-            for (std::size_t i = 0; i < members.size(); ++i)
+            std::array<std::string_view, members_v<DTO>.size()> names{};
+            for (std::size_t i = 0; i < members_v<DTO>.size(); ++i)
             {
-                names[i] = std::meta::identifier_of(members[i]);
+                names[i] = std::meta::identifier_of(members_v<DTO>[i]);
             }
             return names;
         }
 
         static consteval auto key_members()
         {
-            static constexpr auto members = std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
             std::array<std::meta::info, key_arity> result{};
             std::size_t idx = 0;
             constexpr bool use_pk = (primary_key_count<DTO>() > 0);
 
-            template for (constexpr auto m : members)
+            template for (constexpr auto m : members_v<DTO>)
             {
                 using RawFieldType = [:std::meta::type_of(m):];
                 using FieldType = std::remove_cvref_t<RawFieldType>;
@@ -77,24 +73,22 @@ export namespace DAL::Schema
             static constexpr auto km = key_members();
             if constexpr (is_composite_key)
             {
-                return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                    return KeyType{
-                        static_cast<std::tuple_element_t<Is, typename KeyType::tuple_type>>(
-                            dto.[:km[Is]:].value())...
-                    };
+                return [&]<std::size_t... Is>(std::index_sequence<Is...>)
+                {
+                    return KeyType{ static_cast<std::tuple_element_t<Is, typename KeyType::tuple_type>>(dto.[:km[Is]:].value())... };
                 }(std::make_index_sequence<key_arity>{});
             }
             else
             {
-                return KeyType{
-                    static_cast<typename KeyType::key_type>(dto.[:km[0]:].value())
-                };
+                return KeyType{ static_cast<typename KeyType::key_type>(dto.[:km[0]:].value()) };
             }
         }
 
         [[nodiscard]] static constexpr KeyType extract_key(const Domain& domain)
         {
-            if constexpr (requires { { domain.getKey() } -> std::convertible_to<KeyType>; })
+            if constexpr (requires {
+                              { domain.getKey() } -> std::convertible_to<KeyType>;
+                          })
             {
                 return domain.getKey();
             }

@@ -80,30 +80,26 @@ int main(int argc, char* argv[])
             return 1;
         }
 
-        auto s1Res = db.somethings.add_returning(
-            Core::Something(Core::SomethingId{ 0 }, "Laptop", "Electronics", "Developer Workstation"));
+        auto s1Res = db.somethings.add_returning(Core::Something(Core::SomethingId{ 0 }, "Laptop", "Electronics", "Developer Workstation"));
         if (!s1Res)
         {
             std::println(std::cerr, "Failed to add something1: {}", s1Res.error().to_string());
             return 1;
         }
-        auto s2Res = db.somethings.add_returning(
-            Core::Something(Core::SomethingId{ 0 }, "Coffee Machine", "Appliances", "Espresso Maker"));
+        auto s2Res = db.somethings.add_returning(Core::Something(Core::SomethingId{ 0 }, "Coffee Machine", "Appliances", "Espresso Maker"));
         if (!s2Res)
         {
             std::println(std::cerr, "Failed to add something2: {}", s2Res.error().to_string());
             return 1;
         }
 
-        auto link1Res = db.personSomethings.add(
-            Core::Person_Something(p1Res->getId(), s1Res->getId(), "Owner"));
+        auto link1Res = db.personSomethings.add(Core::Person_Something(p1Res->getId(), s1Res->getId(), "Owner"));
         if (!link1Res)
         {
             std::println(std::cerr, "Failed to add link1: {}", link1Res.error().to_string());
             return 1;
         }
-        auto link2Res = db.personSomethings.add(
-            Core::Person_Something(p2Res->getId(), s2Res->getId(), "User"));
+        auto link2Res = db.personSomethings.add(Core::Person_Something(p2Res->getId(), s2Res->getId(), "User"));
         if (!link2Res)
         {
             std::println(std::cerr, "Failed to add link2: {}", link2Res.error().to_string());
@@ -141,14 +137,12 @@ int main(int argc, char* argv[])
     std::println("--- Person_Something Junction Entities (via db.personSomethings) ---");
     for (const auto& link : db.personSomethings.to_vector())
     {
-        std::println("Person_Something: PersonID {} <-> SomethingID {} ({})",
-                     link.getPersonId(), link.getSomethingId(), link.getAssociationType());
+        std::println(
+            "Person_Something: PersonID {} <-> SomethingID {} ({})", link.getPersonId(), link.getSomethingId(), link.getAssociationType());
     }
 
     // 4. Demonstrate server-side DbQuery filtering & compile-time FK navigation
-    auto devItems = db.somethings
-        .where_equal<"category">("Electronics")
-        .to_vector();
+    auto devItems = db.somethings.where_equal<"category">("Electronics").to_vector();
     std::println("\nQuery: Found {} Electronics item(s):", devItems.size());
     for (const auto& item : devItems)
     {

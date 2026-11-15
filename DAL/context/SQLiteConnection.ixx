@@ -1,8 +1,8 @@
 module;
 #include <meta>
-#include <sqlite3.h>
 #include <sqlgen.hpp>
 #include <sqlgen/sqlite.hpp>
+#include <sqlite3.h>
 
 export module dal:sqlite_connection;
 
@@ -19,6 +19,11 @@ export namespace DAL
         bool wal_mode = false;
     };
 
+    struct RowCount
+    {
+        std::size_t count = 0;
+    };
+
     struct TableColumnInfo
     {
         std::int64_t cid = 0;
@@ -29,12 +34,7 @@ export namespace DAL
         std::int64_t pk_index = 0;
     };
 
-    using DynamicCell = std::variant<
-        std::monostate,
-        std::int64_t,
-        double,
-        std::string,
-        std::vector<std::byte>>;
+    using DynamicCell = std::variant<std::monostate, std::int64_t, double, std::string, std::vector<std::byte>>;
 
     struct DynamicRow
     {
@@ -73,27 +73,22 @@ export namespace DAL
                 try
                 {
                     (void)(*conn_)->rollback();
-                }
-                catch (...)
+                } catch (...)
                 {
                 }
                 in_transaction_ = false;
             }
             is_open_ = false;
-            last_rowid_view_ready_ = false;
-            changes_view_ready_ = false;
             conn_.reset();
         }
 
-        [[nodiscard]] static std::expected<std::shared_ptr<SQLiteConnection>, Core::DbError> connect(
-            const std::string& dbPath)
+        [[nodiscard]] static std::expected<std::shared_ptr<SQLiteConnection>, Core::DbError> connect(const std::string& dbPath)
         {
             return connect(dbPath, SQLiteConnectionOptions{});
         }
 
         [[nodiscard]] static std::expected<std::shared_ptr<SQLiteConnection>, Core::DbError> connect(
-            const std::string& dbPath,
-            const SQLiteConnectionOptions& options)
+            const std::string& dbPath, const SQLiteConnectionOptions& options)
         {
             auto res = sqlgen::sqlite::connect(dbPath);
             if (!res)
@@ -130,9 +125,8 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot create table: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot create table: database connection is closed") };
             }
             auto res = sqlgen::CreateTable<DTO>{ .if_not_exists_ = true }((*conn_));
             if (!res)
@@ -154,11 +148,8 @@ export namespace DAL
                     ++idx;
                 }
                 const std::string_view table_name = DTO::tablename;
-                const std::string index_sql = std::format(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS \"ux_{}_composite_pk\" ON \"{}\" ({});",
-                    table_name,
-                    table_name,
-                    cols);
+                const std::string index_sql =
+                    std::format("CREATE UNIQUE INDEX IF NOT EXISTS \"ux_{}_composite_pk\" ON \"{}\" ({});", table_name, table_name, cols);
                 if (auto idx_res = (*conn_)->execute(index_sql); !idx_res)
                 {
                     return std::unexpected<Core::DbError>{ map_sqlite_error(idx_res.error().what()) };
@@ -168,20 +159,17 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral IndexName, typename DTO, typename... ColTypes>
-            requires (sizeof...(ColTypes) >= 1)
-        std::expected<void, Core::DbError> ensure_index_created(bool unique, const ColTypes&...)
+            requires(sizeof...(ColTypes) >= 1)
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_index_created(bool unique, const ColTypes&...)
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot create index: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot create index: database connection is closed") };
             }
-            auto res = sqlgen::CreateIndex<IndexName, DTO, sqlgen::Nothing, ColTypes...>{
-                .unique_ = unique,
-                .if_not_exists_ = true,
-                .where_ = sqlgen::Nothing{}
-            }((*conn_));
+            auto res = sqlgen::CreateIndex<IndexName, DTO, sqlgen::Nothing, ColTypes...>{ .unique_ = unique,
+                                                                                          .if_not_exists_ = true,
+                                                                                          .where_ = sqlgen::Nothing{} }((*conn_));
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
@@ -190,21 +178,18 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral IndexName, typename DTO, typename WhereCond, typename... ColTypes>
-            requires (sizeof...(ColTypes) >= 1)
-        std::expected<void, Core::DbError> ensure_filtered_index_created(
+            requires(sizeof...(ColTypes) >= 1)
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_filtered_index_created(
             bool unique, const WhereCond& where_cond, const ColTypes&...)
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot create index: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot create index: database connection is closed") };
             }
-            auto res = sqlgen::CreateIndex<IndexName, DTO, WhereCond, ColTypes...>{
-                .unique_ = unique,
-                .if_not_exists_ = true,
-                .where_ = where_cond
-            }((*conn_));
+            auto res = sqlgen::CreateIndex<IndexName, DTO, WhereCond, ColTypes...>{ .unique_ = unique,
+                                                                                    .if_not_exists_ = true,
+                                                                                    .where_ = where_cond }((*conn_));
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
@@ -213,19 +198,15 @@ export namespace DAL
         }
 
         template<typename DTO>
-        std::expected<void, Core::DbError> ensure_table_dropped()
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_table_dropped()
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot drop table: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot drop table: database connection is closed") };
             }
-            auto res = sqlgen::Drop<DTO>{
-                .what_ = sqlgen::transpilation::get_table_or_view<DTO>(),
-                .cascade_ = false,
-                .if_exists_ = true
-            }((*conn_));
+            auto res = sqlgen::Drop<DTO>{ .what_ = sqlgen::transpilation::get_table_or_view<DTO>(), .cascade_ = false, .if_exists_ = true }(
+                (*conn_));
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
@@ -233,13 +214,12 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> enable_foreign_keys()
+        [[nodiscard]] std::expected<void, Core::DbError> enable_foreign_keys()
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot enable foreign keys: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot enable foreign keys: database connection is closed") };
             }
             auto res = (*conn_)->execute("PRAGMA foreign_keys = ON;");
             if (!res)
@@ -249,19 +229,16 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> begin_transaction()
+        [[nodiscard]] std::expected<void, Core::DbError> begin_transaction()
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot begin transaction: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot begin transaction: database connection is closed") };
             }
             if (in_transaction_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Transaction is already active")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Transaction is already active") };
             }
             auto res = (*conn_)->begin_transaction();
             if (!res)
@@ -272,19 +249,16 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> commit()
+        [[nodiscard]] std::expected<void, Core::DbError> commit()
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot commit transaction: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot commit transaction: database connection is closed") };
             }
             if (!in_transaction_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("No active transaction to commit")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("No active transaction to commit") };
             }
             auto res = (*conn_)->commit();
             if (!res)
@@ -295,19 +269,16 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> rollback()
+        [[nodiscard]] std::expected<void, Core::DbError> rollback()
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot rollback transaction: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot rollback transaction: database connection is closed") };
             }
             if (!in_transaction_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("No active transaction to rollback")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("No active transaction to rollback") };
             }
             auto res = (*conn_)->rollback();
             in_transaction_ = false;
@@ -343,9 +314,7 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto res = sqlgen::read<std::vector<DTO>>((*conn_));
             if (!res)
@@ -371,13 +340,9 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto query = sqlgen::read<std::vector<DTO>>
-                       | sqlgen::where(DAL::Schema::make_pk_where<DTO>(id))
-                       | sqlgen::limit(1);
+            auto query = sqlgen::read<std::vector<DTO>> | sqlgen::where(DAL::Schema::make_pk_where<DTO>(id)) | sqlgen::limit(1);
             auto res = query((*conn_));
             if (!res)
             {
@@ -406,13 +371,10 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto query = sqlgen::read<std::vector<DTO>>
-                       | sqlgen::where(DAL::Schema::make_composite_where<DTO>(parts...))
-                       | sqlgen::limit(1);
+            auto query =
+                sqlgen::read<std::vector<DTO>> | sqlgen::where(DAL::Schema::make_composite_where<DTO>(parts...)) | sqlgen::limit(1);
             auto res = query((*conn_));
             if (!res)
             {
@@ -443,8 +405,7 @@ export namespace DAL
             {
                 return {};
             }
-            auto query = sqlgen::read<std::vector<DTO>>
-                       | sqlgen::where(sqlgen::Col<ColLiteral>{} == val);
+            auto query = sqlgen::read<std::vector<DTO>> | sqlgen::where(sqlgen::Col<ColLiteral>{} == val);
             auto res = query((*conn_));
             if (res)
             {
@@ -458,9 +419,7 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto res = std::forward<Query>(query)((*conn_));
             if (!res)
@@ -475,9 +434,7 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto range_res = std::forward<Query>(query)((*conn_));
             if (!range_res)
@@ -492,9 +449,11 @@ export namespace DAL
                     return std::unexpected<Core::DbError>{ map_sqlite_error(item_res.error().what()) };
                 }
                 auto& nt = *item_res;
-                rows.push_back([&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                    return RowTuple{ std::move(rfl::get<static_cast<int>(Is)>(nt))... };
-                }(std::make_index_sequence<std::tuple_size_v<RowTuple>>{}));
+                rows.push_back(
+                    [&]<std::size_t... Is>(std::index_sequence<Is...>)
+                    {
+                        return RowTuple{ std::move(rfl::get<static_cast<int>(Is)>(nt))... };
+                    }(std::make_index_sequence<std::tuple_size_v<RowTuple>>{}));
             }
             return rows;
         }
@@ -515,9 +474,7 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                    sqlgen::error("Database connection is closed")
-                };
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
             }
             std::vector<DTO> vec{ item };
             return sqlgen::insert(std::ref(vec))((*conn_));
@@ -528,9 +485,7 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                    sqlgen::error("Database connection is closed")
-                };
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
             }
             return sqlgen::insert(std::ref(items))((*conn_));
         }
@@ -540,39 +495,32 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                    sqlgen::error("Database connection is closed")
-                };
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
             }
 
             static constexpr auto nk_members = DAL::Schema::non_key_members_of<DTO>();
             if constexpr (nk_members.empty())
             {
-                auto exists_query = sqlgen::read<std::vector<DTO>>
-                                  | sqlgen::where(DAL::Schema::make_dto_key_where<DTO>(item))
-                                  | sqlgen::limit(1);
+                auto exists_query =
+                    sqlgen::read<std::vector<DTO>> | sqlgen::where(DAL::Schema::make_dto_key_where<DTO>(item)) | sqlgen::limit(1);
                 auto exists_res = exists_query(*conn_);
                 if (!exists_res)
                 {
-                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                        sqlgen::error(exists_res.error().what())
-                    };
+                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(exists_res.error().what()) };
                 }
                 if (exists_res.value().empty())
                 {
-                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                        sqlgen::error("Update failed: item not found")
-                    };
+                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Update failed: item not found") };
                 }
                 return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ *conn_ };
             }
             else
             {
-                auto upd_res = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                auto upd_res = [&]<std::size_t... Is>(std::index_sequence<Is...>)
+                {
                     auto query = sqlgen::update<DTO>(
-                                     (DAL::Schema::col_of<nk_members[Is]>.set(
-                                         DAL::Schema::unwrap_field(item.[:nk_members[Is]:])))...)
-                               | sqlgen::where(DAL::Schema::make_dto_key_where<DTO>(item));
+                                     (DAL::Schema::col_of<nk_members[Is]>.set(DAL::Schema::unwrap_field(item.[:nk_members[Is]:])))...) |
+                        sqlgen::where(DAL::Schema::make_dto_key_where<DTO>(item));
                     return query(*conn_);
                 }(std::make_index_sequence<nk_members.size()>{});
                 if (!upd_res)
@@ -580,43 +528,10 @@ export namespace DAL
                     return upd_res;
                 }
 
-                if (!changes_view_ready_)
+                sqlite3* db = native_sqlite_handle();
+                if (db == nullptr || sqlite3_changes(db) == 0)
                 {
-                    if (auto r = (*conn_)->execute(
-                            "CREATE TEMP VIEW IF NOT EXISTS _codefirst_changes AS SELECT changes() AS count;");
-                        !r)
-                    {
-                        return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                            sqlgen::error(r.error().what())
-                        };
-                    }
-                    changes_view_ready_ = true;
-                }
-
-                sqlgen::dynamic::SelectFrom changes_q{
-                    .table_or_query = sqlgen::dynamic::Table{ .name = "_codefirst_changes" },
-                    .fields = {
-                        sqlgen::dynamic::SelectFrom::Field{
-                            .val = sqlgen::dynamic::Operation{
-                                sqlgen::dynamic::Column{ .alias = std::nullopt, .name = "count" }
-                            },
-                            .as = "count"
-                        }
-                    },
-                    .limit = sqlgen::dynamic::Limit{ 1 }
-                };
-                auto ch_res = (*conn_)->template read<std::vector<RowCount>>(changes_q);
-                if (!ch_res)
-                {
-                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                        sqlgen::error(ch_res.error().what())
-                    };
-                }
-                if (ch_res->empty() || (*ch_res)[0].count == 0)
-                {
-                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                        sqlgen::error("Update failed: item not found")
-                    };
+                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Update failed: item not found") };
                 }
                 return upd_res;
             }
@@ -627,12 +542,9 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                    sqlgen::error("Database connection is closed")
-                };
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
             }
-            return (sqlgen::delete_from<DTO>
-                  | sqlgen::where(DAL::Schema::make_pk_where<DTO>(id)))((*conn_));
+            return (sqlgen::delete_from<DTO> | sqlgen::where(DAL::Schema::make_pk_where<DTO>(id)))((*conn_));
         }
 
         template<typename DTO, typename... Parts>
@@ -640,12 +552,9 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                    sqlgen::error("Database connection is closed")
-                };
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
             }
-            return (sqlgen::delete_from<DTO>
-                  | sqlgen::where(DAL::Schema::make_composite_where<DTO>(parts...)))((*conn_));
+            return (sqlgen::delete_from<DTO> | sqlgen::where(DAL::Schema::make_composite_where<DTO>(parts...)))((*conn_));
         }
 
         template<typename DTO, typename IdType>
@@ -667,12 +576,9 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto query = sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">)
-                       | sqlgen::to<RowCount>;
+            auto query = sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">) | sqlgen::to<RowCount>;
             auto res = query((*conn_));
             if (!res)
             {
@@ -697,13 +603,9 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto query = sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">)
-                       | sqlgen::where(cond)
-                       | sqlgen::to<RowCount>;
+            auto query = sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">) | sqlgen::where(cond) | sqlgen::to<RowCount>;
             auto res = query((*conn_));
             if (!res)
             {
@@ -717,16 +619,13 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             struct AggRow
             {
                 std::optional<ResultT> val;
             };
-            auto query = sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">)
-                       | sqlgen::to<AggRow>;
+            auto query = sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">) | sqlgen::to<AggRow>;
             auto res = query((*conn_));
             if (!res)
             {
@@ -741,17 +640,13 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             struct AggRow
             {
                 std::optional<ResultT> val;
             };
-            auto query = sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">)
-                       | sqlgen::where(cond)
-                       | sqlgen::to<AggRow>;
+            auto query = sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">) | sqlgen::where(cond) | sqlgen::to<AggRow>;
             auto res = query((*conn_));
             if (!res)
             {
@@ -764,84 +659,45 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            if (!last_rowid_view_ready_)
+            sqlite3* db = native_sqlite_handle();
+            if (db == nullptr)
             {
-                if (auto r = (*conn_)->execute(
-                        "CREATE TEMP VIEW IF NOT EXISTS _codefirst_last_rowid AS SELECT last_insert_rowid() AS id;");
-                    !r)
-                {
-                    return std::unexpected<Core::DbError>{ map_sqlite_error(r.error().what()) };
-                }
-                last_rowid_view_ready_ = true;
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection handle is null") };
             }
-
-            struct LastRowIdRow
-            {
-                std::int64_t id = 0;
-            };
-            sqlgen::dynamic::SelectFrom query{
-                .table_or_query = sqlgen::dynamic::Table{ .name = "_codefirst_last_rowid" },
-                .fields = {
-                    sqlgen::dynamic::SelectFrom::Field{
-                        .val = sqlgen::dynamic::Operation{
-                            sqlgen::dynamic::Column{ .alias = std::nullopt, .name = "id" }
-                        },
-                        .as = "id"
-                    }
-                },
-                .limit = sqlgen::dynamic::Limit{ 1 }
-            };
-            auto res = (*conn_)->template read<std::vector<LastRowIdRow>>(query);
-            if (!res)
-            {
-                return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
-            }
-            if (res->empty())
-            {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::unknown("Failed to retrieve last_insert_rowid()")
-                };
-            }
-            return res->front().id;
+            return static_cast<std::int64_t>(sqlite3_last_insert_rowid(db));
         }
 
         template<typename DTO>
+            requires sqlgen::internal::has_constraint_v<DTO>
         auto upsert(const DTO& item)
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                    sqlgen::error("Database connection is closed")
-                };
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
             }
             std::vector<DTO> vec{ item };
             return sqlgen::insert_or_replace(std::ref(vec))((*conn_));
         }
 
         template<typename DTO>
+            requires sqlgen::internal::has_constraint_v<DTO>
         auto upsert_many(const std::vector<DTO>& items)
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{
-                    sqlgen::error("Database connection is closed")
-                };
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
             }
             return sqlgen::insert_or_replace(std::ref(items))((*conn_));
         }
 
         template<typename DTO, typename Condition>
-        std::expected<void, Core::DbError> delete_where(const Condition& cond)
+        [[nodiscard]] std::expected<void, Core::DbError> delete_where(const Condition& cond)
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto query = sqlgen::delete_from<DTO> | sqlgen::where(cond);
             auto res = query((*conn_));
@@ -853,13 +709,11 @@ export namespace DAL
         }
 
         template<typename DTO, typename SetExpr, typename Condition>
-        std::expected<void, Core::DbError> update_where(const SetExpr& set_expr, const Condition& cond)
+        [[nodiscard]] std::expected<void, Core::DbError> update_where(const SetExpr& set_expr, const Condition& cond)
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto query = sqlgen::update<DTO>(set_expr) | sqlgen::where(cond);
             auto res = query((*conn_));
@@ -871,14 +725,12 @@ export namespace DAL
         }
 
         template<typename DTO, typename Condition, typename... SetExprs>
-            requires (sizeof...(SetExprs) >= 2)
-        std::expected<void, Core::DbError> update_where_many(const Condition& cond, const SetExprs&... set_exprs)
+            requires(sizeof...(SetExprs) >= 2)
+        [[nodiscard]] std::expected<void, Core::DbError> update_where_many(const Condition& cond, const SetExprs&... set_exprs)
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto query = sqlgen::update<DTO>(set_exprs...) | sqlgen::where(cond);
             auto res = query((*conn_));
@@ -889,13 +741,11 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> savepoint(std::string_view name)
+        [[nodiscard]] std::expected<void, Core::DbError> savepoint(std::string_view name)
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto res = (*conn_)->execute(std::format("SAVEPOINT \"{}\";", name));
             if (!res)
@@ -905,13 +755,11 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> release_savepoint(std::string_view name)
+        [[nodiscard]] std::expected<void, Core::DbError> release_savepoint(std::string_view name)
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto res = (*conn_)->execute(std::format("RELEASE SAVEPOINT \"{}\";", name));
             if (!res)
@@ -921,16 +769,13 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> rollback_to_savepoint(std::string_view name)
+        [[nodiscard]] std::expected<void, Core::DbError> rollback_to_savepoint(std::string_view name)
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto res = (*conn_)->execute(
-                std::format("ROLLBACK TO SAVEPOINT \"{}\"; RELEASE SAVEPOINT \"{}\";", name, name));
+            auto res = (*conn_)->execute(std::format("ROLLBACK TO SAVEPOINT \"{}\"; RELEASE SAVEPOINT \"{}\";", name, name));
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
@@ -938,13 +783,11 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> set_busy_timeout(std::chrono::milliseconds timeout)
+        [[nodiscard]] std::expected<void, Core::DbError> set_busy_timeout(std::chrono::milliseconds timeout)
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto res = (*conn_)->execute(std::format("PRAGMA busy_timeout = {};", timeout.count()));
             if (!res)
@@ -954,13 +797,11 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> enable_wal_mode()
+        [[nodiscard]] std::expected<void, Core::DbError> enable_wal_mode()
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             auto res = (*conn_)->execute("PRAGMA journal_mode = WAL;");
             if (!res)
@@ -974,128 +815,77 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            if (auto r = (*conn_)->execute(
-                    "CREATE TEMP VIEW IF NOT EXISTS _codefirst_tables AS "
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name;");
-                !r)
-            {
-                return std::unexpected<Core::DbError>{ map_sqlite_error(r.error().what()) };
-            }
-            struct TableNameRow
-            {
-                std::string name;
-            };
-            sqlgen::dynamic::SelectFrom query{
-                .table_or_query = sqlgen::dynamic::Table{ .name = "_codefirst_tables" },
-                .fields = {
-                    sqlgen::dynamic::SelectFrom::Field{
-                        .val = sqlgen::dynamic::Operation{
-                            sqlgen::dynamic::Column{ .alias = std::nullopt, .name = "name" }
-                        },
-                        .as = "name"
-                    }
-                }
-            };
-            auto res = (*conn_)->template read<std::vector<TableNameRow>>(query);
+            auto res = query_rows("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name;");
             if (!res)
             {
-                return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
+                return std::unexpected<Core::DbError>{ res.error() };
             }
             std::vector<std::string> tables;
-            tables.reserve(res->size());
-            for (auto& row : *res)
+            tables.reserve(res->rows.size());
+            for (const auto& row : res->rows)
             {
-                tables.push_back(std::move(row.name));
+                if (!row.cells.empty() && std::holds_alternative<std::string>(row.cells[0]))
+                {
+                    tables.push_back(std::get<std::string>(row.cells[0]));
+                }
             }
             return tables;
         }
 
-        [[nodiscard]] std::expected<std::vector<TableColumnInfo>, Core::DbError> table_info(
-            std::string_view table_name) const
+        [[nodiscard]] std::expected<std::vector<TableColumnInfo>, Core::DbError> table_info(std::string_view table_name) const
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            if (table_name.empty()
-                || table_name.find('\0') != std::string_view::npos
-                || table_name.find_first_of("'\";\r\n") != std::string_view::npos)
+            if (table_name.empty() || table_name.find('\0') != std::string_view::npos ||
+                table_name.find_first_of("'\";\r\n") != std::string_view::npos)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::unknown("Invalid table name for table_info()")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("Invalid table name for table_info()") };
             }
-            const std::string view_sql = std::format(
-                "DROP VIEW IF EXISTS temp._codefirst_table_info; "
-                "CREATE TEMP VIEW temp._codefirst_table_info AS "
-                "SELECT cid, name, type, \"notnull\" AS not_null, dflt_value AS default_value, pk AS pk_index "
-                "FROM pragma_table_info('{}');",
-                table_name);
-            if (auto r = (*conn_)->execute(view_sql); !r)
-            {
-                return std::unexpected<Core::DbError>{ map_sqlite_error(r.error().what()) };
-            }
-            struct RawColumnInfo
-            {
-                std::int64_t cid = 0;
-                std::string name;
-                std::string type;
-                std::int64_t not_null = 0;
-                std::optional<std::string> default_value;
-                std::int64_t pk_index = 0;
-            };
-            sqlgen::dynamic::SelectFrom query{
-                .table_or_query = sqlgen::dynamic::Table{ .name = "_codefirst_table_info" },
-                .fields = {
-                    sqlgen::dynamic::SelectFrom::Field{
-                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .alias = std::nullopt, .name = "cid" } },
-                        .as = "cid"
-                    },
-                    sqlgen::dynamic::SelectFrom::Field{
-                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .alias = std::nullopt, .name = "name" } },
-                        .as = "name"
-                    },
-                    sqlgen::dynamic::SelectFrom::Field{
-                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .alias = std::nullopt, .name = "type" } },
-                        .as = "type"
-                    },
-                    sqlgen::dynamic::SelectFrom::Field{
-                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .alias = std::nullopt, .name = "not_null" } },
-                        .as = "not_null"
-                    },
-                    sqlgen::dynamic::SelectFrom::Field{
-                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .alias = std::nullopt, .name = "default_value" } },
-                        .as = "default_value"
-                    },
-                    sqlgen::dynamic::SelectFrom::Field{
-                        .val = sqlgen::dynamic::Operation{ sqlgen::dynamic::Column{ .alias = std::nullopt, .name = "pk_index" } },
-                        .as = "pk_index"
-                    }
-                }
-            };
-            auto res = (*conn_)->template read<std::vector<RawColumnInfo>>(query);
+            const std::array<DynamicCell, 1> params{ std::string{ table_name } };
+            auto res = query_rows(
+                "SELECT cid, name, type, \"notnull\", dflt_value, pk FROM pragma_table_info(?);", std::span<const DynamicCell>{ params });
             if (!res)
             {
-                return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
+                return std::unexpected<Core::DbError>{ res.error() };
             }
             std::vector<TableColumnInfo> cols;
-            cols.reserve(res->size());
-            for (auto& row : *res)
+            cols.reserve(res->rows.size());
+            for (const auto& row : res->rows)
             {
-                cols.push_back(TableColumnInfo{
-                    .cid = row.cid,
-                    .name = std::move(row.name),
-                    .type = std::move(row.type),
-                    .not_null = (row.not_null != 0),
-                    .default_value = std::move(row.default_value),
-                    .pk_index = row.pk_index
-                });
+                if (row.cells.size() < 6)
+                {
+                    continue;
+                }
+                TableColumnInfo info;
+                if (const auto* v = std::get_if<std::int64_t>(&row.cells[0]))
+                {
+                    info.cid = *v;
+                }
+                if (const auto* v = std::get_if<std::string>(&row.cells[1]))
+                {
+                    info.name = *v;
+                }
+                if (const auto* v = std::get_if<std::string>(&row.cells[2]))
+                {
+                    info.type = *v;
+                }
+                if (const auto* v = std::get_if<std::int64_t>(&row.cells[3]))
+                {
+                    info.not_null = (*v != 0);
+                }
+                if (const auto* v = std::get_if<std::string>(&row.cells[4]))
+                {
+                    info.default_value = *v;
+                }
+                if (const auto* v = std::get_if<std::int64_t>(&row.cells[5]))
+                {
+                    info.pk_index = *v;
+                }
+                cols.push_back(std::move(info));
             }
             return cols;
         }
@@ -1104,15 +894,11 @@ export namespace DAL
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             if (sql.empty())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::unknown("SQL statement cannot be empty")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("SQL statement cannot be empty") };
             }
             auto res = (*conn_)->execute(std::string{ sql });
             if (!res)
@@ -1123,32 +909,24 @@ export namespace DAL
         }
 
         [[nodiscard]] std::expected<DynamicQueryResult, Core::DbError> query_rows(
-            std::string_view sql,
-            std::span<const DynamicCell> params = {}) const
+            std::string_view sql, std::span<const DynamicCell> params = {}) const
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             if (sql.empty())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::unknown("SQL statement cannot be empty")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("SQL statement cannot be empty") };
             }
             sqlite3* db = native_sqlite_handle();
             if (db == nullptr)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Native SQLite handle is unavailable")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Native SQLite handle is unavailable") };
             }
 
             sqlite3_stmt* raw_stmt = nullptr;
-            const int prep_rc = sqlite3_prepare_v2(
-                db, sql.data(), static_cast<int>(sql.size()), &raw_stmt, nullptr);
+            const int prep_rc = sqlite3_prepare_v2(db, sql.data(), static_cast<int>(sql.size()), &raw_stmt, nullptr);
             if (prep_rc != SQLITE_OK)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(sqlite3_errmsg(db)) };
@@ -1202,26 +980,26 @@ export namespace DAL
                         row.cells.emplace_back(sqlite3_column_double(raw_stmt, c));
                         break;
                     case SQLITE_TEXT:
-                    {
-                        const auto* txt = reinterpret_cast<const char*>(sqlite3_column_text(raw_stmt, c));
-                        const int len = sqlite3_column_bytes(raw_stmt, c);
-                        row.cells.emplace_back(txt != nullptr ? std::string(txt, static_cast<std::size_t>(len)) : std::string{});
-                        break;
-                    }
+                        {
+                            const auto* txt = reinterpret_cast<const char*>(sqlite3_column_text(raw_stmt, c));
+                            const int len = sqlite3_column_bytes(raw_stmt, c);
+                            row.cells.emplace_back(txt != nullptr ? std::string(txt, static_cast<std::size_t>(len)) : std::string{});
+                            break;
+                        }
                     case SQLITE_BLOB:
-                    {
-                        const auto* blob = static_cast<const std::byte*>(sqlite3_column_blob(raw_stmt, c));
-                        const int len = sqlite3_column_bytes(raw_stmt, c);
-                        if (blob != nullptr && len > 0)
                         {
-                            row.cells.emplace_back(std::vector<std::byte>(blob, blob + len));
+                            const auto* blob = static_cast<const std::byte*>(sqlite3_column_blob(raw_stmt, c));
+                            const int len = sqlite3_column_bytes(raw_stmt, c);
+                            if (blob != nullptr && len > 0)
+                            {
+                                row.cells.emplace_back(std::vector<std::byte>(blob, blob + len));
+                            }
+                            else
+                            {
+                                row.cells.emplace_back(std::vector<std::byte>{});
+                            }
+                            break;
                         }
-                        else
-                        {
-                            row.cells.emplace_back(std::vector<std::byte>{});
-                        }
-                        break;
-                    }
                     default:
                         row.cells.emplace_back(std::monostate{});
                         break;
@@ -1232,33 +1010,24 @@ export namespace DAL
             return result;
         }
 
-        [[nodiscard]] std::expected<void, Core::DbError> execute_prepared(
-            std::string_view sql,
-            std::span<const DynamicCell> params = {})
+        [[nodiscard]] std::expected<void, Core::DbError> execute_prepared(std::string_view sql, std::span<const DynamicCell> params = {})
         {
             if (!is_open())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             if (sql.empty())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::unknown("SQL statement cannot be empty")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("SQL statement cannot be empty") };
             }
             sqlite3* db = native_sqlite_handle();
             if (db == nullptr)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Native SQLite handle is unavailable")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Native SQLite handle is unavailable") };
             }
 
             sqlite3_stmt* raw_stmt = nullptr;
-            const int prep_rc = sqlite3_prepare_v2(
-                db, sql.data(), static_cast<int>(sql.size()), &raw_stmt, nullptr);
+            const int prep_rc = sqlite3_prepare_v2(db, sql.data(), static_cast<int>(sql.size()), &raw_stmt, nullptr);
             if (prep_rc != SQLITE_OK)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(sqlite3_errmsg(db)) };
@@ -1290,16 +1059,15 @@ export namespace DAL
 
     private:
         [[nodiscard]] std::expected<void, Core::DbError> bind_dynamic_params(
-            sqlite3* db,
-            sqlite3_stmt* stmt,
-            std::span<const DynamicCell> params) const
+            sqlite3* db, sqlite3_stmt* stmt, std::span<const DynamicCell> params) const
         {
             for (std::size_t i = 0; i < params.size(); ++i)
             {
                 const int idx = static_cast<int>(i + 1);
                 int rc = SQLITE_OK;
                 std::visit(
-                    [&](const auto& val) {
+                    [&](const auto& val)
+                    {
                         using T = std::decay_t<decltype(val)>;
                         if constexpr (std::is_same_v<T, std::monostate>)
                         {
@@ -1315,13 +1083,11 @@ export namespace DAL
                         }
                         else if constexpr (std::is_same_v<T, std::string>)
                         {
-                            rc = sqlite3_bind_text(
-                                stmt, idx, val.data(), static_cast<int>(val.size()), SQLITE_TRANSIENT);
+                            rc = sqlite3_bind_text(stmt, idx, val.data(), static_cast<int>(val.size()), SQLITE_TRANSIENT);
                         }
                         else if constexpr (std::is_same_v<T, std::vector<std::byte>>)
                         {
-                            rc = sqlite3_bind_blob(
-                                stmt, idx, val.data(), static_cast<int>(val.size()), SQLITE_TRANSIENT);
+                            rc = sqlite3_bind_blob(stmt, idx, val.data(), static_cast<int>(val.size()), SQLITE_TRANSIENT);
                         }
                     },
                     params[i]);
@@ -1383,25 +1149,21 @@ export namespace DAL
                         break;
                     default:
                         err = Core::DbError::map_from_message(msg);
+                        err.trace = Core::DbError::capture_debug_trace();
                         break;
                     }
                     err.native_code = ext_code;
                     return err;
                 }
             }
-            return Core::DbError::map_from_message(msg);
+            auto err = Core::DbError::map_from_message(msg);
+            err.trace = Core::DbError::capture_debug_trace();
+            return err;
         }
-
-        struct RowCount
-        {
-            std::size_t count = 0;
-        };
 
         std::optional<sqlgen::Ref<sqlgen::sqlite::Connection>> conn_;
         bool is_open_{ true };
         bool in_transaction_{ false };
-        mutable bool last_rowid_view_ready_{ false };
-        mutable bool changes_view_ready_{ false };
     };
 
 } // namespace DAL

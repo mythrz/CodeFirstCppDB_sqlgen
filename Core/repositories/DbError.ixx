@@ -18,6 +18,22 @@ export namespace Core
         DbErrorCode code{ DbErrorCode::Unknown };
         std::string message;
         int native_code{ 0 };
+        std::string trace{};
+
+        [[nodiscard]] static std::string capture_debug_trace()
+        {
+#ifndef NDEBUG
+            const auto st = std::stacktrace::current(2, 8);
+            return st.empty() ? std::string{} : std::to_string(st);
+#else
+            return {};
+#endif
+        }
+
+        [[nodiscard]] static DbError create(DbErrorCode err_code, std::string msg, int sql_native_code = 0)
+        {
+            return DbError{ err_code, std::move(msg), sql_native_code, capture_debug_trace() };
+        }
 
         [[nodiscard]] std::string_view code_name() const noexcept
         {
@@ -39,42 +55,47 @@ export namespace Core
 
         [[nodiscard]] std::string to_string() const
         {
+            std::string base;
             if (native_code != 0)
             {
-                return std::format(
-                    "Error [{}: {}, native={}]: {}",
-                    static_cast<int>(code),
-                    code_name(),
-                    native_code,
-                    message);
+                base = std::format("Error [{}: {}, native={}]: {}", static_cast<int>(code), code_name(), native_code, message);
             }
-            return std::format("Error [{}: {}]: {}", static_cast<int>(code), code_name(), message);
+            else
+            {
+                base = std::format("Error [{}: {}]: {}", static_cast<int>(code), code_name(), message);
+            }
+            if (!trace.empty())
+            {
+                base += "\nStacktrace:\n";
+                base += trace;
+            }
+            return base;
         }
 
         // Factory methods
         [[nodiscard]] static DbError not_found(std::string msg = "Record not found")
         {
-            return DbError{ DbErrorCode::NotFound, std::move(msg) };
+            return create(DbErrorCode::NotFound, std::move(msg));
         }
 
         [[nodiscard]] static DbError duplicate_key(std::string msg = "Duplicate key violation")
         {
-            return DbError{ DbErrorCode::DuplicateKey, std::move(msg) };
+            return create(DbErrorCode::DuplicateKey, std::move(msg));
         }
 
         [[nodiscard]] static DbError constraint_violation(std::string msg = "Constraint violation")
         {
-            return DbError{ DbErrorCode::ConstraintViolation, std::move(msg) };
+            return create(DbErrorCode::ConstraintViolation, std::move(msg));
         }
 
         [[nodiscard]] static DbError connection_error(std::string msg = "Database connection error")
         {
-            return DbError{ DbErrorCode::ConnectionError, std::move(msg) };
+            return create(DbErrorCode::ConnectionError, std::move(msg));
         }
 
         [[nodiscard]] static DbError unknown(std::string msg = "Unknown database error")
         {
-            return DbError{ DbErrorCode::Unknown, std::move(msg) };
+            return create(DbErrorCode::Unknown, std::move(msg));
         }
 
         // Diagnostic parser mapping database/driver messages to structured codes
@@ -85,7 +106,10 @@ export namespace Core
                 lower_msg.begin(),
                 lower_msg.end(),
                 lower_msg.begin(),
-                [](unsigned char c) { return std::tolower(c); });
+                [](unsigned char c)
+                {
+                    return std::tolower(c);
+                });
 
             if (lower_msg.find("unique") != std::string::npos || lower_msg.find("duplicate") != std::string::npos)
             {
@@ -99,10 +123,8 @@ export namespace Core
             {
                 return DbError{ DbErrorCode::NotFound, std::string(msg) };
             }
-            if (lower_msg.find("connection") != std::string::npos ||
-                lower_msg.find("busy") != std::string::npos ||
-                lower_msg.find("locked") != std::string::npos ||
-                lower_msg.find("closed") != std::string::npos)
+            if (lower_msg.find("connection") != std::string::npos || lower_msg.find("busy") != std::string::npos ||
+                lower_msg.find("locked") != std::string::npos || lower_msg.find("closed") != std::string::npos)
             {
                 return DbError{ DbErrorCode::ConnectionError, std::string(msg) };
             }

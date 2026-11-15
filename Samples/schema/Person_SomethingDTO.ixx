@@ -27,10 +27,7 @@ export namespace DAL::Schema
     };
 
     static_assert(
-        RelationalEntity<Person_SomethingDTO>,
-        "Person_SomethingDTO must satisfy RelationalEntity constraint as a composite-key entity.");
-    static_assert(
-        CompositePrimaryKey<Person_SomethingDTO>,
-        "Person_SomethingDTO must satisfy CompositePrimaryKey constraint.");
+        RelationalEntity<Person_SomethingDTO>, "Person_SomethingDTO must satisfy RelationalEntity constraint as a composite-key entity.");
+    static_assert(CompositePrimaryKey<Person_SomethingDTO>, "Person_SomethingDTO must satisfy CompositePrimaryKey constraint.");
     static_assert(HasSchema<Core::Person_Something>, "Core::Person_Something must satisfy HasSchema constraint.");
 } // namespace DAL::Schema

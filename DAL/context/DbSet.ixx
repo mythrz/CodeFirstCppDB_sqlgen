@@ -56,14 +56,20 @@ export namespace DAL
         };
 
         template<typename T>
-        struct IsOptionalField : std::false_type {};
+        struct IsOptionalField : std::false_type
+        {
+        };
 
         template<typename T>
-        struct IsOptionalField<std::optional<T>> : std::true_type {};
+        struct IsOptionalField<std::optional<T>> : std::true_type
+        {
+        };
 
         template<typename T>
             requires requires { typename T::ReflectionType; }
-        struct IsOptionalField<T> : IsOptionalField<typename T::ReflectionType> {};
+        struct IsOptionalField<T> : IsOptionalField<typename T::ReflectionType>
+        {
+        };
 
         template<typename OrderByVariant, typename NewAscCol, typename NewDescCol>
         struct AppendOrderByVariant;
@@ -80,20 +86,20 @@ export namespace DAL
                 using type = sqlgen::OrderBy<Cols..., NextCol>;
             };
 
-            using type = std::variant<
-                typename AppendOne<PrevOrderBys, NewAscCol>::type...,
-                typename AppendOne<PrevOrderBys, NewDescCol>::type...>;
+            using type =
+                std::variant<typename AppendOne<PrevOrderBys, NewAscCol>::type..., typename AppendOne<PrevOrderBys, NewDescCol>::type...>;
         };
     } // namespace detail
 
     // Fluent server-side query builder for DbSet (Phases 10, 12, 13, 14).
     // Translates filtering, sorting, pagination, aggregations, and bulk deletes into sqlgen pipelines.
-    template<typename Domain,
-             typename DTO,
-             typename ConnectionHandle,
-             typename KeyType = Schema::EntityKey_t<Domain, DTO>,
-             typename WhereCondT = rfl::Nothing,
-             typename OrderByT = rfl::Nothing>
+    template<
+        typename Domain,
+        typename DTO,
+        typename ConnectionHandle,
+        typename KeyType = Schema::EntityKey_t<Domain, DTO>,
+        typename WhereCondT = rfl::Nothing,
+        typename OrderByT = rfl::Nothing>
         requires DAL::Mappers::Mappable<Domain, DTO> && Repositories::DatabaseConnection<ConnectionHandle>
     class DbQuery
     {
@@ -102,14 +108,15 @@ export namespace DAL
         using TrackFn = std::function<void(const Domain&)>;
         using ClearTrackFn = std::function<void()>;
 
-        DbQuery(std::shared_ptr<RepoType> repo,
-                std::shared_ptr<ConnectionHandle> conn,
-                WhereCondT where_cond = {},
-                OrderByT order_by = {},
-                std::optional<std::size_t> limit = std::nullopt,
-                std::optional<std::size_t> offset = std::nullopt,
-                TrackFn track_fn = {},
-                ClearTrackFn clear_track_fn = {})
+        DbQuery(
+            std::shared_ptr<RepoType> repo,
+            std::shared_ptr<ConnectionHandle> conn,
+            WhereCondT where_cond = {},
+            OrderByT order_by = {},
+            std::optional<std::size_t> limit = std::nullopt,
+            std::optional<std::size_t> offset = std::nullopt,
+            TrackFn track_fn = {},
+            ClearTrackFn clear_track_fn = {})
             : repo_(std::move(repo))
             , conn_(std::move(conn))
             , where_cond_(std::move(where_cond))
@@ -216,8 +223,8 @@ export namespace DAL
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
             return or_where_sql(
-                (Schema::col_of<dto_m> >= detail::normalize_query_val(low))
-                && (Schema::col_of<dto_m> <= detail::normalize_query_val(high)));
+                (Schema::col_of<dto_m> >= detail::normalize_query_val(low)) &&
+                (Schema::col_of<dto_m> <= detail::normalize_query_val(high)));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -237,7 +244,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
-            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+            requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto or_where_in(const Ts&... vals) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
@@ -260,7 +267,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
-            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+            requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto or_where_not_in(const Ts&... vals) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
@@ -347,7 +354,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
-            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+            requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_in(const Ts&... vals) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
@@ -394,7 +401,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
-            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+            requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_not_in(const Ts&... vals) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
@@ -407,8 +414,8 @@ export namespace DAL
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
             return where_sql(
-                (Schema::col_of<dto_m> >= detail::normalize_query_val(low))
-                && (Schema::col_of<dto_m> <= detail::normalize_query_val(high)));
+                (Schema::col_of<dto_m> >= detail::normalize_query_val(low)) &&
+                (Schema::col_of<dto_m> <= detail::normalize_query_val(high)));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -440,8 +447,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
-            requires (!std::same_as<OrderByT, rfl::Nothing>)
-                  && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+            requires(!std::same_as<OrderByT, rfl::Nothing>) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto then_by(bool desc = false) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
@@ -451,7 +457,8 @@ export namespace DAL
             using NewVarT = typename Helper::type;
 
             NewVarT combined = std::visit(
-                [desc](const auto& prev_ob) -> NewVarT {
+                [desc](const auto& prev_ob) -> NewVarT
+                {
                     using PrevOB = std::remove_cvref_t<decltype(prev_ob)>;
                     if (desc)
                     {
@@ -470,7 +477,7 @@ export namespace DAL
                 repo_, conn_, where_cond_, std::move(combined), limit_, offset_, track_fn_, clear_track_fn_);
         }
 
-        [[nodiscard]] DbQuery limit(std::size_t limit_count) const
+        [[nodiscard]] DbQuery limit(std::size_t limit_count) const pre(limit_count > 0)
         {
             return DbQuery(repo_, conn_, where_cond_, order_by_, limit_count, offset_, track_fn_, clear_track_fn_);
         }
@@ -480,7 +487,7 @@ export namespace DAL
             return DbQuery(repo_, conn_, where_cond_, order_by_, limit_, offset_count, track_fn_, clear_track_fn_);
         }
 
-        [[nodiscard]] DbQuery page(std::size_t limit_count, std::size_t offset_count = 0) const
+        [[nodiscard]] DbQuery page(std::size_t limit_count, std::size_t offset_count = 0) const pre(limit_count > 0)
         {
             return DbQuery(repo_, conn_, where_cond_, order_by_, limit_count, offset_count, track_fn_, clear_track_fn_);
         }
@@ -489,14 +496,10 @@ export namespace DAL
         {
             if (!conn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is null")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
 
-            if constexpr (requires(const ConnectionHandle& c) {
-                c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>);
-            })
+            if constexpr (requires(const ConnectionHandle& c) { c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>); })
             {
                 auto dto_res = execute_query(*conn_);
                 if (!dto_res)
@@ -556,9 +559,7 @@ export namespace DAL
         {
             if (!conn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is null")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
 
             if (!limit_.has_value() && !offset_.has_value())
@@ -572,9 +573,7 @@ export namespace DAL
                 }
                 else
                 {
-                    if constexpr (requires(const ConnectionHandle& c) {
-                        c.template try_count_where<DTO>(where_cond_);
-                    })
+                    if constexpr (requires(const ConnectionHandle& c) { c.template try_count_where<DTO>(where_cond_); })
                     {
                         return conn_->template try_count_where<DTO>(where_cond_);
                     }
@@ -668,16 +667,12 @@ export namespace DAL
             using SplicedT = [:std::meta::type_of(dto_m):];
             using RawT = std::remove_cvref_t<SplicedT>;
             using ScalarT = typename detail::UnwrapColumnScalar<RawT>::type;
-            using ColValueT = std::conditional_t<
-                detail::IsOptionalField<RawT>::value, std::optional<ScalarT>, ScalarT>;
+            using ColValueT = std::conditional_t<detail::IsOptionalField<RawT>::value, std::optional<ScalarT>, ScalarT>;
 
             if (!conn_)
             {
-                return std::expected<std::vector<ColValueT>, Core::DbError>{
-                    std::unexpected<Core::DbError>{
-                        Core::DbError::connection_error("Database connection is null")
-                    }
-                };
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is null") } };
             }
 
             struct ProjRow
@@ -685,11 +680,11 @@ export namespace DAL
                 RawT val{};
             };
 
-            auto with_where = [&]() {
+            auto with_where = [&]()
+            {
                 if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
                 {
-                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">)
-                         | sqlgen::where(where_cond_);
+                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">) | sqlgen::where(where_cond_);
                 }
                 else
                 {
@@ -697,11 +692,13 @@ export namespace DAL
                 }
             }();
 
-            auto rows_res = [&]() -> std::expected<std::vector<ProjRow>, Core::DbError> {
+            auto rows_res = [&]() -> std::expected<std::vector<ProjRow>, Core::DbError>
+            {
                 if constexpr (!std::same_as<OrderByT, rfl::Nothing>)
                 {
                     return std::visit(
-                        [&](const auto& ob) {
+                        [&](const auto& ob)
+                        {
                             return execute_projection<ProjRow>(*conn_, with_where | ob);
                         },
                         order_by_);
@@ -714,9 +711,7 @@ export namespace DAL
 
             if (!rows_res)
             {
-                return std::expected<std::vector<ColValueT>, Core::DbError>{
-                    std::unexpected<Core::DbError>{ rows_res.error() }
-                };
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{ rows_res.error() } };
             }
 
             std::vector<ColValueT> result;
@@ -776,16 +771,12 @@ export namespace DAL
             using SplicedT = [:std::meta::type_of(dto_m):];
             using RawT = std::remove_cvref_t<SplicedT>;
             using ScalarT = typename detail::UnwrapColumnScalar<RawT>::type;
-            using ColValueT = std::conditional_t<
-                detail::IsOptionalField<RawT>::value, std::optional<ScalarT>, ScalarT>;
+            using ColValueT = std::conditional_t<detail::IsOptionalField<RawT>::value, std::optional<ScalarT>, ScalarT>;
 
             if (!conn_)
             {
-                return std::expected<std::vector<ColValueT>, Core::DbError>{
-                    std::unexpected<Core::DbError>{
-                        Core::DbError::connection_error("Database connection is null")
-                    }
-                };
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is null") } };
             }
 
             struct ProjRow
@@ -793,25 +784,26 @@ export namespace DAL
                 RawT val{};
             };
 
-            auto with_group = [&]() {
+            auto with_group = [&]()
+            {
                 if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
                 {
-                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">)
-                         | sqlgen::where(where_cond_)
-                         | sqlgen::group_by(Schema::col_of<dto_m>);
+                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">) | sqlgen::where(where_cond_) |
+                        sqlgen::group_by(Schema::col_of<dto_m>);
                 }
                 else
                 {
-                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">)
-                         | sqlgen::group_by(Schema::col_of<dto_m>);
+                    return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">) | sqlgen::group_by(Schema::col_of<dto_m>);
                 }
             }();
 
-            auto rows_res = [&]() -> std::expected<std::vector<ProjRow>, Core::DbError> {
+            auto rows_res = [&]() -> std::expected<std::vector<ProjRow>, Core::DbError>
+            {
                 if constexpr (!std::same_as<OrderByT, rfl::Nothing>)
                 {
                     return std::visit(
-                        [&](const auto& ob) {
+                        [&](const auto& ob)
+                        {
                             return execute_projection<ProjRow>(*conn_, with_group | ob);
                         },
                         order_by_);
@@ -824,9 +816,7 @@ export namespace DAL
 
             if (!rows_res)
             {
-                return std::expected<std::vector<ColValueT>, Core::DbError>{
-                    std::unexpected<Core::DbError>{ rows_res.error() }
-                };
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{ rows_res.error() } };
             }
 
             std::vector<ColValueT> result;
@@ -859,40 +849,36 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 2)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+            requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto try_select_columns() const
         {
-            using RowTuple = std::tuple<std::remove_cvref_t<decltype(
-                std::declval<const DTO&>().[:DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>():])>...>;
+            using RowTuple = std::tuple<std::remove_cvref_t<
+                decltype(std::declval<const DTO&>().[:DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>():])>...>;
 
             if (!conn_)
             {
-                return std::expected<std::vector<RowTuple>, Core::DbError>{
-                    std::unexpected<Core::DbError>{
-                        Core::DbError::connection_error("Database connection is null")
-                    }
-                };
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is null") } };
             }
 
-            auto with_where = [&]() {
+            auto with_where = [&]()
+            {
                 if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
                 {
-                    return sqlgen::select_from<DTO>(
-                               Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...)
-                         | sqlgen::where(where_cond_);
+                    return sqlgen::select_from<DTO>(Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...) |
+                        sqlgen::where(where_cond_);
                 }
                 else
                 {
-                    return sqlgen::select_from<DTO>(
-                               Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
+                    return sqlgen::select_from<DTO>(Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
                 }
             }();
 
             if constexpr (!std::same_as<OrderByT, rfl::Nothing>)
             {
                 return std::visit(
-                    [&](const auto& ob) {
+                    [&](const auto& ob)
+                    {
                         return execute_tuple_projection<RowTuple>(*conn_, with_where | ob);
                     },
                     order_by_);
@@ -904,8 +890,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 2)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+            requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto select_columns() const
         {
             auto res = try_select_columns<ColLiterals...>();
@@ -918,44 +903,38 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 2)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+            requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto try_select_distinct_columns() const
         {
-            using RowTuple = std::tuple<std::remove_cvref_t<decltype(
-                std::declval<const DTO&>().[:DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>():])>...>;
+            using RowTuple = std::tuple<std::remove_cvref_t<
+                decltype(std::declval<const DTO&>().[:DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>():])>...>;
 
             if (!conn_)
             {
-                return std::expected<std::vector<RowTuple>, Core::DbError>{
-                    std::unexpected<Core::DbError>{
-                        Core::DbError::connection_error("Database connection is null")
-                    }
-                };
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is null") } };
             }
 
-            auto with_group = [&]() {
+            auto with_group = [&]()
+            {
                 if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
                 {
-                    return sqlgen::select_from<DTO>(
-                               Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...)
-                         | sqlgen::where(where_cond_)
-                         | sqlgen::group_by(
-                               Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
+                    return sqlgen::select_from<DTO>(Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...) |
+                        sqlgen::where(where_cond_) |
+                        sqlgen::group_by(Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
                 }
                 else
                 {
-                    return sqlgen::select_from<DTO>(
-                               Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...)
-                         | sqlgen::group_by(
-                               Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
+                    return sqlgen::select_from<DTO>(Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...) |
+                        sqlgen::group_by(Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
                 }
             }();
 
             if constexpr (!std::same_as<OrderByT, rfl::Nothing>)
             {
                 return std::visit(
-                    [&](const auto& ob) {
+                    [&](const auto& ob)
+                    {
                         return execute_tuple_projection<RowTuple>(*conn_, with_group | ob);
                     },
                     order_by_);
@@ -967,8 +946,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 2)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+            requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto select_distinct_columns() const
         {
             auto res = try_select_distinct_columns<ColLiterals...>();
@@ -981,35 +959,28 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral IndexName, rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 1)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
-        std::expected<void, Core::DbError> ensure_index_created(bool unique = false) const
+            requires(sizeof...(ColLiterals) >= 1) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_index_created(bool unique = false) const
         {
             if (!conn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is null")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
             if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
             {
                 return conn_->template ensure_filtered_index_created<IndexName, DTO>(
-                    unique,
-                    where_cond_,
-                    Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
+                    unique, where_cond_, Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
             }
             else
             {
                 return conn_->template ensure_index_created<IndexName, DTO>(
-                    unique,
-                    Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
+                    unique, Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
             }
         }
 
         template<rfl::internal::StringLiteral IndexName, rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 1)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
-        std::expected<void, Core::DbError> ensure_unique_index_created() const
+            requires(sizeof...(ColLiterals) >= 1) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_unique_index_created() const
         {
             return ensure_index_created<IndexName, ColLiterals...>(true);
         }
@@ -1018,9 +989,7 @@ export namespace DAL
         {
             if (!conn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is null")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
             if (!limit_.has_value() && !offset_.has_value())
             {
@@ -1031,9 +1000,7 @@ export namespace DAL
                 }
                 return *cnt_res > 0;
             }
-            if constexpr (requires(const ConnectionHandle& c) {
-                c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>);
-            })
+            if constexpr (requires(const ConnectionHandle& c) { c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>); })
             {
                 auto dto_res = limit(1).execute_query(*conn_);
                 if (!dto_res)
@@ -1058,19 +1025,15 @@ export namespace DAL
             return try_any().value_or(false);
         }
 
-        std::expected<void, Core::DbError> remove_where() const
-            requires (!std::same_as<WhereCondT, rfl::Nothing>)
+        [[nodiscard]] std::expected<void, Core::DbError> remove_where() const
+            requires(!std::same_as<WhereCondT, rfl::Nothing>)
         {
             if (!conn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is null")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
 
-            if constexpr (requires(ConnectionHandle& c) {
-                c.template delete_where<DTO>(where_cond_);
-            })
+            if constexpr (requires(ConnectionHandle& c) { c.template delete_where<DTO>(where_cond_); })
             {
                 auto del_res = conn_->template delete_where<DTO>(where_cond_);
                 if (del_res && clear_track_fn_)
@@ -1104,19 +1067,16 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral... ColLiterals, typename... Vals>
-            requires (sizeof...(ColLiterals) >= 1)
-                  && (sizeof...(ColLiterals) == sizeof...(Vals))
-                  && (!std::same_as<WhereCondT, rfl::Nothing>)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
-        std::expected<void, Core::DbError> update_where(const Vals&... new_vals) const
+            requires(sizeof...(ColLiterals) >= 1) && (sizeof...(ColLiterals) == sizeof...(Vals)) &&
+            (!std::same_as<WhereCondT, rfl::Nothing>) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+        [[nodiscard]] std::expected<void, Core::DbError> update_where(const Vals&... new_vals) const
         {
             if (!conn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is null")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
-            auto make_set_expr = []<rfl::internal::StringLiteral ColLit, typename ValT>(const ValT& v) {
+            auto make_set_expr = []<rfl::internal::StringLiteral ColLit, typename ValT>(const ValT& v)
+            {
                 constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLit>();
                 return Schema::col_of<dto_m>.set(detail::normalize_query_val(v));
             };
@@ -1124,15 +1084,11 @@ export namespace DAL
             std::expected<void, Core::DbError> res{};
             if constexpr (sizeof...(ColLiterals) == 1)
             {
-                res = conn_->template update_where<DTO>(
-                    make_set_expr.template operator()<ColLiterals>(new_vals)...,
-                    where_cond_);
+                res = conn_->template update_where<DTO>(make_set_expr.template operator()<ColLiterals>(new_vals)..., where_cond_);
             }
             else
             {
-                res = conn_->template update_where_many<DTO>(
-                    where_cond_,
-                    make_set_expr.template operator()<ColLiterals>(new_vals)...);
+                res = conn_->template update_where_many<DTO>(where_cond_, make_set_expr.template operator()<ColLiterals>(new_vals)...);
             }
             if (res && clear_track_fn_)
             {
@@ -1144,14 +1100,11 @@ export namespace DAL
     private:
         template<typename RowTuple, typename BaseQuery>
         [[nodiscard]] std::expected<std::vector<RowTuple>, Core::DbError> execute_tuple_projection(
-            const ConnectionHandle& conn,
-            BaseQuery&& base_query) const
+            const ConnectionHandle& conn, BaseQuery&& base_query) const
         {
             if (limit_.has_value() && offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query)
-                       | sqlgen::limit(*limit_)
-                       | sqlgen::offset(*offset_);
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_);
                 return conn.template try_execute_tuple_read<RowTuple>(std::move(q));
             }
             if (limit_.has_value())
@@ -1169,29 +1122,22 @@ export namespace DAL
 
         template<typename OutRowT, typename BaseQuery>
         [[nodiscard]] std::expected<std::vector<OutRowT>, Core::DbError> execute_projection(
-            const ConnectionHandle& conn,
-            BaseQuery&& base_query) const
+            const ConnectionHandle& conn, BaseQuery&& base_query) const
         {
             if (limit_.has_value() && offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query)
-                       | sqlgen::limit(*limit_)
-                       | sqlgen::offset(*offset_)
-                       | sqlgen::to<std::vector<OutRowT>>;
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_) |
+                    sqlgen::to<std::vector<OutRowT>>;
                 return conn.template try_execute_read<OutRowT>(std::move(q));
             }
             if (limit_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query)
-                       | sqlgen::limit(*limit_)
-                       | sqlgen::to<std::vector<OutRowT>>;
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::to<std::vector<OutRowT>>;
                 return conn.template try_execute_read<OutRowT>(std::move(q));
             }
             if (offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query)
-                       | sqlgen::offset(*offset_)
-                       | sqlgen::to<std::vector<OutRowT>>;
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::offset(*offset_) | sqlgen::to<std::vector<OutRowT>>;
                 return conn.template try_execute_read<OutRowT>(std::move(q));
             }
             auto q = std::forward<BaseQuery>(base_query) | sqlgen::to<std::vector<OutRowT>>;
@@ -1199,14 +1145,11 @@ export namespace DAL
         }
 
         template<typename ResultT, typename AggExpr>
-        [[nodiscard]] std::expected<std::optional<ResultT>, Core::DbError> try_aggregate_impl(
-            const AggExpr& agg_expr) const
+        [[nodiscard]] std::expected<std::optional<ResultT>, Core::DbError> try_aggregate_impl(const AggExpr& agg_expr) const
         {
             if (!conn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is null")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
             if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
             {
@@ -1220,14 +1163,11 @@ export namespace DAL
 
         template<typename BaseQuery>
         [[nodiscard]] std::expected<std::vector<DTO>, Core::DbError> execute_with_limit_offset(
-            const ConnectionHandle& conn,
-            BaseQuery&& base_query) const
+            const ConnectionHandle& conn, BaseQuery&& base_query) const
         {
             if (limit_.has_value() && offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query)
-                       | sqlgen::limit(*limit_)
-                       | sqlgen::offset(*offset_);
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_);
                 return conn.template try_execute_read<DTO>(std::move(q));
             }
             if (limit_.has_value())
@@ -1243,10 +1183,10 @@ export namespace DAL
             return conn.template try_execute_read<DTO>(std::forward<BaseQuery>(base_query));
         }
 
-        [[nodiscard]] std::expected<std::vector<DTO>, Core::DbError> execute_query(
-            const ConnectionHandle& conn) const
+        [[nodiscard]] std::expected<std::vector<DTO>, Core::DbError> execute_query(const ConnectionHandle& conn) const
         {
-            auto with_where = [&]() {
+            auto with_where = [&]()
+            {
                 if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
                 {
                     return sqlgen::read<std::vector<DTO>> | sqlgen::where(where_cond_);
@@ -1260,7 +1200,8 @@ export namespace DAL
             if constexpr (!std::same_as<OrderByT, rfl::Nothing>)
             {
                 return std::visit(
-                    [&](const auto& ob) {
+                    [&](const auto& ob)
+                    {
                         return execute_with_limit_offset(conn, with_where | ob);
                     },
                     order_by_);
@@ -1282,10 +1223,11 @@ export namespace DAL
     };
     // DbSet<Domain, DTO, ConnectionHandle, KeyType> provides an Entity Framework-style strongly-typed
     // entity set abstraction over a relational table, eliminating manual repository wiring.
-    template<typename Domain,
-             typename DTO = Schema::SchemaOf_t<Domain>,
-             typename ConnectionHandle = SQLiteConnection,
-             typename KeyType = Schema::EntityKey_t<Domain, DTO>>
+    template<
+        typename Domain,
+        typename DTO = Schema::SchemaOf_t<Domain>,
+        typename ConnectionHandle = SQLiteConnection,
+        typename KeyType = Schema::EntityKey_t<Domain, DTO>>
         requires DAL::Mappers::Mappable<Domain, DTO> && Repositories::DatabaseConnection<ConnectionHandle>
     class DbSet
     {
@@ -1295,7 +1237,7 @@ export namespace DAL
         using KeyValueType = KeyType;
         using RepoType = Repositories::GenericRepository<Domain, DTO, ConnectionHandle, KeyType>;
 
-        explicit DbSet(std::shared_ptr<ConnectionHandle> conn)
+        explicit DbSet(std::shared_ptr<ConnectionHandle> conn) pre(conn != nullptr)
             : repo_(std::make_shared<RepoType>(conn))
             , conn_(std::move(conn))
         {
@@ -1307,44 +1249,51 @@ export namespace DAL
                 { ctx.is_deferred() } -> std::same_as<bool>;
                 ctx.enqueue_op(std::move(op));
             }
-        explicit DbSet(Ctx* ctx)
+        explicit DbSet(Ctx* ctx) pre(ctx != nullptr)
             : repo_(std::make_shared<RepoType>(ctx->connection()))
             , conn_(ctx->connection())
-            , is_deferred_fn_([ctx]() { return ctx->is_deferred(); })
-            , enqueue_op_fn_([ctx](std::function<std::expected<void, Core::DbError>()> op) {
-                ctx->enqueue_op(std::move(op));
-            })
+            , is_deferred_fn_(
+                  [ctx]()
+                  {
+                      return ctx->is_deferred();
+                  })
+            , enqueue_op_fn_(
+                  [ctx](std::function<std::expected<void, Core::DbError>()> op)
+                  {
+                      ctx->enqueue_op(std::move(op));
+                  })
         {
             if constexpr (requires(Ctx& c) {
-                c.is_change_tracking_enabled();
-                c.clear_change_tracker();
-            })
+                              c.is_change_tracking_enabled();
+                              c.clear_change_tracker();
+                          })
             {
-                is_tracking_enabled_fn_ = [ctx]() { return ctx->is_change_tracking_enabled(); };
+                is_tracking_enabled_fn_ = [ctx]()
+                {
+                    return ctx->is_change_tracking_enabled();
+                };
                 upsert_tracked_fn_ = [ctx](
-                    std::type_index type,
-                    std::string key_repr,
-                    bool refresh_baseline,
-                    std::shared_ptr<void> owned,
-                    const void* borrowed,
-                    std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                        const std::shared_ptr<void>&, const void*)> detect_fn)
+                                         std::type_index type,
+                                         std::string key_repr,
+                                         bool refresh_baseline,
+                                         std::shared_ptr<void> owned,
+                                         const void* borrowed,
+                                         std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
+                                             const std::shared_ptr<void>&, const void*)> detect_fn)
                 {
                     ctx->upsert_tracked_entry(
-                        type,
-                        std::move(key_repr),
-                        refresh_baseline,
-                        std::move(owned),
-                        borrowed,
-                        std::move(detect_fn));
+                        type, std::move(key_repr), refresh_baseline, std::move(owned), borrowed, std::move(detect_fn));
                 };
-                untrack_fn_ = [ctx](std::type_index type, const std::string& key_repr) {
+                untrack_fn_ = [ctx](std::type_index type, const std::string& key_repr)
+                {
                     ctx->untrack_key(type, key_repr);
                 };
-                untrack_type_fn_ = [ctx](std::type_index type) {
+                untrack_type_fn_ = [ctx](std::type_index type)
+                {
                     ctx->untrack_type(type);
                 };
-                find_tracked_fn_ = [ctx](std::type_index type, const std::string& key_repr) {
+                find_tracked_fn_ = [ctx](std::type_index type, const std::string& key_repr)
+                {
                     return ctx->find_tracked_instance(type, key_repr);
                 };
             }
@@ -1354,7 +1303,7 @@ export namespace DAL
             requires requires(const Ctx& ctx) {
                 { ctx.connection() } -> std::convertible_to<std::shared_ptr<ConnectionHandle>>;
             } && (!requires(Ctx& ctx) { ctx.is_deferred(); })
-        explicit DbSet(const Ctx* ctx)
+        explicit DbSet(const Ctx* ctx) pre(ctx != nullptr)
             : repo_(std::make_shared<RepoType>(ctx->connection()))
             , conn_(ctx->connection())
         {
@@ -1400,18 +1349,15 @@ export namespace DAL
         }
 
         template<typename K>
-            requires Core::SingleKeyType<KeyType>
-                  && std::constructible_from<typename KeyType::key_type, K>
-                  && (!std::same_as<std::remove_cvref_t<K>, KeyType>)
+            requires Core::SingleKeyType<KeyType> && std::constructible_from<typename KeyType::key_type, K> &&
+            (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] std::optional<Domain> find(const K& raw_or_id) const
         {
             return find(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
         }
 
         template<typename... Ks>
-            requires Core::CompositeKeyType<KeyType>
-                  && (sizeof...(Ks) == KeyType::arity)
-                  && std::constructible_from<KeyType, Ks...>
+            requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] std::optional<Domain> find(Ks&&... parts) const
         {
             return find(KeyType{ std::forward<Ks>(parts)... });
@@ -1429,25 +1375,22 @@ export namespace DAL
         }
 
         template<typename K>
-            requires Core::SingleKeyType<KeyType>
-                  && std::constructible_from<typename KeyType::key_type, K>
-                  && (!std::same_as<std::remove_cvref_t<K>, KeyType>)
+            requires Core::SingleKeyType<KeyType> && std::constructible_from<typename KeyType::key_type, K> &&
+            (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_find(const K& raw_or_id) const
         {
             return try_find(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
         }
 
         template<typename... Ks>
-            requires Core::CompositeKeyType<KeyType>
-                  && (sizeof...(Ks) == KeyType::arity)
-                  && std::constructible_from<KeyType, Ks...>
+            requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_find(Ks&&... parts) const
         {
             return try_find(KeyType{ std::forward<Ks>(parts)... });
         }
 
         // Inserts a single entity into the database table (or stages if deferred)
-        std::expected<void, Core::DbError> add(const Domain& item)
+        [[nodiscard]] std::expected<void, Core::DbError> add(const Domain& item)
         {
             if (should_defer())
             {
@@ -1479,9 +1422,7 @@ export namespace DAL
             {
                 if (!conn_)
                 {
-                    return std::unexpected<Core::DbError>{
-                        Core::DbError::connection_error("Database connection is null")
-                    };
+                    return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
                 }
                 if constexpr (requires(const ConnectionHandle& c) { c.try_last_insert_rowid(); })
                 {
@@ -1503,8 +1444,7 @@ export namespace DAL
 
         // Inserts multiple entities immediately in a transaction (when not already in one)
         // and returns copies populated with any database-generated auto-increment primary keys.
-        [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> add_range_returning(
-            const std::vector<Domain>& items)
+        [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> add_range_returning(const std::vector<Domain>& items)
         {
             std::vector<Domain> results;
             results.reserve(items.size());
@@ -1515,11 +1455,11 @@ export namespace DAL
 
             bool started_tx = false;
             if constexpr (requires(ConnectionHandle& c) {
-                c.in_transaction();
-                c.begin_transaction();
-                c.commit();
-                c.rollback();
-            })
+                              c.in_transaction();
+                              c.begin_transaction();
+                              c.commit();
+                              c.rollback();
+                          })
             {
                 if (conn_ && !conn_->in_transaction())
                 {
@@ -1564,7 +1504,7 @@ export namespace DAL
         }
 
         // Inserts multiple entities into the database table (or stages if deferred)
-        std::expected<void, Core::DbError> add_range(const std::vector<Domain>& items)
+        [[nodiscard]] std::expected<void, Core::DbError> add_range(const std::vector<Domain>& items)
         {
             if (should_defer())
             {
@@ -1585,7 +1525,7 @@ export namespace DAL
         }
 
         // Updates an existing entity (or stages if deferred)
-        std::expected<void, Core::DbError> update(const Domain& item)
+        [[nodiscard]] std::expected<void, Core::DbError> update(const Domain& item)
         {
             if (should_defer())
             {
@@ -1600,7 +1540,7 @@ export namespace DAL
         }
 
         // Removes an entity by primary key (or stages if deferred)
-        std::expected<void, Core::DbError> remove(const KeyType& id)
+        [[nodiscard]] std::expected<void, Core::DbError> remove(const KeyType& id)
         {
             untrack_key(id);
             if (should_defer())
@@ -1611,7 +1551,7 @@ export namespace DAL
         }
 
         // Atomic upsert (insert or replace) for a single entity (Phase 13.1)
-        std::expected<void, Core::DbError> upsert(const Domain& item)
+        [[nodiscard]] std::expected<void, Core::DbError> upsert(const Domain& item)
         {
             if (should_defer())
             {
@@ -1621,7 +1561,7 @@ export namespace DAL
         }
 
         // Atomic batch upsert (insert or replace) for multiple entities (Phase 13.1)
-        std::expected<void, Core::DbError> upsert_range(const std::vector<Domain>& items)
+        [[nodiscard]] std::expected<void, Core::DbError> upsert_range(const std::vector<Domain>& items)
         {
             if (should_defer())
             {
@@ -1630,13 +1570,12 @@ export namespace DAL
             return upsert_many_immediate(items);
         }
 
-        std::expected<void, Core::DbError> stage_upsert(const Domain& item)
+        [[nodiscard]] std::expected<void, Core::DbError> stage_upsert(const Domain& item)
         {
             if (!enqueue_op_fn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
             enqueue_op_fn_(
                 [repo = repo_, conn = conn_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, item]()
@@ -1646,13 +1585,12 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> stage_upsert_range(const std::vector<Domain>& items)
+        [[nodiscard]] std::expected<void, Core::DbError> stage_upsert_range(const std::vector<Domain>& items)
         {
             if (!enqueue_op_fn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
             enqueue_op_fn_(
                 [repo = repo_, conn = conn_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, items]()
@@ -1663,87 +1601,93 @@ export namespace DAL
         }
 
         // Explicit Unit of Work staging methods (always enqueue into DbContext)
-        std::expected<void, Core::DbError> stage_add(const Domain& item)
+        [[nodiscard]] std::expected<void, Core::DbError> stage_add(const Domain& item)
         {
             if (!enqueue_op_fn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
-            enqueue_op_fn_([repo = repo_, item]() { return repo->insert_one(item); });
+            enqueue_op_fn_(
+                [repo = repo_, item]()
+                {
+                    return repo->insert_one(item);
+                });
             return {};
         }
 
-        std::expected<void, Core::DbError> stage_add_range(const std::vector<Domain>& items)
+        [[nodiscard]] std::expected<void, Core::DbError> stage_add_range(const std::vector<Domain>& items)
         {
             if (!enqueue_op_fn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
-            enqueue_op_fn_([repo = repo_, items]() { return repo->insert_many(items); });
+            enqueue_op_fn_(
+                [repo = repo_, items]()
+                {
+                    return repo->insert_many(items);
+                });
             return {};
         }
 
-        std::expected<void, Core::DbError> stage_update(const Domain& item)
+        [[nodiscard]] std::expected<void, Core::DbError> stage_update(const Domain& item)
         {
             if (!enqueue_op_fn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
-            enqueue_op_fn_([repo = repo_, item]() { return repo->update_one(item); });
+            enqueue_op_fn_(
+                [repo = repo_, item]()
+                {
+                    return repo->update_one(item);
+                });
             return {};
         }
 
-        std::expected<void, Core::DbError> stage_remove(const KeyType& id)
+        [[nodiscard]] std::expected<void, Core::DbError> stage_remove(const KeyType& id)
         {
             if (!enqueue_op_fn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot stage operation: DbSet is not bound to a DbContext")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
             untrack_key(id);
-            enqueue_op_fn_([repo = repo_, id]() { return repo->delete_by_id(id); });
+            enqueue_op_fn_(
+                [repo = repo_, id]()
+                {
+                    return repo->delete_by_id(id);
+                });
             return {};
         }
 
         template<typename K>
-            requires Core::SingleKeyType<KeyType>
-                  && std::constructible_from<typename KeyType::key_type, K>
-                  && (!std::same_as<std::remove_cvref_t<K>, KeyType>)
-        std::expected<void, Core::DbError> stage_remove(const K& raw_or_id)
+            requires Core::SingleKeyType<KeyType> && std::constructible_from<typename KeyType::key_type, K> &&
+            (!std::same_as<std::remove_cvref_t<K>, KeyType>)
+        [[nodiscard]] std::expected<void, Core::DbError> stage_remove(const K& raw_or_id)
         {
             return stage_remove(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
         }
 
         template<typename... Ks>
-            requires Core::CompositeKeyType<KeyType>
-                  && (sizeof...(Ks) == KeyType::arity)
-                  && std::constructible_from<KeyType, Ks...>
-        std::expected<void, Core::DbError> stage_remove(Ks&&... parts)
+            requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
+        [[nodiscard]] std::expected<void, Core::DbError> stage_remove(Ks&&... parts)
         {
             return stage_remove(KeyType{ std::forward<Ks>(parts)... });
         }
 
         template<typename K>
-            requires Core::SingleKeyType<KeyType>
-                  && std::constructible_from<typename KeyType::key_type, K>
-                  && (!std::same_as<std::remove_cvref_t<K>, KeyType>)
-        std::expected<void, Core::DbError> remove(const K& raw_or_id)
+            requires Core::SingleKeyType<KeyType> && std::constructible_from<typename KeyType::key_type, K> &&
+            (!std::same_as<std::remove_cvref_t<K>, KeyType>)
+        [[nodiscard]] std::expected<void, Core::DbError> remove(const K& raw_or_id)
         {
             return remove(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
         }
 
         template<typename... Ks>
-            requires Core::CompositeKeyType<KeyType>
-                  && (sizeof...(Ks) == KeyType::arity)
-                  && std::constructible_from<KeyType, Ks...>
-        std::expected<void, Core::DbError> remove(Ks&&... parts)
+            requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
+        [[nodiscard]] std::expected<void, Core::DbError> remove(Ks&&... parts)
         {
             return remove(KeyType{ std::forward<Ks>(parts)... });
         }
@@ -1755,18 +1699,15 @@ export namespace DAL
         }
 
         template<typename K>
-            requires Core::SingleKeyType<KeyType>
-                  && std::constructible_from<typename KeyType::key_type, K>
-                  && (!std::same_as<std::remove_cvref_t<K>, KeyType>)
+            requires Core::SingleKeyType<KeyType> && std::constructible_from<typename KeyType::key_type, K> &&
+            (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] bool contains(const K& raw_or_id) const
         {
             return contains(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
         }
 
         template<typename... Ks>
-            requires Core::CompositeKeyType<KeyType>
-                  && (sizeof...(Ks) == KeyType::arity)
-                  && std::constructible_from<KeyType, Ks...>
+            requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] bool contains(Ks&&... parts) const
         {
             return contains(KeyType{ std::forward<Ks>(parts)... });
@@ -1845,7 +1786,10 @@ export namespace DAL
                 };
                 if (untrack_type_fn_)
                 {
-                    clear_cb = [fn = untrack_type_fn_]() { fn(std::type_index(typeid(Domain))); };
+                    clear_cb = [fn = untrack_type_fn_]()
+                    {
+                        fn(std::type_index(typeid(Domain)));
+                    };
                 }
             }
             return DbQuery<Domain, DTO, ConnectionHandle, KeyType>(
@@ -1908,7 +1852,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
-            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+            requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_in(const Ts&... vals) const
         {
             return query().template where_in<ColLiteral>(vals...);
@@ -1943,7 +1887,7 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
-            requires (sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+            requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_not_in(const Ts&... vals) const
         {
             return query().template where_not_in<ColLiteral>(vals...);
@@ -1965,41 +1909,34 @@ export namespace DAL
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
             requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
-        std::expected<void, Core::DbError> remove_where_equal(const Val& val) const
+        [[nodiscard]] std::expected<void, Core::DbError> remove_where_equal(const Val& val) const
         {
             return where_equal<ColLiteral>(val).remove_where();
         }
 
         template<rfl::internal::StringLiteral MatchCol, rfl::internal::StringLiteral... SetCols, typename MatchVal, typename... SetVals>
-            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, MatchCol>
-                  && (sizeof...(SetCols) >= 1)
-                  && (sizeof...(SetCols) == sizeof...(SetVals))
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, SetCols> && ...)
-        std::expected<void, Core::DbError> update_where_equal(const MatchVal& match_val, const SetVals&... new_vals) const
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, MatchCol> && (sizeof...(SetCols) >= 1) &&
+            (sizeof...(SetCols) == sizeof...(SetVals)) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, SetCols> && ...)
+        [[nodiscard]] std::expected<void, Core::DbError> update_where_equal(const MatchVal& match_val, const SetVals&... new_vals) const
         {
             return where_equal<MatchCol>(match_val).template update_where<SetCols...>(new_vals...);
         }
 
         template<rfl::internal::StringLiteral IndexName, rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 1)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
-        std::expected<void, Core::DbError> ensure_index_created(bool unique = false) const
+            requires(sizeof...(ColLiterals) >= 1) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_index_created(bool unique = false) const
         {
             if (!conn_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Database connection is null")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
             return conn_->template ensure_index_created<IndexName, DTO>(
-                unique,
-                Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
+                unique, Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...);
         }
 
         template<rfl::internal::StringLiteral IndexName, rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 1)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
-        std::expected<void, Core::DbError> ensure_unique_index_created() const
+            requires(sizeof...(ColLiterals) >= 1) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_unique_index_created() const
         {
             return ensure_index_created<IndexName, ColLiterals...>(true);
         }
@@ -2123,32 +2060,28 @@ export namespace DAL
         }
 
         template<rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 2)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+            requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto try_select_columns() const
         {
             return query().template try_select_columns<ColLiterals...>();
         }
 
         template<rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 2)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+            requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto select_columns() const
         {
             return query().template select_columns<ColLiterals...>();
         }
 
         template<rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 2)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+            requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto try_select_distinct_columns() const
         {
             return query().template try_select_distinct_columns<ColLiterals...>();
         }
 
         template<rfl::internal::StringLiteral... ColLiterals>
-            requires (sizeof...(ColLiterals) >= 2)
-                  && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
+            requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto select_distinct_columns() const
         {
             return query().template select_distinct_columns<ColLiterals...>();
@@ -2191,12 +2124,7 @@ export namespace DAL
             auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
             auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity));
             upsert_tracked_fn_(
-                std::type_index(typeid(Domain)),
-                format_key(key),
-                false,
-                nullptr,
-                &entity,
-                make_detect_fn(std::move(baseline)));
+                std::type_index(typeid(Domain)), format_key(key), false, nullptr, &entity, make_detect_fn(std::move(baseline)));
         }
 
         // Loads an entity into the identity map and returns a shared_ptr whose mutations
@@ -2220,33 +2148,50 @@ export namespace DAL
             if (upsert_tracked_fn_)
             {
                 auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*shared));
-                upsert_tracked_fn_(
-                    std::type_index(typeid(Domain)),
-                    key_repr,
-                    true,
-                    shared,
-                    nullptr,
-                    make_detect_fn(std::move(baseline)));
+                upsert_tracked_fn_(std::type_index(typeid(Domain)), key_repr, true, shared, nullptr, make_detect_fn(std::move(baseline)));
             }
             return shared;
         }
 
         template<typename K>
-            requires Core::SingleKeyType<KeyType>
-                  && std::constructible_from<typename KeyType::key_type, K>
-                  && (!std::same_as<std::remove_cvref_t<K>, KeyType>)
+            requires Core::SingleKeyType<KeyType> && std::constructible_from<typename KeyType::key_type, K> &&
+            (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] std::shared_ptr<Domain> find_tracked(const K& raw_or_id) const
         {
             return find_tracked(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
         }
 
         template<typename... Ks>
-            requires Core::CompositeKeyType<KeyType>
-                  && (sizeof...(Ks) == KeyType::arity)
-                  && std::constructible_from<KeyType, Ks...>
+            requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] std::shared_ptr<Domain> find_tracked(Ks&&... parts) const
         {
             return find_tracked(KeyType{ std::forward<Ks>(parts)... });
+        }
+
+        // Returns a non-owning reference to the tracked entity in the change tracker if present (P2988)
+        [[nodiscard]] std::optional<Domain&> find_tracked_ref(const KeyType& id) const
+        {
+            auto ptr = find_tracked(id);
+            if (!ptr)
+            {
+                return std::nullopt;
+            }
+            return *ptr;
+        }
+
+        template<typename K>
+            requires Core::SingleKeyType<KeyType> && (!std::same_as<std::remove_cvref_t<K>, KeyType>) &&
+            std::convertible_to<K, typename KeyType::key_type>
+        [[nodiscard]] std::optional<Domain&> find_tracked_ref(const K& raw_or_id) const
+        {
+            return find_tracked_ref(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
+        }
+
+        template<typename... Ks>
+            requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
+        [[nodiscard]] std::optional<Domain&> find_tracked_ref(Ks&&... parts) const
+        {
+            return find_tracked_ref(KeyType{ std::forward<Ks>(parts)... });
         }
 
         [[nodiscard]] std::vector<std::shared_ptr<Domain>> to_tracked_vector() const
@@ -2271,12 +2216,7 @@ export namespace DAL
                 {
                     auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*shared));
                     upsert_tracked_fn_(
-                        std::type_index(typeid(Domain)),
-                        key_repr,
-                        true,
-                        shared,
-                        nullptr,
-                        make_detect_fn(std::move(baseline)));
+                        std::type_index(typeid(Domain)), key_repr, true, shared, nullptr, make_detect_fn(std::move(baseline)));
                 }
                 result.push_back(std::move(shared));
             }
@@ -2319,8 +2259,7 @@ export namespace DAL
             bool,
             std::shared_ptr<void>,
             const void*,
-            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                const std::shared_ptr<void>&, const void*)>)>;
+            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&, const void*)>)>;
 
         std::expected<void, Core::DbError> upsert_immediate(const Domain& item)
         {
@@ -2350,9 +2289,7 @@ export namespace DAL
                         auto res = conn->upsert(dto);
                         if (!res)
                         {
-                            return std::unexpected<Core::DbError>{
-                                Core::DbError::map_from_message(res.error().what())
-                            };
+                            return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
                         }
                         if (tracking)
                         {
@@ -2400,9 +2337,7 @@ export namespace DAL
                         auto res = conn->upsert_many(dtos);
                         if (!res)
                         {
-                            return std::unexpected<Core::DbError>{
-                                Core::DbError::map_from_message(res.error().what())
-                            };
+                            return std::unexpected<Core::DbError>{ Core::DbError::map_from_message(res.error().what()) };
                         }
                         if (tracking)
                         {
@@ -2435,9 +2370,8 @@ export namespace DAL
         [[nodiscard]] static auto make_detect_fn_with(std::shared_ptr<RepoType> repo, std::shared_ptr<DTO> baseline)
         {
             return [repo, baseline = std::move(baseline)](
-                const std::shared_ptr<void>& owned,
-                const void* borrowed)
-                -> std::optional<std::function<std::expected<void, Core::DbError>()>>
+                       const std::shared_ptr<void>& owned,
+                       const void* borrowed) -> std::optional<std::function<std::expected<void, Core::DbError>()>>
             {
                 const Domain* ptr = nullptr;
                 if (owned)
@@ -2461,7 +2395,7 @@ export namespace DAL
 
                 Domain updated_domain = *ptr;
                 return [repo, updated_domain = std::move(updated_domain), current_dto = std::move(current_dto), baseline]() mutable
-                    -> std::expected<void, Core::DbError>
+                           -> std::expected<void, Core::DbError>
                 {
                     auto res = repo->update_one(updated_domain);
                     if (res)
@@ -2479,9 +2413,7 @@ export namespace DAL
         }
 
         static void record_snapshot_with(
-            const std::shared_ptr<RepoType>& repo,
-            const UpsertTrackedFn& upsert_tracked_fn,
-            const Domain& entity)
+            const std::shared_ptr<RepoType>& repo, const UpsertTrackedFn& upsert_tracked_fn, const Domain& entity)
         {
             if (!upsert_tracked_fn)
             {
@@ -2490,12 +2422,7 @@ export namespace DAL
             auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
             auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity));
             upsert_tracked_fn(
-                std::type_index(typeid(Domain)),
-                format_key(key),
-                true,
-                nullptr,
-                nullptr,
-                make_detect_fn_with(repo, std::move(baseline)));
+                std::type_index(typeid(Domain)), format_key(key), true, nullptr, nullptr, make_detect_fn_with(repo, std::move(baseline)));
         }
 
         std::shared_ptr<RepoType> repo_;

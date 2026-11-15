@@ -54,13 +54,39 @@ export namespace DAL::Mappers
             return c_idx == camel.size();
         }
 
+        consteval std::optional<std::string_view> annotated_column_name(std::meta::info m)
+        {
+            auto col_anns = std::meta::annotations_of_with_type(m, ^^DAL::Schema::column);
+            if (!col_anns.empty())
+            {
+                return std::meta::extract<DAL::Schema::column>(col_anns[0]).name;
+            }
+            return std::nullopt;
+        }
+
         // Given a DTO member, find the unique matching domain member.
-        // Strategies are tried in order: exact name, stripped affixes (m_/M_/_), snake→camel.
+        // Strategies are tried in order: [[=column{"..."}]], exact name, stripped affixes (m_/M_/_), snake→camel.
         // Evaluating a throw inside a consteval function is ill-formed, so any
         // no-match or ambiguous-match is a compile-time error at the call site.
         consteval std::meta::info find_matching_domain_member(std::meta::info dto_m, std::span<const std::meta::info> domain_members)
         {
             std::string_view dto_name = std::meta::identifier_of(dto_m);
+
+            // [[=column{"..."}]] annotation match.
+            std::meta::info col_hit{};
+            int col_count = 0;
+            for (auto m : domain_members)
+            {
+                if (auto ann_col = annotated_column_name(m); ann_col && *ann_col == dto_name)
+                {
+                    col_hit = m;
+                    ++col_count;
+                }
+            }
+            if (col_count == 1)
+                return col_hit;
+            if (col_count > 1)
+                throw std::invalid_argument("MapperTraits: ambiguous [[=column]] match for DTO field");
 
             // exact name match.
             std::meta::info exact_hit{};
@@ -120,6 +146,25 @@ export namespace DAL::Mappers
         // semantics — ambiguous or missing matches are ill-formed at compile time.
         consteval std::meta::info find_matching_dto_member(std::meta::info dom_m, std::span<const std::meta::info> dto_members)
         {
+            if (auto ann_col = annotated_column_name(dom_m))
+            {
+                std::meta::info col_hit{};
+                int col_count = 0;
+                for (auto m : dto_members)
+                {
+                    if (std::meta::identifier_of(m) == *ann_col)
+                    {
+                        col_hit = m;
+                        ++col_count;
+                    }
+                }
+                if (col_count == 1)
+                    return col_hit;
+                if (col_count > 1)
+                    throw std::invalid_argument("MapperTraits: ambiguous [[=column]] match for domain member");
+                throw std::invalid_argument("MapperTraits: [[=column]] name not found in DTO members");
+            }
+
             std::string_view dom_name = std::meta::identifier_of(dom_m);
 
             // exact name match.
@@ -181,6 +226,28 @@ export namespace DAL::Mappers
         template<typename T>
         inline constexpr bool is_optional_v<std::optional<T>> = true;
 
+        template<typename ParamT, typename RawDtoFieldT>
+        consteval bool is_hydratable_from()
+        {
+            using CleanDtoT = std::remove_cvref_t<RawDtoFieldT>;
+            if constexpr (is_optional_v<CleanDtoT>)
+            {
+                return std::is_constructible_v<ParamT, CleanDtoT>;
+            }
+            else if constexpr (requires(const CleanDtoT& v) { v.value(); })
+            {
+                using UnwrappedT = std::remove_cvref_t<decltype(std::declval<const CleanDtoT&>().value())>;
+                return std::is_constructible_v<ParamT, UnwrappedT>;
+            }
+            else
+            {
+                return std::is_constructible_v<ParamT, CleanDtoT>;
+            }
+        }
+
+        template<typename ParamT, typename RawDtoFieldT>
+        inline constexpr bool is_hydratable_from_v = is_hydratable_from<ParamT, RawDtoFieldT>();
+
         template<typename Domain>
         consteval std::meta::info find_hydrating_constructor(std::span<const std::meta::info> dto_members)
         {
@@ -190,8 +257,8 @@ export namespace DAL::Mappers
             }
             for (auto mem : std::meta::members_of(^^Domain, std::meta::access_context::current()))
             {
-                if (std::meta::is_constructor(mem) && !std::meta::is_copy_constructor(mem) &&
-                    !std::meta::is_move_constructor(mem) && !std::meta::is_default_constructor(mem))
+                if (std::meta::is_constructor(mem) && !std::meta::is_copy_constructor(mem) && !std::meta::is_move_constructor(mem) &&
+                    !std::meta::is_default_constructor(mem))
                 {
                     auto params = std::meta::parameters_of(mem);
                     if (params.size() == dto_members.size() && !params.empty())
@@ -205,18 +272,30 @@ export namespace DAL::Mappers
                                 break;
                             }
                             std::string_view pname = std::meta::identifier_of(p);
+                            std::meta::info matched_dm{};
                             int hits = 0;
                             for (auto dm : dto_members)
                             {
                                 std::string_view dname = std::meta::identifier_of(dm);
-                                if (dname == pname ||
-                                    strip_member_affixes(dname) == strip_member_affixes(pname) ||
+                                if (dname == pname || strip_member_affixes(dname) == strip_member_affixes(pname) ||
                                     matches_snake_to_camel(dname, pname))
                                 {
+                                    matched_dm = dm;
                                     ++hits;
                                 }
                             }
                             if (hits != 1)
+                            {
+                                all_match = false;
+                                break;
+                            }
+                            auto param_type = std::meta::remove_cvref(std::meta::type_of(p));
+                            auto dto_field_type = std::meta::remove_cvref(std::meta::type_of(matched_dm));
+                            auto check_var = std::meta::substitute(
+                                ^^is_hydratable_from_v,
+                                {
+                                    param_type, dto_field_type });
+                            if (!std::meta::extract<bool>(check_var))
                             {
                                 all_match = false;
                                 break;
@@ -248,10 +327,8 @@ export namespace DAL::Mappers
             }
             else
             {
-                static constexpr auto dto_members =
-                    std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
-                static constexpr auto domain_members =
-                    std::define_static_array(std::meta::nonstatic_data_members_of(^^Domain, std::meta::access_context::unchecked()));
+                static constexpr auto& dto_members = DAL::Schema::members_v<DTO>;
+                static constexpr auto& domain_members = DAL::Schema::unchecked_members_v<Domain>;
 
                 // Extract the raw value from sqlgen wrapper types (e.g. PrimaryKey, ForeignKey)
                 // that expose a .value() accessor, or pass through plain types unchanged.
@@ -273,9 +350,11 @@ export namespace DAL::Mappers
                 if constexpr (ctor != std::meta::info{})
                 {
                     static constexpr auto params = std::define_static_array(std::meta::parameters_of(ctor));
-                    return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                        return Domain(static_cast<[:std::meta::remove_cvref(std::meta::type_of(params[Is])):]>(
-                            extract_value(dto.[:detail::find_matching_dto_member(params[Is], dto_members):]))...);
+                    return [&]<std::size_t... Is>(std::index_sequence<Is...>)
+                    {
+                        return Domain(
+                            static_cast<[:std::meta::remove_cvref(std::meta::type_of(params[Is])):]>(
+                                extract_value(dto.[:detail::find_matching_dto_member(params[Is], dto_members):]))...);
                     }(std::make_index_sequence<params.size()>{});
                 }
                 else
@@ -306,10 +385,8 @@ export namespace DAL::Mappers
             else
             {
                 DTO dto{};
-                static constexpr auto dto_members =
-                    std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
-                static constexpr auto domain_members =
-                    std::define_static_array(std::meta::nonstatic_data_members_of(^^Domain, std::meta::access_context::unchecked()));
+                static constexpr auto& dto_members = DAL::Schema::members_v<DTO>;
+                static constexpr auto& domain_members = DAL::Schema::unchecked_members_v<Domain>;
 
                 template for (constexpr auto dto_m : dto_members)
                 {
@@ -375,9 +452,7 @@ export namespace DAL::Mappers
     consteval bool is_valid_query_column()
     {
         constexpr std::string_view name = ColOrField.string_view();
-        constexpr auto dto_ctx = std::meta::access_context::current();
-        constexpr auto dto_members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^DTO, dto_ctx));
+        constexpr auto& dto_members = DAL::Schema::members_v<DTO>;
 
         for (auto m : dto_members)
         {
@@ -397,14 +472,11 @@ export namespace DAL::Mappers
 
         if constexpr (!std::is_same_v<Domain, DTO>)
         {
-            constexpr auto dom_ctx = std::meta::access_context::unchecked();
-            constexpr auto dom_members = std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^Domain, dom_ctx));
+            constexpr auto& dom_members = DAL::Schema::unchecked_members_v<Domain>;
             for (auto dm : dom_members)
             {
                 std::string_view d_name = std::meta::identifier_of(dm);
-                if (d_name == name ||
-                    detail::strip_member_affixes(d_name) == detail::strip_member_affixes(name))
+                if (d_name == name || detail::strip_member_affixes(d_name) == detail::strip_member_affixes(name))
                 {
                     return true;
                 }
@@ -421,9 +493,7 @@ export namespace DAL::Mappers
     consteval std::meta::info resolve_dto_member()
     {
         constexpr std::string_view name = ColOrField.string_view();
-        constexpr auto dto_ctx = std::meta::access_context::current();
-        static constexpr auto dto_members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^DTO, dto_ctx));
+        static constexpr auto& dto_members = DAL::Schema::members_v<DTO>;
 
         for (auto m : dto_members)
         {
@@ -443,14 +513,11 @@ export namespace DAL::Mappers
 
         if constexpr (!std::is_same_v<Domain, DTO>)
         {
-            constexpr auto dom_ctx = std::meta::access_context::unchecked();
-            static constexpr auto dom_members = std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^Domain, dom_ctx));
+            static constexpr auto& dom_members = DAL::Schema::unchecked_members_v<Domain>;
             for (auto dm : dom_members)
             {
                 std::string_view d_name = std::meta::identifier_of(dm);
-                if (d_name == name ||
-                    detail::strip_member_affixes(d_name) == detail::strip_member_affixes(name))
+                if (d_name == name || detail::strip_member_affixes(d_name) == detail::strip_member_affixes(name))
                 {
                     return detail::find_matching_dto_member(dm, dto_members);
                 }

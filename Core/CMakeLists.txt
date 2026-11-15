@@ -1,5 +1,5 @@
 add_library(CodeFirstCppDB_Core)
-set_target_properties(CodeFirstCppDB_Core PROPERTIES OUTPUT_NAME Core)
+set_target_properties(CodeFirstCppDB_Core PROPERTIES OUTPUT_NAME Core EXPORT_NAME Core)
 add_library(CodeFirstCppDB::Core ALIAS CodeFirstCppDB_Core)
 add_library(CodeFirst::Core ALIAS CodeFirstCppDB_Core)
 
@@ -19,4 +19,9 @@ target_compile_options(CodeFirstCppDB_Core
         $<$<AND:$<BOOL:${CODEFIRST_ENABLE_CONTRACTS}>,$<CXX_COMPILER_ID:GNU>>:-fcontracts>
     PRIVATE
         $<$<CXX_COMPILER_ID:GNU>:-Wall;-Wextra;-Wpedantic;-Wshadow>
+)
+
+target_link_libraries(CodeFirstCppDB_Core
+    PUBLIC
+        $<$<CXX_COMPILER_ID:GNU>:stdc++exp>
 )

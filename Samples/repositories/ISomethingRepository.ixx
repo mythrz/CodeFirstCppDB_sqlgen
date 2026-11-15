@@ -4,7 +4,7 @@ import std;
 import core;
 import :something;
 
-export namespace Core 
+export namespace Core
 {
     class ISomethingRepository : public virtual IGenericRepository<Something>
     {

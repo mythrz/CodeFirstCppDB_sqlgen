@@ -6,21 +6,21 @@ add_library(CodeFirst::Samples ALIAS CodeFirstCppDB_Samples)
 target_sources(CodeFirstCppDB_Samples
     PUBLIC
         FILE_SET CXX_MODULES
-        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/..
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
         FILES
             SampleIds.ixx
-            ../Core/entities/Person.ixx
-            ../Core/entities/Something.ixx
-            ../Core/entities/Person_Something.ixx
-            ../Core/repositories/IPersonRepository.ixx
-            ../Core/repositories/ISomethingRepository.ixx
-            ../Core/repositories/IPerson_SomethingRepository.ixx
-            ../DAL/schema/PersonDTO.ixx
-            ../DAL/schema/SomethingDTO.ixx
-            ../DAL/schema/Person_SomethingDTO.ixx
-            ../DAL/repositories/SQLitePersonRepo.ixx
-            ../DAL/repositories/SQLiteSomethingRepo.ixx
-            ../DAL/repositories/SQLitePerson_SomethingRepo.ixx
+            entities/Person.ixx
+            entities/Something.ixx
+            entities/Person_Something.ixx
+            repositories/IPersonRepository.ixx
+            repositories/ISomethingRepository.ixx
+            repositories/IPerson_SomethingRepository.ixx
+            schema/PersonDTO.ixx
+            schema/SomethingDTO.ixx
+            schema/Person_SomethingDTO.ixx
+            repositories/SQLitePersonRepo.ixx
+            repositories/SQLiteSomethingRepo.ixx
+            repositories/SQLitePerson_SomethingRepo.ixx
             samples.ixx
 )
 

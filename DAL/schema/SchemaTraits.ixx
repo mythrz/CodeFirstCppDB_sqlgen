@@ -1,7 +1,8 @@
 module;
 #include <meta>
-#include <sqlgen/PrimaryKey.hpp>
+#include <rfl/internal/num_fields.hpp>
 #include <sqlgen/ForeignKey.hpp>
+#include <sqlgen/PrimaryKey.hpp>
 #include <sqlgen/Unique.hpp>
 #include <sqlgen/col.hpp>
 
@@ -12,16 +13,51 @@ import core;
 
 export namespace DAL::Schema
 {
-    // P3394 C++26 Annotation tags for optional single-class entities (Phase 42)
-    struct table       { const char* name; };
-    struct column      { const char* name; };
-    struct primary_key { bool auto_increment = false; };
-    struct unique      {};
-    template<typename Parent> struct references { const char* col = "id"; };
+    // P3394 C++26 Annotation tags for optional single-class entities (Phase 42/45)
+    struct table
+    {
+        const char* name;
+    };
+    struct column
+    {
+        const char* name;
+    };
+    struct primary_key
+    {
+        bool auto_increment = false;
+    };
+    struct unique
+    {
+    };
+    template<typename Parent>
+    struct references
+    {
+        const char* col = "id";
+    };
+
+    // Collects all accessible nonstatic data members (including public unambiguous base classes,
+    // enabling P3394 define_aggregate base structs to mirror flat aggregates).
+    consteval std::vector<std::meta::info> collect_data_members(
+        std::meta::info type, std::meta::access_context ctx = std::meta::access_context::current())
+    {
+        std::vector<std::meta::info> result;
+        for (auto base : std::meta::bases_of(type, ctx))
+        {
+            auto base_members = collect_data_members(std::meta::type_of(base), ctx);
+            result.insert(result.end(), base_members.begin(), base_members.end());
+        }
+        for (auto m : std::meta::nonstatic_data_members_of(type, ctx))
+        {
+            result.push_back(m);
+        }
+        return result;
+    }
 
     template<typename T>
-    inline constexpr auto members_v = std::define_static_array(
-        std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::current()));
+    inline constexpr auto members_v = std::define_static_array(collect_data_members(^^T));
+
+    template<typename T>
+    inline constexpr auto unchecked_members_v = std::define_static_array(collect_data_members(^^T, std::meta::access_context::unchecked()));
 
     template<typename T>
     concept HasTableName = requires {
@@ -50,9 +86,7 @@ export namespace DAL::Schema
     consteval std::size_t primary_key_count()
     {
         std::size_t count = 0;
-        static constexpr auto members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::current()));
-        template for (constexpr auto m : members)
+        template for (constexpr auto m : members_v<T>)
         {
             using RawFieldType = [:std::meta::type_of(m):];
             using FieldType = std::remove_cvref_t<RawFieldType>;
@@ -68,9 +102,7 @@ export namespace DAL::Schema
     consteval std::size_t foreign_key_count()
     {
         std::size_t count = 0;
-        static constexpr auto members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::current()));
-        template for (constexpr auto m : members)
+        template for (constexpr auto m : members_v<T>)
         {
             using RawFieldType = [:std::meta::type_of(m):];
             using FieldType = std::remove_cvref_t<RawFieldType>;
@@ -89,8 +121,8 @@ export namespace DAL::Schema
     // Entities with composite keys (e.g. junction tables like Person_SomethingDTO,
     // or multi-column PrimaryKey DTOs)
     template<typename T>
-    concept CompositePrimaryKey = HasTableName<T> && !SinglePrimaryKey<T>
-        && ((primary_key_count<T>() >= 2) || (primary_key_count<T>() == 0 && foreign_key_count<T>() >= 2));
+    concept CompositePrimaryKey = HasTableName<T> && !SinglePrimaryKey<T> &&
+        ((primary_key_count<T>() >= 2) || (primary_key_count<T>() == 0 && foreign_key_count<T>() >= 2));
 
     // Generalized relational entity concept accommodating both single and composite key entities
     template<typename T>
@@ -106,7 +138,7 @@ export namespace DAL::Schema
     }
 
     template<typename T>
-        requires (has_table_annotation<T>())
+        requires(has_table_annotation<T>())
     consteval std::string_view annotated_table_name()
     {
         auto anns = std::meta::annotations_of_with_type(^^T, ^^table);
@@ -114,7 +146,24 @@ export namespace DAL::Schema
     }
 
     template<typename Domain>
-    struct AnnotatedDtoFields;
+        requires(has_table_annotation<Domain>())
+    struct AnnotatedDto;
+
+    template<typename Domain>
+    struct SchemaOf
+    {
+        using type = Domain;
+    };
+
+    template<typename Domain>
+        requires(has_table_annotation<Domain>())
+    struct SchemaOf<Domain>
+    {
+        using type = AnnotatedDto<Domain>;
+    };
+
+    template<typename Domain>
+    using SchemaOf_t = typename SchemaOf<Domain>::type;
 
     template<typename T>
     using AnnotatedPkAuto = sqlgen::PrimaryKey<T, true>;
@@ -122,36 +171,81 @@ export namespace DAL::Schema
     using AnnotatedPkManual = sqlgen::PrimaryKey<T, false>;
 
     template<typename Domain>
-        requires (has_table_annotation<Domain>())
+        requires(has_table_annotation<Domain>())
     consteval void synthesize_annotated_dto_fields(std::meta::info target_fields_struct)
     {
-        constexpr auto dom_members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^Domain, std::meta::access_context::unchecked()));
+        static constexpr auto& dom_members = unchecked_members_v<Domain>;
         std::vector<std::meta::info> specs;
         specs.reserve(dom_members.size());
 
-        for (auto m : dom_members)
+        template for (constexpr auto m : dom_members)
         {
-            auto field_type = std::meta::remove_cvref(std::meta::type_of(m));
+            constexpr auto field_type = std::meta::remove_cvref(std::meta::type_of(m));
             std::meta::info target_type = field_type;
 
-            auto pk_anns = std::meta::annotations_of_with_type(m, ^^primary_key);
-            auto uniq_anns = std::meta::annotations_of_with_type(m, ^^unique);
-            if (!pk_anns.empty())
+            constexpr auto pk_anns = std::define_static_array(std::meta::annotations_of_with_type(m, ^^primary_key));
+            constexpr auto uniq_anns = std::define_static_array(std::meta::annotations_of_with_type(m, ^^unique));
+            static constexpr auto all_anns = std::define_static_array(std::meta::annotations_of(m));
+
+            std::meta::info fk_target_type{};
+            bool has_fk = false;
+            template for (constexpr auto ann : all_anns)
             {
-                auto pk = std::meta::extract<primary_key>(pk_anns[0]);
-                target_type = std::meta::substitute(
-                    pk.auto_increment ? ^^AnnotatedPkAuto : ^^AnnotatedPkManual,
-                    { field_type });
+                constexpr auto ann_type = std::meta::type_of(ann);
+                if constexpr (std::meta::has_template_arguments(ann_type) && std::meta::template_of(ann_type) == ^^references)
+                {
+                    using AnnT = [:ann_type:];
+                    constexpr auto ref_val = std::meta::extract<AnnT>(ann);
+                    constexpr std::string_view ref_col = ref_val.col;
+                    using ParentDomain = [:std::meta::template_arguments_of(ann_type)[0]:];
+                    constexpr auto ref_lit = [&]<std::size_t... Is>(std::index_sequence<Is...>) consteval
+                    {
+                        return rfl::internal::StringLiteral<ref_col.size() + 1>{ std::array<char, ref_col.size() + 1>{ ref_col[Is]...,
+                                                                                                                       '\0' } };
+                    }(std::make_index_sequence<ref_col.size()>{});
+                    using FieldT = [:field_type:];
+                    fk_target_type = ^^sqlgen::ForeignKey<FieldT, SchemaOf_t<ParentDomain>, ref_lit>;
+                    has_fk = true;
+                }
             }
-            else if (!uniq_anns.empty())
+
+            if constexpr (!pk_anns.empty())
             {
-                target_type = std::meta::substitute(^^sqlgen::Unique, { field_type });
+                constexpr auto pk = std::meta::extract<primary_key>(pk_anns[0]);
+                if constexpr (pk.auto_increment)
+                {
+                    target_type = std::meta::substitute(
+                        ^^AnnotatedPkAuto,
+                        {
+                            field_type });
+                }
+                else if (has_fk)
+                {
+                    target_type = fk_target_type;
+                }
+                else
+                {
+                    target_type = std::meta::substitute(
+                        ^^AnnotatedPkManual,
+                        {
+                            field_type });
+                }
+            }
+            else if (has_fk)
+            {
+                target_type = fk_target_type;
+            }
+            else if constexpr (!uniq_anns.empty())
+            {
+                target_type = std::meta::substitute(
+                    ^^sqlgen::Unique,
+                    {
+                        field_type });
             }
 
             std::string_view col_name = std::meta::identifier_of(m);
-            auto col_anns = std::meta::annotations_of_with_type(m, ^^column);
-            if (!col_anns.empty())
+            constexpr auto col_anns = std::define_static_array(std::meta::annotations_of_with_type(m, ^^column));
+            if constexpr (!col_anns.empty())
             {
                 col_name = std::meta::extract<column>(col_anns[0]).name;
             }
@@ -169,10 +263,7 @@ export namespace DAL::Schema
 
             std::string safe_col_name;
             safe_col_name.reserve(col_name.size());
-            for (char ch : col_name)
-            {
-                safe_col_name.push_back(ch);
-            }
+            std::ranges::copy(col_name, std::back_inserter(safe_col_name));
 
             specs.push_back(std::meta::data_member_spec(target_type, { .name = std::move(safe_col_name) }));
         }
@@ -181,7 +272,7 @@ export namespace DAL::Schema
     }
 
     template<typename Domain>
-        requires (has_table_annotation<Domain>())
+        requires(has_table_annotation<Domain>())
     struct AnnotatedDtoHolder
     {
         struct Fields;
@@ -192,27 +283,11 @@ export namespace DAL::Schema
     };
 
     template<typename Domain>
-        requires (has_table_annotation<Domain>())
+        requires(has_table_annotation<Domain>())
     struct AnnotatedDto : public AnnotatedDtoHolder<Domain>::Fields
     {
         static constexpr auto tablename = std::define_static_string(annotated_table_name<Domain>());
     };
-
-    template<typename Domain>
-    struct SchemaOf
-    {
-        using type = Domain;
-    };
-
-    template<typename Domain>
-        requires (has_table_annotation<Domain>())
-    struct SchemaOf<Domain>
-    {
-        using type = AnnotatedDto<Domain>;
-    };
-
-    template<typename Domain>
-    using SchemaOf_t = typename SchemaOf<Domain>::type;
 
     template<typename Domain>
     concept HasSchema = RelationalEntity<SchemaOf_t<Domain>>;
@@ -259,13 +334,10 @@ export namespace DAL::Schema
     consteval auto col_literal_of()
     {
         constexpr std::string_view name = std::meta::identifier_of(Member);
-        std::array<char, name.size() + 1> buf{};
-        for (std::size_t i = 0; i < name.size(); ++i)
+        return [&]<std::size_t... Is>(std::index_sequence<Is...>) consteval
         {
-            buf[i] = name[i];
-        }
-        buf[name.size()] = '\0';
-        return rfl::internal::StringLiteral<name.size() + 1>{ buf };
+            return rfl::internal::StringLiteral<name.size() + 1>{ std::array<char, name.size() + 1>{ name[Is]..., '\0' } };
+        }(std::make_index_sequence<name.size()>{});
     }
 
     template<std::meta::info Member>
@@ -274,9 +346,7 @@ export namespace DAL::Schema
     template<typename DTO>
     consteval std::size_t total_member_count()
     {
-        static constexpr auto members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
-        return members.size();
+        return members_v<DTO>.size();
     }
 
     template<typename DTO>
@@ -290,9 +360,7 @@ export namespace DAL::Schema
         requires SinglePrimaryKey<DTO>
     consteval std::meta::info primary_key_member()
     {
-        static constexpr auto members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
-        template for (constexpr auto m : members)
+        template for (constexpr auto m : members_v<DTO>)
         {
             using RawFieldType = [:std::meta::type_of(m):];
             using FieldType = std::remove_cvref_t<RawFieldType>;
@@ -308,14 +376,12 @@ export namespace DAL::Schema
         requires RelationalEntity<DTO>
     consteval auto key_members_of()
     {
-        static constexpr auto members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
         constexpr std::size_t k_count = key_member_count<DTO>();
         constexpr bool use_pk = (primary_key_count<DTO>() > 0);
         std::array<std::meta::info, k_count> result{};
         std::size_t idx = 0;
 
-        template for (constexpr auto m : members)
+        template for (constexpr auto m : members_v<DTO>)
         {
             using RawFieldType = [:std::meta::type_of(m):];
             using FieldType = std::remove_cvref_t<RawFieldType>;
@@ -331,14 +397,12 @@ export namespace DAL::Schema
         requires RelationalEntity<DTO>
     consteval auto non_key_members_of()
     {
-        static constexpr auto members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
         constexpr std::size_t nk_count = total_member_count<DTO>() - key_member_count<DTO>();
         constexpr bool use_pk = (primary_key_count<DTO>() > 0);
         std::array<std::meta::info, nk_count> result{};
         std::size_t idx = 0;
 
-        template for (constexpr auto m : members)
+        template for (constexpr auto m : members_v<DTO>)
         {
             using RawFieldType = [:std::meta::type_of(m):];
             using FieldType = std::remove_cvref_t<RawFieldType>;
@@ -365,10 +429,11 @@ export namespace DAL::Schema
     {
         static constexpr auto km = key_members_of<DTO>();
         auto tuple_parts = std::forward_as_tuple(parts...);
-        return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            return ((col_of<km[Is]> ==
-                     static_cast<typename detail::member_reflection_value_type<km[Is]>::type>(
-                         std::get<Is>(tuple_parts))) && ...);
+        return [&]<std::size_t... Is>(std::index_sequence<Is...>)
+        {
+            return (
+                (col_of<km[Is]> == static_cast<typename detail::member_reflection_value_type<km[Is]>::type>(std::get<Is>(tuple_parts))) &&
+                ...);
         }(std::make_index_sequence<sizeof...(Parts)>{});
     }
 
@@ -377,7 +442,8 @@ export namespace DAL::Schema
     [[nodiscard]] constexpr auto make_dto_key_where(const DTO& item)
     {
         static constexpr auto km = key_members_of<DTO>();
-        return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        return [&]<std::size_t... Is>(std::index_sequence<Is...>)
+        {
             return ((col_of<km[Is]> == unwrap_field(item.[:km[Is]:])) && ...);
         }(std::make_index_sequence<km.size()>{});
     }
@@ -388,28 +454,31 @@ export namespace DAL::Schema
 
     namespace detail
     {
+        template<typename... KeyTypes>
+        consteval auto wrap_key_types()
+        {
+            if constexpr (sizeof...(KeyTypes) == 1)
+            {
+                return std::type_identity<Core::SingleKey<KeyTypes...[0]>>{};
+            }
+            else
+            {
+                return std::type_identity<Core::CompositeKey<KeyTypes...>>{};
+            }
+        }
+
         template<typename DTO, std::size_t... Is>
         consteval auto infer_key_type_helper(std::index_sequence<Is...>)
         {
             static constexpr auto km = key_members_of<DTO>();
-            if constexpr (sizeof...(Is) == 1)
-            {
-                return std::type_identity<
-                    Core::SingleKey<typename member_reflection_value_type<km[0]>::type>>{};
-            }
-            else
-            {
-                return std::type_identity<
-                    Core::CompositeKey<typename member_reflection_value_type<km[Is]>::type...>>{};
-            }
+            return wrap_key_types<typename member_reflection_value_type<km[Is]>::type...>();
         }
     } // namespace detail
 
     // Synthesizes Core::SingleKey<V> or Core::CompositeKey<V1, V2, ...> from DTO key fields
     template<typename DTO>
         requires RelationalEntity<DTO>
-    using InferredKey_t = typename decltype(
-        detail::infer_key_type_helper<DTO>(std::make_index_sequence<key_member_count<DTO>()>{}))::type;
+    using InferredKey_t = typename decltype(detail::infer_key_type_helper<DTO>(std::make_index_sequence<key_member_count<DTO>()>{}))::type;
 
     // Resolves Domain::Key when explicitly defined, or falls back to InferredKey_t<DTO>
     template<typename Domain, typename DTO = SchemaOf_t<Domain>>
@@ -437,12 +506,10 @@ export namespace DAL::Schema
     template<typename DTO>
     consteval auto foreign_table_types_of()
     {
-        static constexpr auto members = std::define_static_array(
-            std::meta::nonstatic_data_members_of(^^DTO, std::meta::access_context::current()));
         std::array<std::meta::info, foreign_key_count<DTO>()> targets{};
         std::size_t idx = 0;
 
-        template for (constexpr auto m : members)
+        template for (constexpr auto m : members_v<DTO>)
         {
             using RawFieldType = [:std::meta::type_of(m):];
             using FieldType = std::remove_cvref_t<RawFieldType>;
@@ -457,8 +524,7 @@ export namespace DAL::Schema
     // Computes a topological ordering (parents before children) from a dependency matrix
     // where depends_on[child][parent] == true. Preserves declaration order for ties.
     template<std::size_t N>
-    consteval std::array<std::size_t, N> kahn_topological_sort(
-        const std::array<std::array<bool, N>, N>& depends_on)
+    consteval std::array<std::size_t, N> kahn_topological_sort(const std::array<std::array<bool, N>, N>& depends_on)
     {
         std::array<std::size_t, N> in_degree{};
         for (std::size_t c = 0; c < N; ++c)
@@ -524,20 +590,23 @@ export namespace DAL::Schema
         std::array<std::array<bool, N>, N> depends_on{};
 
         std::size_t child_idx = 0;
-        (([&]() {
-            constexpr auto targets = foreign_table_types_of<DTOs>();
-            for (std::meta::info target : targets)
-            {
-                for (std::size_t parent_idx = 0; parent_idx < N; ++parent_idx)
-                {
-                    if (parent_idx != child_idx && types[parent_idx] == target)
-                    {
-                        depends_on[child_idx][parent_idx] = true;
-                    }
-                }
-            }
-            ++child_idx;
-        }()), ...);
+        ((
+             [&]()
+             {
+                 constexpr auto targets = foreign_table_types_of<DTOs>();
+                 for (std::meta::info target : targets)
+                 {
+                     for (std::size_t parent_idx = 0; parent_idx < N; ++parent_idx)
+                     {
+                         if (parent_idx != child_idx && types[parent_idx] == target)
+                         {
+                             depends_on[child_idx][parent_idx] = true;
+                         }
+                     }
+                 }
+                 ++child_idx;
+             }()),
+         ...);
 
         return kahn_topological_sort<N>(depends_on);
     }
@@ -549,8 +618,7 @@ export namespace DAL::Schema
     template<typename DTO>
     [[nodiscard]] constexpr bool dto_equals(const DTO& a, const DTO& b)
     {
-        constexpr auto ctx = std::meta::access_context::unchecked();
-        template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, ctx)))
+        template for (constexpr auto m : members_v<DTO>)
         {
             if (unwrap_field(a.[:m:]) != unwrap_field(b.[:m:]))
             {
@@ -567,10 +635,9 @@ export namespace DAL::Schema
     template<typename ChildDTO, typename ParentDTO>
     consteval std::size_t count_fk_members_referencing()
     {
-        constexpr auto ctx = std::meta::access_context::unchecked();
         constexpr auto parent_target = std::meta::dealias(^^ParentDTO);
         std::size_t count = 0;
-        template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^ChildDTO, ctx)))
+        template for (constexpr auto m : members_v<ChildDTO>)
         {
             using RawFieldT = [:std::meta::type_of(m):];
             using FieldT = std::remove_cvref_t<RawFieldT>;
@@ -587,13 +654,12 @@ export namespace DAL::Schema
     }
 
     template<typename ChildDTO, typename ParentDTO>
-        requires (count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
+        requires(count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
     consteval std::meta::info find_fk_member_referencing()
     {
-        constexpr auto ctx = std::meta::access_context::unchecked();
         constexpr auto parent_target = std::meta::dealias(^^ParentDTO);
         std::meta::info result{};
-        template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^ChildDTO, ctx)))
+        template for (constexpr auto m : members_v<ChildDTO>)
         {
             using RawFieldT = [:std::meta::type_of(m):];
             using FieldT = std::remove_cvref_t<RawFieldT>;
@@ -610,7 +676,7 @@ export namespace DAL::Schema
     }
 
     template<typename ChildDTO, typename ParentDTO, typename KeyValue>
-        requires (count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
+        requires(count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
     [[nodiscard]] auto make_fk_where(const KeyValue& parent_pk_val)
     {
         constexpr auto fk_m = find_fk_member_referencing<ChildDTO, ParentDTO>();
@@ -619,7 +685,7 @@ export namespace DAL::Schema
     }
 
     template<typename ChildDTO, typename ParentDTO>
-        requires (count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
+        requires(count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
     [[nodiscard]] constexpr auto extract_fk_value(const ChildDTO& child_dto)
     {
         constexpr auto fk_m = find_fk_member_referencing<ChildDTO, ParentDTO>();
@@ -629,9 +695,8 @@ export namespace DAL::Schema
     template<typename DTO>
     consteval bool has_auto_incr_primary_key()
     {
-        constexpr auto ctx = std::meta::access_context::unchecked();
         bool found = false;
-        template for (constexpr auto m : std::define_static_array(std::meta::nonstatic_data_members_of(^^DTO, ctx)))
+        template for (constexpr auto m : members_v<DTO>)
         {
             using RawFieldT = [:std::meta::type_of(m):];
             using FieldT = std::remove_cvref_t<RawFieldT>;
@@ -647,3 +712,22 @@ export namespace DAL::Schema
     }
 
 } // namespace DAL::Schema
+
+namespace rfl::internal
+{
+    template<typename Domain>
+        requires(DAL::Schema::has_table_annotation<Domain>())
+    struct CountFieldsHelper<DAL::Schema::AnnotatedDto<Domain>>
+    {
+        static consteval std::size_t count_fields()
+        {
+            return DAL::Schema::members_v<typename DAL::Schema::AnnotatedDtoHolder<Domain>::Fields>.size();
+        }
+    };
+
+    template<typename Domain>
+        requires(DAL::Schema::has_table_annotation<Domain>())
+    struct CountFieldsHelper<const DAL::Schema::AnnotatedDto<Domain>> : CountFieldsHelper<DAL::Schema::AnnotatedDto<Domain>>
+    {
+    };
+} // namespace rfl::internal

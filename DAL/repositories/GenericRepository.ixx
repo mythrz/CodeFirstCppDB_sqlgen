@@ -34,16 +34,15 @@ export namespace DAL::Repositories
     class GenericRepository : public virtual Core::IGenericRepository<Domain, KeyType>
     {
     public:
-        explicit GenericRepository(std::shared_ptr<ConnectionHandle> conn)
+        explicit GenericRepository(std::shared_ptr<ConnectionHandle> conn) pre(conn != nullptr)
             : conn_(std::move(conn))
         {
         }
 
         [[nodiscard]] std::vector<Domain> get_all() const override
         {
-            auto dtos = conn_->template fetch_all<DTO>();
-            auto domain_view = dtos | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
-            return std::vector<Domain>(domain_view.begin(), domain_view.end());
+            return conn_->template fetch_all<DTO>() | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain) |
+                std::ranges::to<std::vector>();
         }
 
         [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> try_get_all() const override
@@ -55,16 +54,14 @@ export namespace DAL::Repositories
                 {
                     return std::unexpected<Core::DbError>{ res.error() };
                 }
-                auto domain_view = res.value() | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
-                return std::vector<Domain>(domain_view.begin(), domain_view.end());
+                return res.value() | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain) |
+                    std::ranges::to<std::vector>();
             }
             else
             {
                 if (!conn_->is_open())
                 {
-                    return std::unexpected<Core::DbError>{
-                        Core::DbError::connection_error("Database connection is closed")
-                    };
+                    return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
                 }
                 return get_all();
             }
@@ -74,34 +71,28 @@ export namespace DAL::Repositories
         {
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
-                return std::apply(
-                    [this, &id](const auto&... parts) -> std::optional<Domain> {
-                        if constexpr (requires {
-                                          conn_->template get_by_composite_id<DTO>(unwrap_key_part(parts)...);
-                                      })
+                const auto& [... parts] = id.tuple();
+                if constexpr (requires { conn_->template get_by_composite_id<DTO>(unwrap_key_part(parts)...); })
+                {
+                    return conn_->template get_by_composite_id<DTO>(unwrap_key_part(parts)...)
+                        .transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+                }
+                else
+                {
+                    auto dtos = conn_->template fetch_all<DTO>();
+                    for (const auto& dto : dtos)
+                    {
+                        if (DAL::Schema::EntityMetadata<Domain, DTO>::matches_key(dto, id))
                         {
-                            return conn_->template get_by_composite_id<DTO>(unwrap_key_part(parts)...)
-                                .transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+                            return DAL::Mappers::MapperTraits<Domain, DTO>::to_domain(dto);
                         }
-                        else
-                        {
-                            auto dtos = conn_->template fetch_all<DTO>();
-                            for (const auto& dto : dtos)
-                            {
-                                if (DAL::Schema::EntityMetadata<Domain, DTO>::matches_key(dto, id))
-                                {
-                                    return DAL::Mappers::MapperTraits<Domain, DTO>::to_domain(dto);
-                                }
-                            }
-                            return std::nullopt;
-                        }
-                    },
-                    id.tuple());
+                    }
+                    return std::nullopt;
+                }
             }
             else
             {
-                return conn_->template get_by_id<DTO>(unwrap_key_part(id)).transform(
-                    DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+                return conn_->template get_by_id<DTO>(unwrap_key_part(id)).transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
             }
         }
 
@@ -109,56 +100,48 @@ export namespace DAL::Repositories
         {
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
-                return std::apply(
-                    [this, &id](const auto&... parts) -> std::expected<std::optional<Domain>, Core::DbError> {
-                        if constexpr (requires {
-                                          conn_->template try_get_by_composite_id<DTO>(unwrap_key_part(parts)...);
-                                      })
+                const auto& [... parts] = id.tuple();
+                if constexpr (requires { conn_->template try_get_by_composite_id<DTO>(unwrap_key_part(parts)...); })
+                {
+                    auto res = conn_->template try_get_by_composite_id<DTO>(unwrap_key_part(parts)...);
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ res.error() };
+                    }
+                    return res.value().transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+                }
+                else
+                {
+                    auto dtos_res = [this]() -> std::expected<std::vector<DTO>, Core::DbError>
+                    {
+                        if constexpr (requires { conn_->template try_fetch_all<DTO>(); })
                         {
-                            auto res = conn_->template try_get_by_composite_id<DTO>(unwrap_key_part(parts)...);
-                            if (!res)
-                            {
-                                return std::unexpected<Core::DbError>{ res.error() };
-                            }
-                            return res.value().transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain);
+                            return conn_->template try_fetch_all<DTO>();
                         }
                         else
                         {
-                            auto dtos_res = [this]() -> std::expected<std::vector<DTO>, Core::DbError> {
-                                if constexpr (requires { conn_->template try_fetch_all<DTO>(); })
-                                {
-                                    return conn_->template try_fetch_all<DTO>();
-                                }
-                                else
-                                {
-                                    if (!conn_->is_open())
-                                    {
-                                        return std::unexpected<Core::DbError>{
-                                            Core::DbError::connection_error("Database connection is closed")
-                                        };
-                                    }
-                                    return conn_->template fetch_all<DTO>();
-                                }
-                            }();
-
-                            if (!dtos_res)
+                            if (!conn_->is_open())
                             {
-                                return std::unexpected<Core::DbError>{ dtos_res.error() };
+                                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
                             }
-
-                            for (const auto& dto : dtos_res.value())
-                            {
-                                if (DAL::Schema::EntityMetadata<Domain, DTO>::matches_key(dto, id))
-                                {
-                                    return std::optional<Domain>{
-                                        DAL::Mappers::MapperTraits<Domain, DTO>::to_domain(dto)
-                                    };
-                                }
-                            }
-                            return std::optional<Domain>{ std::nullopt };
+                            return conn_->template fetch_all<DTO>();
                         }
-                    },
-                    id.tuple());
+                    }();
+
+                    if (!dtos_res)
+                    {
+                        return std::unexpected<Core::DbError>{ dtos_res.error() };
+                    }
+
+                    for (const auto& dto : dtos_res.value())
+                    {
+                        if (DAL::Schema::EntityMetadata<Domain, DTO>::matches_key(dto, id))
+                        {
+                            return std::optional<Domain>{ DAL::Mappers::MapperTraits<Domain, DTO>::to_domain(dto) };
+                        }
+                    }
+                    return std::optional<Domain>{ std::nullopt };
+                }
             }
             else
             {
@@ -175,9 +158,7 @@ export namespace DAL::Repositories
                 {
                     if (!conn_->is_open())
                     {
-                        return std::unexpected<Core::DbError>{
-                            Core::DbError::connection_error("Database connection is closed")
-                        };
+                        return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
                     }
                     return get_by_id(id);
                 }
@@ -197,8 +178,7 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::expected<void, Core::DbError> insert_many(const std::vector<Domain>& items) override
         {
-            auto dto_view = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto);
-            std::vector<DTO> dtos(dto_view.begin(), dto_view.end());
+            auto dtos = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto) | std::ranges::to<std::vector>();
             auto res = conn_->insert_many(dtos);
             if (!res)
             {
@@ -222,20 +202,18 @@ export namespace DAL::Repositories
         {
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
-                auto res = std::apply(
-                    [this](const auto&... parts) {
-                        if constexpr (requires {
-                                          conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...);
-                                      })
-                        {
-                            return conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...);
-                        }
-                        else
-                        {
-                            return conn_->delete_by_composite_id(unwrap_key_part(parts)...);
-                        }
-                    },
-                    id.tuple());
+                const auto& [... parts] = id.tuple();
+                auto res = [&]()
+                {
+                    if constexpr (requires { conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...); })
+                    {
+                        return conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...);
+                    }
+                    else
+                    {
+                        return conn_->delete_by_composite_id(unwrap_key_part(parts)...);
+                    }
+                }();
                 if (!res)
                 {
                     return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
@@ -257,20 +235,15 @@ export namespace DAL::Repositories
         {
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
-                return std::apply(
-                    [this, &id](const auto&... parts) {
-                        if constexpr (requires {
-                                          conn_->template exists_by_composite_id<DTO>(unwrap_key_part(parts)...);
-                                      })
-                        {
-                            return conn_->template exists_by_composite_id<DTO>(unwrap_key_part(parts)...);
-                        }
-                        else
-                        {
-                            return get_by_id(id).has_value();
-                        }
-                    },
-                    id.tuple());
+                const auto& [... parts] = id.tuple();
+                if constexpr (requires { conn_->template exists_by_composite_id<DTO>(unwrap_key_part(parts)...); })
+                {
+                    return conn_->template exists_by_composite_id<DTO>(unwrap_key_part(parts)...);
+                }
+                else
+                {
+                    return get_by_id(id).has_value();
+                }
             }
             else
             {

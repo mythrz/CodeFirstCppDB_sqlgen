@@ -32,10 +32,10 @@ export namespace DAL
         }
 
         // Non-copyable and non-movable so Set<T>{ this } member closures never dangle
-        DbContextBase(const DbContextBase&) = delete("DbContextBase is non-copyable because DbSet members bind 'this'");
-        DbContextBase& operator=(const DbContextBase&) = delete("DbContextBase is non-copyable because DbSet members bind 'this'");
-        DbContextBase(DbContextBase&&) = delete("DbContextBase is non-movable because DbSet members bind 'this'");
-        DbContextBase& operator=(DbContextBase&&) = delete("DbContextBase is non-movable because DbSet members bind 'this'");
+        DbContextBase(const DbContextBase&) = delete ("DbContextBase is non-copyable because DbSet members bind 'this'");
+        DbContextBase& operator=(const DbContextBase&) = delete ("DbContextBase is non-copyable because DbSet members bind 'this'");
+        DbContextBase(DbContextBase&&) = delete ("DbContextBase is non-movable because DbSet members bind 'this'");
+        DbContextBase& operator=(DbContextBase&&) = delete ("DbContextBase is non-movable because DbSet members bind 'this'");
 
         virtual ~DbContextBase() = default;
 
@@ -75,9 +75,7 @@ export namespace DAL
         // Executes a parameterized SQL query returning dynamic rows (Phase 41)
         template<typename CellT>
         [[nodiscard]] auto query_rows(std::string_view sql, std::span<const CellT> params) const
-            requires requires(const ConnectionHandle& c, std::string_view s, std::span<const CellT> p) {
-                c.query_rows(s, p);
-            }
+            requires requires(const ConnectionHandle& c, std::string_view s, std::span<const CellT> p) { c.query_rows(s, p); }
         {
             return conn_->query_rows(sql, params);
         }
@@ -91,9 +89,7 @@ export namespace DAL
         // Executes a parameterized SQL statement without result rows (Phase 41)
         template<typename CellT>
         [[nodiscard]] auto execute_prepared(std::string_view sql, std::span<const CellT> params)
-            requires requires(ConnectionHandle& c, std::string_view s, std::span<const CellT> p) {
-                c.execute_prepared(s, p);
-            }
+            requires requires(ConnectionHandle& c, std::string_view s, std::span<const CellT> p) { c.execute_prepared(s, p); }
         {
             return conn_->execute_prepared(sql, params);
         }
@@ -105,15 +101,11 @@ export namespace DAL
         }
 
         // Type alias for zero-boilerplate DbSet declarations inside derived DbContext classes
-        template<typename Domain,
-                 typename DTO = Schema::SchemaOf_t<Domain>,
-                 typename KeyType = Schema::EntityKey_t<Domain, DTO>>
+        template<typename Domain, typename DTO = Schema::SchemaOf_t<Domain>, typename KeyType = Schema::EntityKey_t<Domain, DTO>>
         using Set = DbSet<Domain, DTO, ConnectionHandle, KeyType>;
 
         // Factory helper to construct a DbSet bound to this context's connection
-        template<typename Domain,
-                 typename DTO = Schema::SchemaOf_t<Domain>,
-                 typename KeyType = Schema::EntityKey_t<Domain, DTO>>
+        template<typename Domain, typename DTO = Schema::SchemaOf_t<Domain>, typename KeyType = Schema::EntityKey_t<Domain, DTO>>
         [[nodiscard]] Set<Domain, DTO, KeyType> create_set() const
         {
             return Set<Domain, DTO, KeyType>(conn_);
@@ -126,8 +118,8 @@ export namespace DAL
         template<typename DerivedType>
         static consteval std::size_t dbset_member_count()
         {
-            static constexpr auto members = std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
+            static constexpr auto members =
+                std::define_static_array(std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
             std::size_t count = 0;
             template for (constexpr auto m : members)
             {
@@ -144,8 +136,8 @@ export namespace DAL
         template<typename DerivedType>
         static consteval auto dbset_members_of()
         {
-            static constexpr auto members = std::define_static_array(
-                std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
+            static constexpr auto members =
+                std::define_static_array(std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
             constexpr std::size_t K = dbset_member_count<DerivedType>();
             std::array<std::meta::info, K> result{};
             std::size_t idx = 0;
@@ -166,47 +158,20 @@ export namespace DAL
         {
             constexpr std::size_t K = dbset_member_count<DerivedType>();
             static constexpr auto dbset_members = dbset_members_of<DerivedType>();
-
-            std::array<std::meta::info, K> resolved_dtos{};
-            std::size_t idx = 0;
-            template for (constexpr auto m : dbset_members)
+            return []<std::size_t... Is>(std::index_sequence<Is...>) consteval
             {
-                using RawMemberType = [:std::meta::type_of(m):];
-                using MemberType = std::remove_cvref_t<RawMemberType>;
-                resolved_dtos[idx++] = std::meta::dealias(^^typename MemberType::DTOType);
-            }
-
-            std::array<std::array<bool, K>, K> depends_on{};
-            std::size_t child_idx = 0;
-            template for (constexpr auto m : dbset_members)
-            {
-                using RawMemberType = [:std::meta::type_of(m):];
-                using MemberType = std::remove_cvref_t<RawMemberType>;
-                constexpr auto targets = Schema::foreign_table_types_of<typename MemberType::DTOType>();
-                for (std::meta::info target : targets)
-                {
-                    for (std::size_t parent_idx = 0; parent_idx < K; ++parent_idx)
-                    {
-                        if (parent_idx != child_idx && resolved_dtos[parent_idx] == target)
-                        {
-                            depends_on[child_idx][parent_idx] = true;
-                        }
-                    }
-                }
-                ++child_idx;
-            }
-
-            return Schema::kahn_topological_sort<K>(depends_on);
+                return Schema::topological_dto_order<
+                    typename std::remove_cvref_t<typename[:std::meta::type_of(dbset_members[Is]):]>::DTOType...>();
+            }(std::make_index_sequence<K>{});
         }
 
         template<typename Self>
-        std::expected<void, Core::DbError> ensure_created(this Self&& self)
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_created(this Self&& self)
         {
             if (!self.is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot create schema: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot create schema: database connection is closed") };
             }
 
             using DerivedType = std::remove_cvref_t<Self>;
@@ -234,18 +199,20 @@ export namespace DAL
         }
 
         template<typename... Domains>
-        std::expected<void, Core::DbError> ensure_created_for()
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_created_for()
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot create schema: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot create schema: database connection is closed") };
             }
 
             static constexpr auto order = Schema::topological_dto_order<Schema::SchemaOf_t<Domains>...>();
             std::array<std::function<std::expected<void, Core::DbError>()>, sizeof...(Domains)> creators{
-                [this]() { return conn_->template ensure_table_created<Schema::SchemaOf_t<Domains>>(); }...
+                [this]()
+                {
+                    return conn_->template ensure_table_created<Schema::SchemaOf_t<Domains>>();
+                }...
             };
 
             for (std::size_t idx : order)
@@ -261,13 +228,12 @@ export namespace DAL
         }
 
         template<typename Self>
-        std::expected<void, Core::DbError> ensure_deleted(this Self&& self)
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_deleted(this Self&& self)
         {
             if (!self.is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot drop schema: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot drop schema: database connection is closed") };
             }
 
             using DerivedType = std::remove_cvref_t<Self>;
@@ -290,19 +256,20 @@ export namespace DAL
         }
 
         template<typename... Domains>
-        std::expected<void, Core::DbError> ensure_deleted_for()
+        [[nodiscard]] std::expected<void, Core::DbError> ensure_deleted_for()
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot drop schema: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot drop schema: database connection is closed") };
             }
 
-            static constexpr auto order = Schema::reverse_index_array(
-                Schema::topological_dto_order<Schema::SchemaOf_t<Domains>...>());
+            static constexpr auto order = Schema::reverse_index_array(Schema::topological_dto_order<Schema::SchemaOf_t<Domains>...>());
             std::array<std::function<std::expected<void, Core::DbError>()>, sizeof...(Domains)> droppers{
-                [this]() { return conn_->template ensure_table_dropped<Schema::SchemaOf_t<Domains>>(); }...
+                [this]()
+                {
+                    return conn_->template ensure_table_dropped<Schema::SchemaOf_t<Domains>>();
+                }...
             };
 
             for (std::size_t idx : order)
@@ -354,8 +321,8 @@ export namespace DAL
         {
             std::shared_ptr<void> owned_instance{};
             const void* borrowed_instance{ nullptr };
-            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                const std::shared_ptr<void>&, const void*)> detect_fn{};
+            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&, const void*)>
+                detect_fn{};
         };
 
         void enable_change_tracking(bool enabled = true) noexcept
@@ -385,9 +352,12 @@ export namespace DAL
 
         void untrack_type(std::type_index type) noexcept
         {
-            std::erase_if(tracked_entries_, [type](const auto& kv) {
-                return kv.first.first == type;
-            });
+            std::erase_if(
+                tracked_entries_,
+                [type](const auto& kv)
+                {
+                    return kv.first.first == type;
+                });
         }
 
         void upsert_tracked_entry(
@@ -396,20 +366,14 @@ export namespace DAL
             bool refresh_baseline,
             std::shared_ptr<void> owned,
             const void* borrowed,
-            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                const std::shared_ptr<void>&, const void*)> detect_fn)
+            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&, const void*)>
+                detect_fn)
         {
             auto map_key = std::pair<std::type_index, std::string>{ type, std::move(key_repr) };
             auto it = tracked_entries_.find(map_key);
             if (it == tracked_entries_.end())
             {
-                tracked_entries_.emplace(
-                    std::move(map_key),
-                    TrackedEntityEntry{
-                        std::move(owned),
-                        borrowed,
-                        std::move(detect_fn)
-                    });
+                tracked_entries_.emplace(std::move(map_key), TrackedEntityEntry{ std::move(owned), borrowed, std::move(detect_fn) });
                 return;
             }
 
@@ -431,9 +395,7 @@ export namespace DAL
             }
         }
 
-        [[nodiscard]] std::shared_ptr<void> find_tracked_instance(
-            std::type_index type,
-            const std::string& key_repr) const
+        [[nodiscard]] std::shared_ptr<void> find_tracked_instance(std::type_index type, const std::string& key_repr) const
         {
             auto it = tracked_entries_.find(std::pair<std::type_index, std::string>{ type, key_repr });
             if (it != tracked_entries_.end())
@@ -481,34 +443,32 @@ export namespace DAL
                 }
             }
             static_assert(
-                ([]() {
-                    template for (constexpr auto m : dbset_members_of<Derived>())
+                (
+                    []()
                     {
-                        using RawMemberType = [:std::meta::type_of(m):];
-                using MemberType = std::remove_cvref_t<RawMemberType>;
-                        if constexpr (std::same_as<typename MemberType::DomainType, TargetDomain>)
+                        template for (constexpr auto m : dbset_members_of<Derived>())
                         {
-                            return true;
+                            using RawMemberType = [:std::meta::type_of(m):];
+                            using MemberType = std::remove_cvref_t<RawMemberType>;
+                            if constexpr (std::same_as<typename MemberType::DomainType, TargetDomain>)
+                            {
+                                return true;
+                            }
                         }
-                    }
-                    return false;
-                })(),
+                        return false;
+                    })(),
                 "DbContext does not contain a Set<TargetDomain> member");
         }
 
         template<typename ChildDomain, typename ParentDomain, typename Self>
-        [[nodiscard]] std::expected<std::vector<ChildDomain>, Core::DbError> query_children(
-            this Self&& self,
-            const ParentDomain& parent)
+        [[nodiscard]] std::expected<std::vector<ChildDomain>, Core::DbError> query_children(this Self&& self, const ParentDomain& parent)
         {
             auto& child_set = self.template find_dbset<ChildDomain>();
             return child_set.template where_foreign_key<ParentDomain>(parent).try_to_vector();
         }
 
         template<typename ParentDomain, typename ChildDomain, typename Self>
-        [[nodiscard]] std::expected<std::optional<ParentDomain>, Core::DbError> query_parent(
-            this Self&& self,
-            const ChildDomain& child)
+        [[nodiscard]] std::expected<std::optional<ParentDomain>, Core::DbError> query_parent(this Self&& self, const ChildDomain& child)
         {
             auto& child_set = self.template find_dbset<ChildDomain>();
             auto& parent_set = self.template find_dbset<ParentDomain>();
@@ -524,8 +484,7 @@ export namespace DAL
 
         template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
         [[nodiscard]] std::expected<std::vector<TargetDomain>, Core::DbError> query_many_to_many(
-            this Self&& self,
-            const SourceDomain& source)
+            this Self&& self, const SourceDomain& source)
         {
             auto junctions_res = self.template query_children<JunctionDomain>(source);
             if (!junctions_res)
@@ -548,8 +507,8 @@ export namespace DAL
             if constexpr (Schema::SinglePrimaryKey<TargetDTO>)
             {
                 constexpr auto pk_m = Schema::primary_key_member<TargetDTO>();
-                using FkValueType = std::remove_cvref_t<decltype(
-                    Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
+                using FkValueType =
+                    std::remove_cvref_t<decltype(Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
                 std::vector<FkValueType> target_fks;
                 target_fks.reserve(junctions_res.value().size());
                 for (const auto& junction : junctions_res.value())
@@ -583,8 +542,7 @@ export namespace DAL
 
         template<typename ChildDomain, typename ParentDomain, typename Self>
         [[nodiscard]] std::expected<std::vector<ChildDomain>, Core::DbError> query_children_batch(
-            this Self&& self,
-            const std::vector<ParentDomain>& parents)
+            this Self&& self, const std::vector<ParentDomain>& parents)
         {
             if (parents.empty())
             {
@@ -596,8 +554,8 @@ export namespace DAL
             using ParentDTO = typename std::remove_cvref_t<decltype(parent_set)>::DTOType;
 
             constexpr auto fk_m = Schema::find_fk_member_referencing<ChildDTO, ParentDTO>();
-            using FkValueType = std::remove_cvref_t<decltype(
-                Schema::extract_fk_value<ChildDTO, ParentDTO>(std::declval<const ChildDTO&>()))>;
+            using FkValueType =
+                std::remove_cvref_t<decltype(Schema::extract_fk_value<ChildDTO, ParentDTO>(std::declval<const ChildDTO&>()))>;
 
             std::vector<FkValueType> pks;
             pks.reserve(parents.size());
@@ -611,8 +569,7 @@ export namespace DAL
 
         template<typename ParentDomain, typename ChildDomain, typename Self>
         [[nodiscard]] std::expected<std::vector<ParentDomain>, Core::DbError> query_parents_batch(
-            this Self&& self,
-            const std::vector<ChildDomain>& children)
+            this Self&& self, const std::vector<ChildDomain>& children)
         {
             if (children.empty())
             {
@@ -624,8 +581,8 @@ export namespace DAL
             using ParentDTO = typename std::remove_cvref_t<decltype(parent_set)>::DTOType;
 
             constexpr auto pk_m = Schema::primary_key_member<ParentDTO>();
-            using FkValueType = std::remove_cvref_t<decltype(
-                Schema::extract_fk_value<ChildDTO, ParentDTO>(std::declval<const ChildDTO&>()))>;
+            using FkValueType =
+                std::remove_cvref_t<decltype(Schema::extract_fk_value<ChildDTO, ParentDTO>(std::declval<const ChildDTO&>()))>;
 
             std::vector<FkValueType> fk_vals;
             fk_vals.reserve(children.size());
@@ -638,8 +595,8 @@ export namespace DAL
         }
 
         template<typename ChildDomain, typename ParentDomain, typename Self>
-        [[nodiscard]] std::expected<std::vector<std::pair<ParentDomain, std::vector<ChildDomain>>>, Core::DbError>
-        query_children_grouped(this Self&& self, const std::vector<ParentDomain>& parents)
+        [[nodiscard]] std::expected<std::vector<std::pair<ParentDomain, std::vector<ChildDomain>>>, Core::DbError> query_children_grouped(
+            this Self&& self, const std::vector<ParentDomain>& parents)
         {
             using PairType = std::pair<ParentDomain, std::vector<ChildDomain>>;
             std::vector<PairType> grouped;
@@ -659,8 +616,8 @@ export namespace DAL
             auto& parent_set = self.template find_dbset<ParentDomain>();
             using ChildDTO = typename std::remove_cvref_t<decltype(child_set)>::DTOType;
             using ParentDTO = typename std::remove_cvref_t<decltype(parent_set)>::DTOType;
-            using FkValueType = std::remove_cvref_t<decltype(
-                Schema::extract_fk_value<ChildDTO, ParentDTO>(std::declval<const ChildDTO&>()))>;
+            using FkValueType =
+                std::remove_cvref_t<decltype(Schema::extract_fk_value<ChildDTO, ParentDTO>(std::declval<const ChildDTO&>()))>;
 
             std::map<FkValueType, std::vector<ChildDomain>> buckets;
             for (auto& child : *children_res)
@@ -688,8 +645,8 @@ export namespace DAL
         }
 
         template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
-        [[nodiscard]] std::expected<std::vector<TargetDomain>, Core::DbError>
-        query_many_to_many_batch(this Self&& self, const std::vector<SourceDomain>& sources)
+        [[nodiscard]] std::expected<std::vector<TargetDomain>, Core::DbError> query_many_to_many_batch(
+            this Self&& self, const std::vector<SourceDomain>& sources)
         {
             if (sources.empty())
             {
@@ -714,8 +671,8 @@ export namespace DAL
             if constexpr (Schema::SinglePrimaryKey<TargetDTO>)
             {
                 constexpr auto pk_m = Schema::primary_key_member<TargetDTO>();
-                using FkValueType = std::remove_cvref_t<decltype(
-                    Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
+                using FkValueType =
+                    std::remove_cvref_t<decltype(Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
                 std::vector<FkValueType> target_fks;
                 target_fks.reserve(junctions_res->size());
                 for (const auto& junction : *junctions_res)
@@ -727,8 +684,8 @@ export namespace DAL
             }
             else
             {
-                using FkValueType = std::remove_cvref_t<decltype(
-                    Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
+                using FkValueType =
+                    std::remove_cvref_t<decltype(Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
                 std::set<FkValueType> seen_fks;
                 std::vector<TargetDomain> results;
                 results.reserve(junctions_res->size());
@@ -779,10 +736,10 @@ export namespace DAL
             using JunctionDTO = typename std::remove_cvref_t<decltype(junction_set)>::DTOType;
             using TargetDTO = typename std::remove_cvref_t<decltype(target_set)>::DTOType;
 
-            using SourceFkType = std::remove_cvref_t<decltype(
-                Schema::extract_fk_value<JunctionDTO, SourceDTO>(std::declval<const JunctionDTO&>()))>;
-            using TargetFkType = std::remove_cvref_t<decltype(
-                Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
+            using SourceFkType =
+                std::remove_cvref_t<decltype(Schema::extract_fk_value<JunctionDTO, SourceDTO>(std::declval<const JunctionDTO&>()))>;
+            using TargetFkType =
+                std::remove_cvref_t<decltype(Schema::extract_fk_value<JunctionDTO, TargetDTO>(std::declval<const JunctionDTO&>()))>;
 
             std::map<TargetFkType, TargetDomain> target_map;
             if (!junctions_res->empty())
@@ -867,35 +824,32 @@ export namespace DAL
             return grouped;
         }
 
-        std::expected<void, Core::DbError> begin_transaction()
+        [[nodiscard]] std::expected<void, Core::DbError> begin_transaction()
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot begin transaction: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot begin transaction: database connection is closed") };
             }
             return conn_->begin_transaction();
         }
 
-        std::expected<void, Core::DbError> commit()
+        [[nodiscard]] std::expected<void, Core::DbError> commit()
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot commit transaction: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot commit transaction: database connection is closed") };
             }
             return conn_->commit();
         }
 
-        std::expected<void, Core::DbError> rollback()
+        [[nodiscard]] std::expected<void, Core::DbError> rollback()
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot rollback transaction: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot rollback transaction: database connection is closed") };
             }
             return conn_->rollback();
         }
@@ -911,9 +865,8 @@ export namespace DAL
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot save changes: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot save changes: database connection is closed") };
             }
 
             (void)detect_changes();
@@ -984,13 +937,12 @@ export namespace DAL
         // Scoped transaction helper: begins a transaction, runs fn(), flushes staged changes,
         // Executes fn inside a transaction (or a SQL SAVEPOINT if already in a transaction),
         // committing/releasing on success or rolling back on failure.
-        std::expected<void, Core::DbError> savepoint(std::string_view name)
+        [[nodiscard]] std::expected<void, Core::DbError> savepoint(std::string_view name)
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot create savepoint: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot create savepoint: database connection is closed") };
             }
             if constexpr (requires(ConnectionHandle& c) { c.savepoint(name); })
             {
@@ -999,13 +951,12 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> release_savepoint(std::string_view name)
+        [[nodiscard]] std::expected<void, Core::DbError> release_savepoint(std::string_view name)
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot release savepoint: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot release savepoint: database connection is closed") };
             }
             if constexpr (requires(ConnectionHandle& c) { c.release_savepoint(name); })
             {
@@ -1014,13 +965,12 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> rollback_to_savepoint(std::string_view name)
+        [[nodiscard]] std::expected<void, Core::DbError> rollback_to_savepoint(std::string_view name)
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot rollback savepoint: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot rollback savepoint: database connection is closed") };
             }
             if constexpr (requires(ConnectionHandle& c) { c.rollback_to_savepoint(name); })
             {
@@ -1029,7 +979,7 @@ export namespace DAL
             return {};
         }
 
-        std::expected<void, Core::DbError> flush_pending_since(std::size_t start_idx)
+        [[nodiscard]] std::expected<void, Core::DbError> flush_pending_since(std::size_t start_idx)
         {
             if (start_idx >= pending_ops_.size())
             {
@@ -1086,13 +1036,12 @@ export namespace DAL
         }
 
         template<typename Fn>
-        std::expected<void, Core::DbError> transaction(Fn&& fn)
+        [[nodiscard]] std::expected<void, Core::DbError> transaction(Fn&& fn)
         {
             if (!is_connected())
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot start transaction: database connection is closed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot start transaction: database connection is closed") };
             }
 
             if (in_transaction())
@@ -1142,8 +1091,7 @@ export namespace DAL
                         auto rel_res = conn_->release_savepoint(sp_name);
                         --savepoint_depth_;
                         return rel_res;
-                    }
-                    catch (...)
+                    } catch (...)
                     {
                         pending_ops_.resize(saved_pending_size);
                         (void)conn_->rollback_to_savepoint(sp_name);
@@ -1198,8 +1146,7 @@ export namespace DAL
                     return commit();
                 }
                 return {};
-            }
-            catch (...)
+            } catch (...)
             {
                 if (in_transaction())
                 {
@@ -1281,7 +1228,7 @@ export namespace DAL
             return begin_result_;
         }
 
-        std::expected<void, Core::DbError> commit()
+        [[nodiscard]] std::expected<void, Core::DbError> commit()
         {
             if (!begin_result_)
             {
@@ -1289,15 +1236,11 @@ export namespace DAL
             }
             if (committed_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("TransactionScope already committed")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("TransactionScope already committed") };
             }
             if (rolled_back_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot commit a rolled-back TransactionScope")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Cannot commit a rolled-back TransactionScope") };
             }
             if (is_savepoint_)
             {
@@ -1342,13 +1285,11 @@ export namespace DAL
             return res;
         }
 
-        std::expected<void, Core::DbError> rollback()
+        [[nodiscard]] std::expected<void, Core::DbError> rollback()
         {
             if (committed_)
             {
-                return std::unexpected<Core::DbError>{
-                    Core::DbError::connection_error("Cannot rollback a committed TransactionScope")
-                };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Cannot rollback a committed TransactionScope") };
             }
             if (rolled_back_)
             {
