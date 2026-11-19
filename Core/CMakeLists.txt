@@ -13,6 +13,8 @@ target_sources(CodeFirstCppDB_Core
     core.ixx
 )
 
+target_compile_features(CodeFirstCppDB_Core PUBLIC cxx_std_26)
+
 target_compile_options(CodeFirstCppDB_Core
     PUBLIC
         $<$<CXX_COMPILER_ID:GNU>:-freflection>

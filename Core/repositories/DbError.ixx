@@ -113,22 +113,22 @@ export namespace Core
 
             if (lower_msg.find("unique") != std::string::npos || lower_msg.find("duplicate") != std::string::npos)
             {
-                return DbError{ DbErrorCode::DuplicateKey, std::string(msg) };
+                return create(DbErrorCode::DuplicateKey, std::string(msg));
             }
             if (lower_msg.find("foreign key") != std::string::npos || lower_msg.find("constraint") != std::string::npos)
             {
-                return DbError{ DbErrorCode::ConstraintViolation, std::string(msg) };
+                return create(DbErrorCode::ConstraintViolation, std::string(msg));
             }
             if (lower_msg.find("not found") != std::string::npos)
             {
-                return DbError{ DbErrorCode::NotFound, std::string(msg) };
+                return create(DbErrorCode::NotFound, std::string(msg));
             }
             if (lower_msg.find("connection") != std::string::npos || lower_msg.find("busy") != std::string::npos ||
                 lower_msg.find("locked") != std::string::npos || lower_msg.find("closed") != std::string::npos)
             {
-                return DbError{ DbErrorCode::ConnectionError, std::string(msg) };
+                return create(DbErrorCode::ConnectionError, std::string(msg));
             }
-            return DbError{ DbErrorCode::Unknown, std::string(msg) };
+            return create(DbErrorCode::Unknown, std::string(msg));
         }
     };
 

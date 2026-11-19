@@ -170,6 +170,16 @@ export namespace DAL::Schema
     template<typename T>
     using AnnotatedPkManual = sqlgen::PrimaryKey<T, false>;
 
+    template<auto NameFn>
+    consteval auto to_string_literal()
+    {
+        constexpr std::string_view name = NameFn();
+        return [&]<std::size_t... Is>(std::index_sequence<Is...>) consteval
+        {
+            return rfl::internal::StringLiteral<name.size() + 1>{ std::array<char, name.size() + 1>{ name[Is]..., '\0' } };
+        }(std::make_index_sequence<name.size()>{});
+    }
+
     template<typename Domain>
         requires(has_table_annotation<Domain>())
     consteval void synthesize_annotated_dto_fields(std::meta::info target_fields_struct)
@@ -195,14 +205,11 @@ export namespace DAL::Schema
                 if constexpr (std::meta::has_template_arguments(ann_type) && std::meta::template_of(ann_type) == ^^references)
                 {
                     using AnnT = [:ann_type:];
-                    constexpr auto ref_val = std::meta::extract<AnnT>(ann);
-                    constexpr std::string_view ref_col = ref_val.col;
                     using ParentDomain = [:std::meta::template_arguments_of(ann_type)[0]:];
-                    constexpr auto ref_lit = [&]<std::size_t... Is>(std::index_sequence<Is...>) consteval
-                    {
-                        return rfl::internal::StringLiteral<ref_col.size() + 1>{ std::array<char, ref_col.size() + 1>{ ref_col[Is]...,
-                                                                                                                       '\0' } };
-                    }(std::make_index_sequence<ref_col.size()>{});
+                    constexpr auto ref_lit = to_string_literal<[]() consteval
+                                                               {
+                                                                   return std::string_view{ std::meta::extract<AnnT>(ann).col };
+                                                               }>();
                     using FieldT = [:field_type:];
                     fk_target_type = ^^sqlgen::ForeignKey<FieldT, SchemaOf_t<ParentDomain>, ref_lit>;
                     has_fk = true;
@@ -333,11 +340,10 @@ export namespace DAL::Schema
     template<std::meta::info Member>
     consteval auto col_literal_of()
     {
-        constexpr std::string_view name = std::meta::identifier_of(Member);
-        return [&]<std::size_t... Is>(std::index_sequence<Is...>) consteval
-        {
-            return rfl::internal::StringLiteral<name.size() + 1>{ std::array<char, name.size() + 1>{ name[Is]..., '\0' } };
-        }(std::make_index_sequence<name.size()>{});
+        return to_string_literal<[]() consteval
+                                 {
+                                     return std::meta::identifier_of(Member);
+                                 }>();
     }
 
     template<std::meta::info Member>

@@ -104,11 +104,32 @@ export namespace DAL
         template<typename Domain, typename DTO = Schema::SchemaOf_t<Domain>, typename KeyType = Schema::EntityKey_t<Domain, DTO>>
         using Set = DbSet<Domain, DTO, ConnectionHandle, KeyType>;
 
-        // Factory helper to construct a DbSet bound to this context's connection
+        // Factory helper to construct a DbSet bound to this context (or standalone for const contexts)
+        template<typename Domain, typename DTO = Schema::SchemaOf_t<Domain>, typename KeyType = Schema::EntityKey_t<Domain, DTO>>
+        [[nodiscard]] Set<Domain, DTO, KeyType> create_set()
+        {
+            return Set<Domain, DTO, KeyType>(this);
+        }
+
         template<typename Domain, typename DTO = Schema::SchemaOf_t<Domain>, typename KeyType = Schema::EntityKey_t<Domain, DTO>>
         [[nodiscard]] Set<Domain, DTO, KeyType> create_set() const
         {
             return Set<Domain, DTO, KeyType>(conn_);
+        }
+
+        [[nodiscard]] std::weak_ptr<detail::ContextState> weak_context_state() const noexcept
+        {
+            return state_;
+        }
+
+        [[nodiscard]] detail::BaselineCheckpoint capture_checkpoint() const
+        {
+            return state_->capture_checkpoint();
+        }
+
+        void restore_checkpoint_baselines(const detail::BaselineCheckpoint& cp)
+        {
+            state_->restore_baselines(cp);
         }
 
         // =====================================================================
@@ -290,74 +311,63 @@ export namespace DAL
 
         void defer_changes(bool enabled = true) noexcept
         {
-            defer_changes_ = enabled;
+            state_->defer_changes_ = enabled;
         }
 
         [[nodiscard]] bool is_deferred() const noexcept
         {
-            return defer_changes_;
+            return state_->defer_changes_;
         }
 
-        void enqueue_op(std::function<std::expected<void, Core::DbError>()> op)
+        void enqueue_op(std::move_only_function<std::expected<void, Core::DbError>()> op)
         {
-            pending_ops_.push_back(std::move(op));
+            state_->pending_ops_.push_back(std::move(op));
         }
 
         [[nodiscard]] std::size_t pending_changes_count() const noexcept
         {
-            return pending_ops_.size();
+            return state_->pending_ops_.size();
         }
 
         void discard_changes() noexcept
         {
-            pending_ops_.clear();
+            state_->pending_ops_.clear();
         }
 
         // =====================================================================
         // Optional Identity Map & Snapshot ChangeTracker (Task 10.2)
         // =====================================================================
 
-        struct TrackedEntityEntry
-        {
-            std::shared_ptr<void> owned_instance{};
-            const void* borrowed_instance{ nullptr };
-            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&, const void*)>
-                detect_fn{};
-        };
+        using TrackedEntityEntry = detail::TrackedEntityEntry;
 
         void enable_change_tracking(bool enabled = true) noexcept
         {
-            change_tracking_enabled_ = enabled;
+            state_->change_tracking_enabled_ = enabled;
         }
 
         [[nodiscard]] bool is_change_tracking_enabled() const noexcept
         {
-            return change_tracking_enabled_;
+            return state_->change_tracking_enabled_;
         }
 
         [[nodiscard]] std::size_t tracked_entities_count() const noexcept
         {
-            return tracked_entries_.size();
+            return state_->tracked_entries_.size();
         }
 
         void clear_change_tracker() noexcept
         {
-            tracked_entries_.clear();
+            state_->tracked_entries_.clear();
         }
 
         void untrack_key(std::type_index type, const std::string& key_repr) noexcept
         {
-            tracked_entries_.erase(std::pair<std::type_index, std::string>{ type, key_repr });
+            state_->untrack_key(type, key_repr);
         }
 
         void untrack_type(std::type_index type) noexcept
         {
-            std::erase_if(
-                tracked_entries_,
-                [type](const auto& kv)
-                {
-                    return kv.first.first == type;
-                });
+            state_->untrack_type(type);
         }
 
         void upsert_tracked_entry(
@@ -367,48 +377,30 @@ export namespace DAL
             std::shared_ptr<void> owned,
             const void* borrowed,
             std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&, const void*)>
-                detect_fn)
+                detect_fn,
+            std::function<std::shared_ptr<void>()> snapshot_baseline_fn = {},
+            std::function<void(const std::shared_ptr<void>&)> restore_baseline_fn = {})
         {
-            auto map_key = std::pair<std::type_index, std::string>{ type, std::move(key_repr) };
-            auto it = tracked_entries_.find(map_key);
-            if (it == tracked_entries_.end())
-            {
-                tracked_entries_.emplace(std::move(map_key), TrackedEntityEntry{ std::move(owned), borrowed, std::move(detect_fn) });
-                return;
-            }
-
-            if (owned)
-            {
-                it->second.owned_instance = std::move(owned);
-            }
-            if (borrowed != nullptr)
-            {
-                it->second.borrowed_instance = borrowed;
-            }
-            if (refresh_baseline && detect_fn)
-            {
-                it->second.detect_fn = std::move(detect_fn);
-            }
-            else if (!it->second.detect_fn && detect_fn)
-            {
-                it->second.detect_fn = std::move(detect_fn);
-            }
+            state_->upsert_tracked_entry(
+                type,
+                std::move(key_repr),
+                refresh_baseline,
+                std::move(owned),
+                borrowed,
+                std::move(detect_fn),
+                std::move(snapshot_baseline_fn),
+                std::move(restore_baseline_fn));
         }
 
         [[nodiscard]] std::shared_ptr<void> find_tracked_instance(std::type_index type, const std::string& key_repr) const
         {
-            auto it = tracked_entries_.find(std::pair<std::type_index, std::string>{ type, key_repr });
-            if (it != tracked_entries_.end())
-            {
-                return it->second.owned_instance;
-            }
-            return nullptr;
+            return state_->find_tracked_instance(type, key_repr);
         }
 
         std::size_t detect_changes()
         {
             std::size_t dirty_count = 0;
-            for (auto& [key, entry] : tracked_entries_)
+            for (auto& [key, entry] : state_->tracked_entries_)
             {
                 if (!entry.detect_fn)
                 {
@@ -416,7 +408,7 @@ export namespace DAL
                 }
                 if (auto op = entry.detect_fn(entry.owned_instance, entry.borrowed_instance))
                 {
-                    pending_ops_.push_back(std::move(*op));
+                    state_->pending_ops_.push_back(std::move(*op));
                     ++dirty_count;
                 }
             }
@@ -831,7 +823,13 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot begin transaction: database connection is closed") };
             }
-            return conn_->begin_transaction();
+            auto cp = state_->capture_checkpoint();
+            auto res = conn_->begin_transaction();
+            if (res)
+            {
+                state_->outer_tx_checkpoint_ = std::move(cp);
+            }
+            return res;
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> commit()
@@ -841,7 +839,12 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot commit transaction: database connection is closed") };
             }
-            return conn_->commit();
+            auto res = conn_->commit();
+            if (res)
+            {
+                state_->outer_tx_checkpoint_.reset();
+            }
+            return res;
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> rollback()
@@ -851,7 +854,14 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot rollback transaction: database connection is closed") };
             }
-            return conn_->rollback();
+            auto res = conn_->rollback();
+            if (state_->outer_tx_checkpoint_.has_value())
+            {
+                state_->restore_baselines(*state_->outer_tx_checkpoint_);
+                truncate_pending_changes(state_->outer_tx_checkpoint_->saved_pending_size);
+                state_->outer_tx_checkpoint_.reset();
+            }
+            return res;
         }
 
         [[nodiscard]] bool in_transaction() const noexcept
@@ -860,7 +870,8 @@ export namespace DAL
         }
 
         // Unit of Work save_changes: executes staged operations atomically in a transaction
-        // (or a savepoint when already inside an outer transaction) with automatic rollback on failure.
+        // (or a savepoint when already inside an outer transaction) with automatic rollback
+        // of both database state and ChangeTracker baselines on failure or exception.
         [[nodiscard]] virtual std::expected<void, Core::DbError> save_changes()
         {
             if (!is_connected())
@@ -869,9 +880,10 @@ export namespace DAL
                     "Cannot save changes: database connection is closed") };
             }
 
+            const auto save_cp = state_->capture_checkpoint();
             (void)detect_changes();
 
-            if (pending_ops_.empty())
+            if (state_->pending_ops_.empty())
             {
                 return {};
             }
@@ -882,29 +894,53 @@ export namespace DAL
                 auto tx_res = begin_transaction();
                 if (!tx_res)
                 {
+                    state_->restore_baselines(save_cp);
+                    state_->pending_ops_.clear();
                     return tx_res;
                 }
 
-                for (auto& op : pending_ops_)
+                try
                 {
-                    auto op_res = op();
-                    if (!op_res)
+                    for (auto& op : state_->pending_ops_)
                     {
-                        if (in_transaction())
+                        auto op_res = op();
+                        if (!op_res)
                         {
-                            (void)rollback();
+                            if (in_transaction())
+                            {
+                                (void)rollback();
+                            }
+                            state_->restore_baselines(save_cp);
+                            state_->pending_ops_.clear();
+                            return op_res;
                         }
-                        pending_ops_.clear();
-                        return op_res;
                     }
-                }
 
-                pending_ops_.clear();
-                if (in_transaction())
+                    state_->pending_ops_.clear();
+                    if (in_transaction())
+                    {
+                        auto commit_res = commit();
+                        if (!commit_res)
+                        {
+                            if (in_transaction())
+                            {
+                                (void)rollback();
+                            }
+                            state_->restore_baselines(save_cp);
+                            return commit_res;
+                        }
+                    }
+                    return {};
+                } catch (...)
                 {
-                    return commit();
+                    if (in_transaction())
+                    {
+                        (void)rollback();
+                    }
+                    state_->restore_baselines(save_cp);
+                    state_->pending_ops_.clear();
+                    throw;
                 }
-                return {};
             }
 
             // Already inside an outer transaction: flush using a savepoint so the outer
@@ -912,26 +948,46 @@ export namespace DAL
             auto sp_res = acquire_savepoint();
             if (!sp_res)
             {
+                state_->restore_baselines(save_cp);
+                state_->pending_ops_.clear();
                 return std::unexpected<Core::DbError>{ sp_res.error() };
             }
             const std::string& sp_name = *sp_res;
 
-            for (auto& op : pending_ops_)
+            try
             {
-                auto op_res = op();
-                if (!op_res)
+                for (auto& op : state_->pending_ops_)
+                {
+                    auto op_res = op();
+                    if (!op_res)
+                    {
+                        (void)rollback_to_savepoint(sp_name);
+                        release_savepoint_depth();
+                        state_->restore_baselines(save_cp);
+                        state_->pending_ops_.clear();
+                        return op_res;
+                    }
+                }
+
+                state_->pending_ops_.clear();
+                auto rel_res = release_savepoint(sp_name);
+                if (!rel_res)
                 {
                     (void)rollback_to_savepoint(sp_name);
                     release_savepoint_depth();
-                    pending_ops_.clear();
-                    return op_res;
+                    state_->restore_baselines(save_cp);
+                    return rel_res;
                 }
+                release_savepoint_depth();
+                return {};
+            } catch (...)
+            {
+                (void)rollback_to_savepoint(sp_name);
+                release_savepoint_depth();
+                state_->restore_baselines(save_cp);
+                state_->pending_ops_.clear();
+                throw;
             }
-
-            pending_ops_.clear();
-            auto rel_res = release_savepoint(sp_name);
-            release_savepoint_depth();
-            return rel_res;
         }
 
         // Scoped transaction helper: begins a transaction, runs fn(), flushes staged changes,
@@ -981,20 +1037,20 @@ export namespace DAL
 
         [[nodiscard]] std::expected<void, Core::DbError> flush_pending_since(std::size_t start_idx)
         {
-            if (start_idx >= pending_ops_.size())
+            if (start_idx >= state_->pending_ops_.size())
             {
                 return {};
             }
-            for (std::size_t i = start_idx; i < pending_ops_.size(); ++i)
+            for (std::size_t i = start_idx; i < state_->pending_ops_.size(); ++i)
             {
-                auto res = pending_ops_[i]();
+                auto res = state_->pending_ops_[i]();
                 if (!res)
                 {
-                    pending_ops_.resize(start_idx);
+                    state_->pending_ops_.resize(start_idx);
                     return res;
                 }
             }
-            pending_ops_.resize(start_idx);
+            state_->pending_ops_.resize(start_idx);
             return {};
         }
 
@@ -1020,9 +1076,9 @@ export namespace DAL
 
         void truncate_pending_changes(std::size_t size) noexcept
         {
-            if (size < pending_ops_.size())
+            if (size < state_->pending_ops_.size())
             {
-                pending_ops_.resize(size);
+                state_->pending_ops_.resize(size);
             }
         }
 
@@ -1048,8 +1104,9 @@ export namespace DAL
             {
                 if constexpr (supports_savepoints())
                 {
+                    const auto sp_cp = state_->capture_checkpoint();
                     const std::string sp_name = std::format("_codefirst_sp_{}", ++savepoint_depth_);
-                    const std::size_t saved_pending_size = pending_ops_.size();
+                    const std::size_t saved_pending_size = sp_cp.saved_pending_size;
                     auto sp_res = conn_->savepoint(sp_name);
                     if (!sp_res)
                     {
@@ -1069,38 +1126,49 @@ export namespace DAL
                             auto fn_res = std::invoke(std::forward<Fn>(fn));
                             if (!fn_res)
                             {
-                                pending_ops_.resize(saved_pending_size);
+                                state_->pending_ops_.resize(saved_pending_size);
                                 (void)conn_->rollback_to_savepoint(sp_name);
                                 --savepoint_depth_;
+                                state_->restore_baselines(sp_cp);
                                 return fn_res;
                             }
                         }
 
                         (void)detect_changes();
-                        if (pending_ops_.size() > saved_pending_size)
+                        if (state_->pending_ops_.size() > saved_pending_size)
                         {
                             auto flush_res = flush_pending_since(saved_pending_size);
                             if (!flush_res)
                             {
                                 (void)conn_->rollback_to_savepoint(sp_name);
                                 --savepoint_depth_;
+                                state_->restore_baselines(sp_cp);
                                 return flush_res;
                             }
                         }
 
                         auto rel_res = conn_->release_savepoint(sp_name);
+                        if (!rel_res)
+                        {
+                            (void)conn_->rollback_to_savepoint(sp_name);
+                            --savepoint_depth_;
+                            state_->restore_baselines(sp_cp);
+                            return rel_res;
+                        }
                         --savepoint_depth_;
-                        return rel_res;
+                        return {};
                     } catch (...)
                     {
-                        pending_ops_.resize(saved_pending_size);
+                        state_->pending_ops_.resize(saved_pending_size);
                         (void)conn_->rollback_to_savepoint(sp_name);
                         --savepoint_depth_;
+                        state_->restore_baselines(sp_cp);
                         throw;
                     }
                 }
             }
 
+            const auto tx_cp = state_->capture_checkpoint();
             auto tx_res = begin_transaction();
             if (!tx_res)
             {
@@ -1123,27 +1191,37 @@ export namespace DAL
                         {
                             (void)rollback();
                         }
-                        pending_ops_.clear();
+                        state_->restore_baselines(tx_cp);
+                        state_->pending_ops_.clear();
                         return fn_res;
                     }
                 }
 
-                if (!pending_ops_.empty())
+                auto sc_res = save_changes();
+                if (!sc_res)
                 {
-                    auto sc_res = save_changes();
-                    if (!sc_res)
+                    if (in_transaction())
+                    {
+                        (void)rollback();
+                    }
+                    state_->restore_baselines(tx_cp);
+                    state_->pending_ops_.clear();
+                    return sc_res;
+                }
+
+                if (in_transaction())
+                {
+                    auto commit_res = commit();
+                    if (!commit_res)
                     {
                         if (in_transaction())
                         {
                             (void)rollback();
                         }
-                        return sc_res;
+                        state_->restore_baselines(tx_cp);
+                        state_->pending_ops_.clear();
+                        return commit_res;
                     }
-                }
-
-                if (in_transaction())
-                {
-                    return commit();
                 }
                 return {};
             } catch (...)
@@ -1152,18 +1230,16 @@ export namespace DAL
                 {
                     (void)rollback();
                 }
-                pending_ops_.clear();
+                state_->restore_baselines(tx_cp);
+                state_->pending_ops_.clear();
                 throw;
             }
         }
 
     protected:
         std::shared_ptr<ConnectionHandle> conn_;
-        std::vector<std::move_only_function<std::expected<void, Core::DbError>()>> pending_ops_;
-        bool defer_changes_{ false };
-        bool change_tracking_enabled_{ false };
+        std::shared_ptr<detail::ContextState> state_{ std::make_shared<detail::ContextState>() };
         std::size_t savepoint_depth_{ 0 };
-        std::map<std::pair<std::type_index, std::string>, TrackedEntityEntry> tracked_entries_{};
     };
 
     // RAII transaction guard that automatically rolls back on scope exit if not committed
@@ -1175,6 +1251,7 @@ export namespace DAL
         explicit TransactionScope(DbContextBase<ConnectionHandle>& ctx)
             : ctx_(&ctx)
             , saved_pending_size_(ctx.pending_changes_count())
+            , scope_checkpoint_(ctx.capture_checkpoint())
         {
             if (ctx_->in_transaction() && DbContextBase<ConnectionHandle>::supports_savepoints())
             {
@@ -1200,9 +1277,9 @@ export namespace DAL
         {
             if (!committed_ && !rolled_back_ && begin_result_.has_value() && ctx_ && ctx_->in_transaction())
             {
+                ctx_->truncate_pending_changes(saved_pending_size_);
                 if (is_savepoint_)
                 {
-                    ctx_->truncate_pending_changes(saved_pending_size_);
                     (void)ctx_->rollback_to_savepoint(savepoint_name_);
                     ctx_->release_savepoint_depth();
                 }
@@ -1210,6 +1287,7 @@ export namespace DAL
                 {
                     (void)ctx_->rollback();
                 }
+                ctx_->restore_checkpoint_baselines(scope_checkpoint_);
             }
         }
 
@@ -1252,25 +1330,33 @@ export namespace DAL
                     {
                         (void)ctx_->rollback_to_savepoint(savepoint_name_);
                         ctx_->release_savepoint_depth();
+                        ctx_->restore_checkpoint_baselines(scope_checkpoint_);
                         rolled_back_ = true;
                         return flush_res;
                     }
                 }
                 auto rel_res = ctx_->release_savepoint(savepoint_name_);
-                ctx_->release_savepoint_depth();
-                if (rel_res)
+                if (!rel_res)
                 {
-                    committed_ = true;
+                    (void)ctx_->rollback_to_savepoint(savepoint_name_);
+                    ctx_->release_savepoint_depth();
+                    ctx_->restore_checkpoint_baselines(scope_checkpoint_);
+                    rolled_back_ = true;
+                    return rel_res;
                 }
+                ctx_->release_savepoint_depth();
+                committed_ = true;
                 return rel_res;
             }
             auto res = ctx_->save_changes();
             if (!res)
             {
+                ctx_->truncate_pending_changes(saved_pending_size_);
                 if (ctx_->in_transaction())
                 {
                     (void)ctx_->rollback();
                 }
+                ctx_->restore_checkpoint_baselines(scope_checkpoint_);
                 rolled_back_ = true;
                 return res;
             }
@@ -1281,6 +1367,16 @@ export namespace DAL
             if (res)
             {
                 committed_ = true;
+            }
+            else
+            {
+                ctx_->truncate_pending_changes(saved_pending_size_);
+                if (ctx_->in_transaction())
+                {
+                    (void)ctx_->rollback();
+                }
+                ctx_->restore_checkpoint_baselines(scope_checkpoint_);
+                rolled_back_ = true;
             }
             return res;
         }
@@ -1298,14 +1394,19 @@ export namespace DAL
             if (ctx_ && ctx_->in_transaction())
             {
                 rolled_back_ = true;
+                ctx_->truncate_pending_changes(saved_pending_size_);
+                std::expected<void, Core::DbError> res{};
                 if (is_savepoint_)
                 {
-                    ctx_->truncate_pending_changes(saved_pending_size_);
-                    auto res = ctx_->rollback_to_savepoint(savepoint_name_);
+                    res = ctx_->rollback_to_savepoint(savepoint_name_);
                     ctx_->release_savepoint_depth();
-                    return res;
                 }
-                return ctx_->rollback();
+                else
+                {
+                    res = ctx_->rollback();
+                }
+                ctx_->restore_checkpoint_baselines(scope_checkpoint_);
+                return res;
             }
             return {};
         }
@@ -1314,6 +1415,7 @@ export namespace DAL
         DbContextBase<ConnectionHandle>* ctx_{ nullptr };
         std::expected<void, Core::DbError> begin_result_{};
         std::size_t saved_pending_size_{ 0 };
+        detail::BaselineCheckpoint scope_checkpoint_{};
         bool is_savepoint_{ false };
         std::string savepoint_name_{};
         bool committed_{ false };

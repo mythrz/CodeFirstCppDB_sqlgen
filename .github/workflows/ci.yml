@@ -81,15 +81,16 @@ jobs:
           CC: gcc-16
           CXX: g++-16
         run: |
-          cmake -S . -B build-install -G Ninja -DCMAKE_BUILD_TYPE=Release -DCODEFIRST_BUILD_TESTS=OFF -DCODEFIRST_BUILD_SAMPLES=OFF -DCODEFIRST_INSTALL=ON -DCMAKE_INSTALL_PREFIX=/tmp/cf_prefix
+          cmake -S . -B build-install -G Ninja -DCMAKE_BUILD_TYPE=Release -DCODEFIRST_BUILD_TESTS=OFF -DCODEFIRST_BUILD_EXAMPLES=OFF -DCODEFIRST_INCLUDE_SAMPLES=OFF -DCODEFIRST_INSTALL=ON -DCMAKE_INSTALL_PREFIX=/tmp/cf_prefix
           cmake --build build-install -j 2
           cmake --install build-install
           mkdir -p /tmp/cf_consumer
           cat <<'EOF' > /tmp/cf_consumer/CMakeLists.txt
-          cmake_minimum_required(VERSION 3.30)
+          cmake_minimum_required(VERSION 4.0)
           project(consumer LANGUAGES CXX)
           set(CMAKE_CXX_STANDARD 26)
           set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+          set(CMAKE_CXX_MODULE_STD ON)
           find_package(CodeFirstCppDB CONFIG REQUIRED)
           add_executable(consumer main.cpp)
           target_link_libraries(consumer PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
@@ -107,3 +108,35 @@ jobs:
           cmake -S /tmp/cf_consumer -B /tmp/cf_consumer/build -G Ninja -DCMAKE_PREFIX_PATH=/tmp/cf_prefix
           cmake --build /tmp/cf_consumer/build -j 2
           /tmp/cf_consumer/build/consumer
+
+      - name: Verify external add_subdirectory consumer
+        env:
+          CC: gcc-16
+          CXX: g++-16
+        run: |
+          mkdir -p /tmp/cf_subdir_consumer
+          cat <<EOF > /tmp/cf_subdir_consumer/CMakeLists.txt
+          cmake_minimum_required(VERSION 4.0)
+          project(subdir_consumer LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 26)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          set(CMAKE_CXX_EXTENSIONS OFF)
+          set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+          set(CMAKE_CXX_MODULE_STD ON)
+          add_subdirectory("${{ github.workspace }}" codefirst_dep)
+          add_executable(subdir_consumer main.cpp)
+          target_link_libraries(subdir_consumer PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
+          EOF
+          cat <<'EOF' > /tmp/cf_subdir_consumer/main.cpp
+          import std;
+          import core;
+          import dal;
+          int main()
+          {
+              auto conn = DAL::SQLiteConnection::connect(":memory:");
+              return conn ? 0 : 1;
+          }
+          EOF
+          cmake -S /tmp/cf_subdir_consumer -B /tmp/cf_subdir_consumer/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake --build /tmp/cf_subdir_consumer/build -j 2
+          /tmp/cf_subdir_consumer/build/subdir_consumer

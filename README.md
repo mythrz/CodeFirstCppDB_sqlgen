@@ -5,7 +5,7 @@ A C++26 module-based, reflection-driven Code-First ORM and Unit-of-Work library 
 ## Requirements
 
 - **Compiler:** **GCC 16.1+** (required for C++26 reflection `-freflection`, `std::meta::define_aggregate`, `std::meta::parameters_of`, `import std`, and C++26 modules).
-- **Build System:** CMake 3.30+ and Ninja.
+- **Build System:** CMake 4.0+ and Ninja.
 - **Dependencies:** SQLite3 development headers/libraries (submodules `extern/reflect-cpp`, `extern/sqlgen`, and `extern/googletest` are included).
 
 ## Quick Start
@@ -83,6 +83,15 @@ For encapsulated domain entities with strong IDs, separate DTOs, and repository 
 ### Option 1: `FetchContent`
 
 ```cmake
+cmake_minimum_required(VERSION 4.0)
+project(my_app LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+set(CMAKE_CXX_MODULE_STD ON)
+
 include(FetchContent)
 FetchContent_Declare(
     CodeFirstCppDB

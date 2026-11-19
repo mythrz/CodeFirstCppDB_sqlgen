@@ -68,7 +68,7 @@ export namespace DAL
             {
                 return;
             }
-            if (in_transaction_ && conn_)
+            if (in_transaction() && conn_)
             {
                 try
                 {
@@ -236,7 +236,7 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot begin transaction: database connection is closed") };
             }
-            if (in_transaction_)
+            if (in_transaction())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Transaction is already active") };
             }
@@ -256,7 +256,7 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot commit transaction: database connection is closed") };
             }
-            if (!in_transaction_)
+            if (!in_transaction())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("No active transaction to commit") };
             }
@@ -265,7 +265,7 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
             }
-            in_transaction_ = false;
+            in_transaction_ = in_transaction();
             return {};
         }
 
@@ -276,12 +276,12 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot rollback transaction: database connection is closed") };
             }
-            if (!in_transaction_)
+            if (!in_transaction())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("No active transaction to rollback") };
             }
             auto res = (*conn_)->rollback();
-            in_transaction_ = false;
+            in_transaction_ = in_transaction();
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
@@ -291,6 +291,15 @@ export namespace DAL
 
         [[nodiscard]] bool in_transaction() const noexcept
         {
+            if (!is_open())
+            {
+                return false;
+            }
+            sqlite3* db = native_sqlite_handle();
+            if (db != nullptr)
+            {
+                return sqlite3_get_autocommit(db) == 0;
+            }
             return in_transaction_;
         }
 
@@ -299,12 +308,12 @@ export namespace DAL
             return is_open_ && conn_.has_value();
         }
 
-        [[nodiscard]] sqlgen::Ref<sqlgen::sqlite::Connection>& raw_connection() noexcept
+        [[nodiscard]] sqlgen::Ref<sqlgen::sqlite::Connection>& raw_connection() noexcept pre(is_open())
         {
             return (*conn_);
         }
 
-        [[nodiscard]] const sqlgen::Ref<sqlgen::sqlite::Connection>& raw_connection() const noexcept
+        [[nodiscard]] const sqlgen::Ref<sqlgen::sqlite::Connection>& raw_connection() const noexcept pre(is_open())
         {
             return (*conn_);
         }
@@ -470,7 +479,7 @@ export namespace DAL
         }
 
         template<typename DTO>
-        auto insert(const DTO& item)
+        [[nodiscard]] auto insert(const DTO& item)
         {
             if (!is_open())
             {
@@ -481,7 +490,7 @@ export namespace DAL
         }
 
         template<typename DTO>
-        auto insert_many(const std::vector<DTO>& items)
+        [[nodiscard]] auto insert_many(const std::vector<DTO>& items)
         {
             if (!is_open())
             {
@@ -491,7 +500,7 @@ export namespace DAL
         }
 
         template<typename DTO>
-        auto update(const DTO& item)
+        [[nodiscard]] auto update(const DTO& item)
         {
             if (!is_open())
             {
@@ -538,7 +547,7 @@ export namespace DAL
         }
 
         template<typename DTO, typename IdType>
-        auto delete_by_id(const IdType& id)
+        [[nodiscard]] auto delete_by_id(const IdType& id)
         {
             if (!is_open())
             {
@@ -671,7 +680,7 @@ export namespace DAL
 
         template<typename DTO>
             requires sqlgen::internal::has_constraint_v<DTO>
-        auto upsert(const DTO& item)
+        [[nodiscard]] auto upsert(const DTO& item)
         {
             if (!is_open())
             {
@@ -683,7 +692,7 @@ export namespace DAL
 
         template<typename DTO>
             requires sqlgen::internal::has_constraint_v<DTO>
-        auto upsert_many(const std::vector<DTO>& items)
+        [[nodiscard]] auto upsert_many(const std::vector<DTO>& items)
         {
             if (!is_open())
             {
@@ -747,6 +756,10 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
+            if (!is_valid_sql_identifier(name))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Invalid savepoint identifier") };
+            }
             auto res = (*conn_)->execute(std::format("SAVEPOINT \"{}\";", name));
             if (!res)
             {
@@ -761,6 +774,10 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
+            if (!is_valid_sql_identifier(name))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Invalid savepoint identifier") };
+            }
             auto res = (*conn_)->execute(std::format("RELEASE SAVEPOINT \"{}\";", name));
             if (!res)
             {
@@ -774,6 +791,10 @@ export namespace DAL
             if (!is_open())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (!is_valid_sql_identifier(name))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Invalid savepoint identifier") };
             }
             auto res = (*conn_)->execute(std::format("ROLLBACK TO SAVEPOINT \"{}\"; RELEASE SAVEPOINT \"{}\";", name, name));
             if (!res)
@@ -919,6 +940,14 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::unknown("SQL statement cannot be empty") };
             }
+            if (sql.find('\0') != std::string_view::npos)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("SQL statement contains embedded NUL") };
+            }
+            if (sql.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("SQL statement exceeds length limit") };
+            }
             sqlite3* db = native_sqlite_handle();
             if (db == nullptr)
             {
@@ -926,7 +955,8 @@ export namespace DAL
             }
 
             sqlite3_stmt* raw_stmt = nullptr;
-            const int prep_rc = sqlite3_prepare_v2(db, sql.data(), static_cast<int>(sql.size()), &raw_stmt, nullptr);
+            const char* pz_tail = nullptr;
+            const int prep_rc = sqlite3_prepare_v2(db, sql.data(), static_cast<int>(sql.size()), &raw_stmt, &pz_tail);
             if (prep_rc != SQLITE_OK)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(sqlite3_errmsg(db)) };
@@ -937,6 +967,20 @@ export namespace DAL
                     sqlite3_finalize(s);
                 }
             })>(raw_stmt);
+
+            if (raw_stmt == nullptr)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("SQL statement contains no executable command") };
+            }
+            const char* const sql_end = sql.data() + sql.size();
+            const std::string_view tail = (pz_tail != nullptr && pz_tail <= sql_end)
+                ? std::string_view(pz_tail, static_cast<std::size_t>(sql_end - pz_tail))
+                : std::string_view{};
+            if (has_executable_sql_tail(tail))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                    "Multi-statement SQL is not supported in prepared execution") };
+            }
 
             if (auto bind_res = bind_dynamic_params(db, raw_stmt, params); !bind_res)
             {
@@ -1020,6 +1064,14 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::unknown("SQL statement cannot be empty") };
             }
+            if (sql.find('\0') != std::string_view::npos)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("SQL statement contains embedded NUL") };
+            }
+            if (sql.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("SQL statement exceeds length limit") };
+            }
             sqlite3* db = native_sqlite_handle();
             if (db == nullptr)
             {
@@ -1027,7 +1079,8 @@ export namespace DAL
             }
 
             sqlite3_stmt* raw_stmt = nullptr;
-            const int prep_rc = sqlite3_prepare_v2(db, sql.data(), static_cast<int>(sql.size()), &raw_stmt, nullptr);
+            const char* pz_tail = nullptr;
+            const int prep_rc = sqlite3_prepare_v2(db, sql.data(), static_cast<int>(sql.size()), &raw_stmt, &pz_tail);
             if (prep_rc != SQLITE_OK)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(sqlite3_errmsg(db)) };
@@ -1039,13 +1092,30 @@ export namespace DAL
                 }
             })>(raw_stmt);
 
+            if (raw_stmt == nullptr)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("SQL statement contains no executable command") };
+            }
+            const char* const sql_end = sql.data() + sql.size();
+            const std::string_view tail = (pz_tail != nullptr && pz_tail <= sql_end)
+                ? std::string_view(pz_tail, static_cast<std::size_t>(sql_end - pz_tail))
+                : std::string_view{};
+            if (has_executable_sql_tail(tail))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                    "Multi-statement SQL is not supported in prepared execution") };
+            }
+
             if (auto bind_res = bind_dynamic_params(db, raw_stmt, params); !bind_res)
             {
                 return std::unexpected<Core::DbError>{ bind_res.error() };
             }
 
-            const int step_rc = sqlite3_step(raw_stmt);
-            if (step_rc != SQLITE_DONE && step_rc != SQLITE_ROW)
+            int step_rc = SQLITE_OK;
+            while ((step_rc = sqlite3_step(raw_stmt)) == SQLITE_ROW)
+            {
+            }
+            if (step_rc != SQLITE_DONE)
             {
                 return std::unexpected<Core::DbError>{ map_sqlite_error(sqlite3_errmsg(db)) };
             }
@@ -1058,13 +1128,89 @@ export namespace DAL
         }
 
     private:
+        [[nodiscard]] static constexpr bool is_valid_sql_identifier(std::string_view name) noexcept
+        {
+            if (name.empty() || name.size() > 128)
+            {
+                return false;
+            }
+            const unsigned char first = static_cast<unsigned char>(name.front());
+            const bool first_ok = (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_';
+            if (!first_ok)
+            {
+                return false;
+            }
+            for (unsigned char ch : name)
+            {
+                const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_';
+                if (!ok)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        [[nodiscard]] static constexpr bool has_executable_sql_tail(std::string_view tail) noexcept
+        {
+            std::size_t i = 0;
+            while (i < tail.size())
+            {
+                const char ch = tail[i];
+                if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\f' || ch == '\v')
+                {
+                    ++i;
+                    continue;
+                }
+                if (ch == '-' && (i + 1) < tail.size() && tail[i + 1] == '-')
+                {
+                    i += 2;
+                    while (i < tail.size() && tail[i] != '\n')
+                    {
+                        ++i;
+                    }
+                    continue;
+                }
+                if (ch == '/' && (i + 1) < tail.size() && tail[i + 1] == '*')
+                {
+                    i += 2;
+                    bool closed = false;
+                    while ((i + 1) < tail.size())
+                    {
+                        if (tail[i] == '*' && tail[i + 1] == '/')
+                        {
+                            i += 2;
+                            closed = true;
+                            break;
+                        }
+                        ++i;
+                    }
+                    if (!closed)
+                    {
+                        return true;
+                    }
+                    continue;
+                }
+                return true;
+            }
+            return false;
+        }
+
         [[nodiscard]] std::expected<void, Core::DbError> bind_dynamic_params(
             sqlite3* db, sqlite3_stmt* stmt, std::span<const DynamicCell> params) const
         {
+            const int expected_params = sqlite3_bind_parameter_count(stmt);
+            if (expected_params < 0 || params.size() != static_cast<std::size_t>(expected_params))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    std::format("Prepared statement expects {} parameters, but {} were provided", expected_params, params.size())) };
+            }
+
             for (std::size_t i = 0; i < params.size(); ++i)
             {
                 const int idx = static_cast<int>(i + 1);
                 int rc = SQLITE_OK;
+                std::expected<void, Core::DbError> size_err{};
                 std::visit(
                     [&](const auto& val)
                     {
@@ -1083,14 +1229,38 @@ export namespace DAL
                         }
                         else if constexpr (std::is_same_v<T, std::string>)
                         {
-                            rc = sqlite3_bind_text(stmt, idx, val.data(), static_cast<int>(val.size()), SQLITE_TRANSIENT);
+                            if (val.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+                            {
+                                size_err = std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                                    "Bound string parameter exceeds SQLite length limit") };
+                                return;
+                            }
+                            rc =
+                                sqlite3_bind_text(stmt, idx, val.empty() ? "" : val.data(), static_cast<int>(val.size()), SQLITE_TRANSIENT);
                         }
                         else if constexpr (std::is_same_v<T, std::vector<std::byte>>)
                         {
-                            rc = sqlite3_bind_blob(stmt, idx, val.data(), static_cast<int>(val.size()), SQLITE_TRANSIENT);
+                            if (val.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+                            {
+                                size_err = std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                                    "Bound BLOB parameter exceeds SQLite length limit") };
+                                return;
+                            }
+                            if (val.empty())
+                            {
+                                rc = sqlite3_bind_zeroblob(stmt, idx, 0);
+                            }
+                            else
+                            {
+                                rc = sqlite3_bind_blob(stmt, idx, val.data(), static_cast<int>(val.size()), SQLITE_TRANSIENT);
+                            }
                         }
                     },
                     params[i]);
+                if (!size_err)
+                {
+                    return size_err;
+                }
                 if (rc != SQLITE_OK)
                 {
                     return std::unexpected<Core::DbError>{ map_sqlite_error(sqlite3_errmsg(db)) };

@@ -854,4 +854,255 @@ namespace
         EXPECT_EQ(updated1->getAssociationType(), "Maintainer");
     }
 
+    // =========================================================================
+    // Review 6 & Phase 47 Reliability, Ownership & SQL Boundary Regressions
+    // =========================================================================
+
+    struct StringPartKeyDTO
+    {
+        static constexpr const char* tablename = "StringPartKeys";
+        sqlgen::PrimaryKey<std::string, false> val{};
+    };
+
+    struct StringPairRow
+    {
+        std::string part_a{};
+        std::string part_b{};
+        std::string payload{};
+    };
+
+    struct StringPairRowDTO
+    {
+        static constexpr const char* tablename = "StringPairRows";
+        sqlgen::ForeignKey<std::string, StringPartKeyDTO, "val"> part_a{};
+        sqlgen::ForeignKey<std::string, StringPartKeyDTO, "val"> part_b{};
+        std::string payload{};
+    };
+
+    TEST(Review6ReliabilityRegressionsTest, TrackedTransactionRollbackRetryAndFailedBatchRetry)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Original", "Person")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Second", "Person")).has_value());
+
+        db.enable_change_tracking();
+        auto p1 = db.people.find_tracked(1);
+        auto p2 = db.people.find_tracked(2);
+        ASSERT_NE(p1, nullptr);
+        ASSERT_NE(p2, nullptr);
+
+        // R01: Tracked-only edit inside db.transaction() must be detected & committed
+        ASSERT_TRUE(db.transaction(
+                          [&]()
+                          {
+                              p1->setFirstName("Changed");
+                          })
+                        .has_value());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "Changed");
+
+        // R02: Explicit rollback restores baseline so a subsequent save_changes() retries the edit
+        ASSERT_TRUE(db.begin_transaction().has_value());
+        p1->setFirstName("ChangedAgain");
+        ASSERT_TRUE(db.save_changes().has_value());
+        ASSERT_TRUE(db.rollback().has_value());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "Changed");
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "ChangedAgain");
+
+        // R03: Mid-batch update failure restores earlier baselines so retry persists all edits
+        ASSERT_TRUE(conn->execute_raw(
+                            "CREATE TRIGGER fail_second_upd BEFORE UPDATE ON Person WHEN NEW.id = 2 "
+                            "BEGIN SELECT RAISE(ABORT, 'injected failure'); END;")
+                        .has_value());
+        p1->setFirstName("BatchFirst");
+        p2->setFirstName("BatchSecond");
+        EXPECT_FALSE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "ChangedAgain");
+
+        ASSERT_TRUE(conn->execute_raw("DROP TRIGGER fail_second_upd").has_value());
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "BatchFirst");
+        EXPECT_EQ(db.people.find(2)->getFirstName(), "BatchSecond");
+    }
+
+    TEST(Review6ReliabilityRegressionsTest, AbandonedOuterScopeTruncatesStagedOperations)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Keep", "Person")).has_value());
+
+        db.defer_changes(true);
+        {
+            DAL::TransactionScope<DAL::SQLiteConnection> scope(db);
+            ASSERT_TRUE(scope.is_active());
+            ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Canceled", "Person")).has_value());
+        }
+        // R04: Abandoned outer TransactionScope must not resurrect canceled deferred operations
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.count(), 1u);
+    }
+
+    TEST(Review6ReliabilityRegressionsTest, PreparedContractsSavepointValidationAndRawTransaction)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        // R05: Missing parameter binding must be rejected instead of silently binding NULL
+        auto missingRes = conn->query_rows("SELECT ? AS required_val");
+        EXPECT_FALSE(missingRes.has_value());
+
+        // R06: Empty vector<std::byte> must bind as empty BLOB (length 0), not SQL NULL
+        const std::array<DAL::DynamicCell, 2> blobs{ std::vector<std::byte>{}, std::vector<std::byte>{} };
+        auto blobRes = conn->query_rows("SELECT typeof(?), length(?)", std::span<const DAL::DynamicCell>{ blobs });
+        ASSERT_TRUE(blobRes.has_value()) << blobRes.error().to_string();
+        ASSERT_EQ(blobRes->rows.size(), 1u);
+        EXPECT_EQ(std::get<std::string>(blobRes->rows[0].cells[0]), "blob");
+        EXPECT_EQ(std::get<std::int64_t>(blobRes->rows[0].cells[1]), 0);
+
+        // R07: Trailing SQL statements in prepared calls must be rejected rather than silently ignored
+        EXPECT_FALSE(conn->execute_prepared("CREATE TABLE first_t(id INTEGER); CREATE TABLE second_t(id INTEGER);").has_value());
+        EXPECT_FALSE(conn->query_rows("SELECT 1; SELECT 2;").has_value());
+        auto tablesRes = conn->list_tables();
+        ASSERT_TRUE(tablesRes.has_value());
+        EXPECT_FALSE(std::ranges::contains(*tablesRes, std::string_view{ "second_t" }));
+
+        // R08: Raw BEGIN must be reflected by engine-derived sqlite3_get_autocommit state
+        ASSERT_TRUE(conn->execute_raw("BEGIN").has_value());
+        EXPECT_TRUE(conn->in_transaction());
+        ASSERT_TRUE(conn->rollback().has_value());
+        EXPECT_FALSE(conn->in_transaction());
+
+        // R09: Malicious savepoint identifier with quotes/semicolon must be rejected
+        EXPECT_FALSE(conn->savepoint("safe\"; CREATE TABLE injected(id INTEGER); --").has_value());
+        auto postTables = conn->list_tables();
+        ASSERT_TRUE(postTables.has_value());
+        EXPECT_FALSE(std::ranges::contains(*postTables, std::string_view{ "injected" }));
+    }
+
+    TEST(Review6ReliabilityRegressionsTest, LimitedDeleteAndMockAdapterCapabilitiesAndRowidOverflow)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "One", "Person")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Two", "Person")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Three", "Person")).has_value());
+
+        // R10: limit(1).remove_where() deletes only 1 matching row, and limited update_where() rejects cleanly
+        EXPECT_FALSE(db.people.where_equal<"lastName">("Person").limit(1).update_where<"firstName">("X").has_value());
+        auto delLimited = db.people.where_equal<"lastName">("Person").limit(1).remove_where();
+        ASSERT_TRUE(delLimited.has_value()) << delLimited.error().to_string();
+        EXPECT_EQ(db.people.count(), 2u);
+
+        // R13: SQLite 64-bit rowid exceeding int32 max is rejected without leaving an inaccessible row
+        ASSERT_TRUE(conn->execute_raw("UPDATE sqlite_sequence SET seq = 2147483647 WHERE name = 'Person'").has_value());
+        auto overflowRes = db.people.add_returning(Core::Person(Core::PersonId{ 0 }, "Overflow", "Person"));
+        EXPECT_FALSE(overflowRes.has_value());
+        EXPECT_EQ(db.people.count(), 2u);
+
+        // R11 & R12: Connection adapters lacking WHERE execution must fail rather than returning/deleting unfiltered rows
+        auto mockConn = std::make_shared<TestDatabaseConnection>();
+        Phase6MockDbContext mockDb(mockConn);
+        ASSERT_TRUE(mockDb.ensure_created().has_value());
+        ASSERT_TRUE(mockDb.people.add(Core::Person(Core::PersonId{ 1 }, "Mock1", "Person")).has_value());
+        ASSERT_TRUE(mockDb.people.add(Core::Person(Core::PersonId{ 2 }, "Mock2", "Person")).has_value());
+
+        EXPECT_FALSE(mockDb.people.where_equal<"id">(1).try_to_vector().has_value());
+        EXPECT_FALSE(mockDb.people.where_equal<"id">(1).remove_where().has_value());
+        EXPECT_EQ(mockDb.people.count(), 2u);
+    }
+
+    TEST(Review6ReliabilityRegressionsTest, CompositeKeyEncodingAndIdentityMapAvoidsStringCollisions)
+    {
+        // R14: Distinct string tuples containing delimiters never collide
+        const Core::CompositeKey<std::string, std::string> k1{ "a, b", "c" };
+        const Core::CompositeKey<std::string, std::string> k2{ "a", "b, c" };
+        EXPECT_NE(std::format("{}", k1), std::format("{}", k2));
+        EXPECT_NE(Core::encode_key(k1), Core::encode_key(k2));
+
+        // Verify live two-row SQLite identity-map separation with delimiter-containing string keys
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        struct PairContext : DAL::DbContextBase<DAL::SQLiteConnection>
+        {
+            Set<StringPartKeyDTO> parts{ this };
+            Set<StringPairRow, StringPairRowDTO> pairs{ this };
+            explicit PairContext(std::shared_ptr<DAL::SQLiteConnection> c)
+                : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+            {
+            }
+        };
+
+        PairContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.parts.add(StringPartKeyDTO{ "a, b" }).has_value());
+        ASSERT_TRUE(db.parts.add(StringPartKeyDTO{ "c" }).has_value());
+        ASSERT_TRUE(db.parts.add(StringPartKeyDTO{ "a" }).has_value());
+        ASSERT_TRUE(db.parts.add(StringPartKeyDTO{ "b, c" }).has_value());
+
+        db.enable_change_tracking();
+        ASSERT_TRUE(db.pairs.add(StringPairRow{ "a, b", "c", "first_payload" }).has_value());
+        ASSERT_TRUE(db.pairs.add(StringPairRow{ "a", "b, c", "second_payload" }).has_value());
+
+        auto t1 = db.pairs.find_tracked(std::string("a, b"), std::string("c"));
+        auto t2 = db.pairs.find_tracked(std::string("a"), std::string("b, c"));
+        ASSERT_NE(t1, nullptr);
+        ASSERT_NE(t2, nullptr);
+        EXPECT_NE(t1.get(), t2.get());
+        EXPECT_EQ(t1->payload, "first_payload");
+        EXPECT_EQ(t2->payload, "second_payload");
+    }
+
+    TEST(Review6ReliabilityRegressionsTest, StandaloneTrackedRefEscapedQueryAndPhase47ErrorParity)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Original", "Person")).has_value());
+
+        // R15 & Task 47.2: standalone DbSet owns its tracked instances & accepts raw integral IDs
+        auto standalone = db.create_set<Core::Person>();
+        auto refByRawId = standalone.find_tracked_ref(1);
+        ASSERT_TRUE(refByRawId.has_value());
+        EXPECT_EQ(refByRawId->getFirstName(), "Original");
+
+        auto standaloneByConn = DAL::DbSet<Core::Person>(conn);
+        auto refByKey = standaloneByConn.find_tracked_ref(Core::Person::Key{ Core::PersonId{ 1 } });
+        ASSERT_TRUE(refByKey.has_value());
+        EXPECT_EQ(refByKey->getFirstName(), "Original");
+
+        // R16: Query escaping a destroyed local DbContext safely avoids dangling pointer dereference
+        auto escapedQuery = [&]()
+        {
+            Phase30DbContext local(conn);
+            local.enable_change_tracking();
+            return local.people.where_equal<"id">(1);
+        }();
+        auto escapedRes = escapedQuery.try_to_vector();
+        ASSERT_TRUE(escapedRes.has_value()) << escapedRes.error().to_string();
+        ASSERT_EQ(escapedRes->size(), 1u);
+        EXPECT_EQ(escapedRes->front().getFirstName(), "Original");
+
+        // Task 47.3: map_from_message captures Debug stacktraces
+        auto mappedErr = Core::DbError::map_from_message("UNIQUE constraint failed");
+        EXPECT_EQ(mappedErr.code, Core::DbErrorCode::DuplicateKey);
+#ifndef NDEBUG
+        EXPECT_FALSE(mappedErr.trace.empty());
+#endif
+    }
+
 } // namespace

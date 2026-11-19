@@ -407,34 +407,80 @@ export namespace DAL::Mappers
         }
 
         template<typename PkVal>
-        [[nodiscard]] static Domain with_primary_key(const Domain& domain, const PkVal& new_pk_val)
+        [[nodiscard]] static std::expected<Domain, Core::DbError> try_with_primary_key(const Domain& domain, const PkVal& new_pk_val)
             requires DAL::Schema::SinglePrimaryKey<DTO>
         {
             DTO dto = to_dto(domain);
             constexpr auto pk_m = DAL::Schema::primary_key_member<DTO>();
             using PkFieldT = [:std::meta::type_of(pk_m):];
             using CleanPkT = std::remove_cvref_t<PkFieldT>;
+
+            auto check_integral_range = [&]<typename TargetScalarT>() -> std::expected<void, Core::DbError>
+            {
+                using CleanTargetT = std::remove_cvref_t<TargetScalarT>;
+                using CleanSrcT = std::remove_cvref_t<PkVal>;
+                if constexpr (
+                    std::is_integral_v<CleanTargetT> && std::is_integral_v<CleanSrcT> && !std::is_same_v<CleanTargetT, bool> &&
+                    !std::is_same_v<CleanSrcT, bool>)
+                {
+                    if (!std::in_range<CleanTargetT>(new_pk_val))
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Generated primary key value {} overflows target key type", new_pk_val)) };
+                    }
+                }
+                return {};
+            };
+
             if constexpr (DAL::Schema::SqlgenPrimaryKeyField<CleanPkT>)
             {
                 using InnerT = typename CleanPkT::ReflectionType;
                 if constexpr (requires { typename InnerT::value_type; })
                 {
+                    if (auto chk = check_integral_range.template operator()<typename InnerT::value_type>(); !chk)
+                    {
+                        return std::unexpected<Core::DbError>{ chk.error() };
+                    }
                     dto.[:pk_m:] = CleanPkT{ InnerT{ static_cast<typename InnerT::value_type>(new_pk_val) } };
                 }
                 else
                 {
+                    if (auto chk = check_integral_range.template operator()<InnerT>(); !chk)
+                    {
+                        return std::unexpected<Core::DbError>{ chk.error() };
+                    }
                     dto.[:pk_m:] = CleanPkT{ static_cast<InnerT>(new_pk_val) };
                 }
             }
             else if constexpr (requires { typename CleanPkT::value_type; })
             {
+                if (auto chk = check_integral_range.template operator()<typename CleanPkT::value_type>(); !chk)
+                {
+                    return std::unexpected<Core::DbError>{ chk.error() };
+                }
                 dto.[:pk_m:] = CleanPkT{ static_cast<typename CleanPkT::value_type>(new_pk_val) };
             }
             else
             {
+                if (auto chk = check_integral_range.template operator()<CleanPkT>(); !chk)
+                {
+                    return std::unexpected<Core::DbError>{ chk.error() };
+                }
                 dto.[:pk_m:] = static_cast<CleanPkT>(new_pk_val);
             }
             return to_domain(dto);
+        }
+
+        template<typename PkVal>
+        [[nodiscard]] static Domain with_primary_key(const Domain& domain, const PkVal& new_pk_val)
+            requires DAL::Schema::SinglePrimaryKey<DTO>
+        {
+            auto res = try_with_primary_key(domain, new_pk_val);
+            if (!res)
+            {
+                throw std::overflow_error(res.error().message);
+            }
+            return std::move(*res);
         }
     };
 

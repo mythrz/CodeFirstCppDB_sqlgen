@@ -193,6 +193,99 @@ export namespace Core
         return key.template get<Index>();
     }
 
+    namespace detail
+    {
+        template<typename T>
+        inline constexpr bool is_string_key_part_v =
+            std::is_same_v<std::remove_cvref_t<T>, std::string> || std::is_same_v<std::remove_cvref_t<T>, std::string_view> ||
+            std::is_same_v<std::remove_cvref_t<T>, const char*> || std::is_same_v<std::remove_cvref_t<T>, char*>;
+
+        template<typename Part>
+        [[nodiscard]] std::string format_composite_part(const Part& part)
+        {
+            if constexpr (is_string_key_part_v<Part>)
+            {
+                const std::string_view sv(part);
+                std::string out = "\"";
+                out.reserve(sv.size() + 2);
+                for (unsigned char ch : sv)
+                {
+                    if (ch == '\\')
+                    {
+                        out += "\\\\";
+                    }
+                    else if (ch == '"')
+                    {
+                        out += "\\\"";
+                    }
+                    else if (ch == '\0')
+                    {
+                        out += "\\0";
+                    }
+                    else
+                    {
+                        out.push_back(static_cast<char>(ch));
+                    }
+                }
+                out.push_back('"');
+                return out;
+            }
+            else if constexpr (std::is_same_v<std::remove_cvref_t<Part>, char>)
+            {
+                if (part == '\0')
+                {
+                    return "'\\0'";
+                }
+                return std::format("'{}'", part);
+            }
+            else
+            {
+                return std::format("{}", part);
+            }
+        }
+
+        template<typename Part>
+        [[nodiscard]] std::string encode_key_part(const Part& part)
+        {
+            if constexpr (is_string_key_part_v<Part>)
+            {
+                const std::string_view sv(part);
+                return std::format("{}:{};", sv.size(), sv);
+            }
+            else
+            {
+                const std::string rendered = std::format("{}", part);
+                return std::format("{}:{};", rendered.size(), rendered);
+            }
+        }
+    } // namespace detail
+
+    // Collision-free identity-map key encoding separating display formatting from key identity
+    template<typename KeyType>
+    [[nodiscard]] std::string encode_key(const KeyType& key)
+    {
+        using CleanT = std::remove_cvref_t<KeyType>;
+        if constexpr (SingleKeyType<CleanT>)
+        {
+            return "S:" + detail::encode_key_part(key.value);
+        }
+        else if constexpr (CompositeKeyType<CleanT>)
+        {
+            std::string encoded = "C:";
+            std::apply(
+                [&encoded](const auto&... args)
+                {
+                    ((encoded += detail::encode_key_part(args)), ...);
+                },
+                key.values);
+            return encoded;
+        }
+        else
+        {
+            return "K:" + detail::encode_key_part(key);
+        }
+    }
+
 } // namespace Core
 
 // =========================================================================
@@ -233,7 +326,7 @@ struct std::formatter<Core::CompositeKey<KeyTypes...>> : std::formatter<std::str
             [&str](const auto&... args)
             {
                 std::size_t idx = 0;
-                ((str += (idx++ > 0 ? ", " : "") + std::format("{}", args)), ...);
+                ((str += (idx++ > 0 ? ", " : "") + Core::detail::format_composite_part(args)), ...);
             },
             key.values);
         str += ")";
