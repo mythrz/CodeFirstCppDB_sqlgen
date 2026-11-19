@@ -142,7 +142,7 @@ target_link_libraries(my_app PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
 
 ```bash
 cmake --preset gcc-debug
-cmake --build --preset build-gcc-debug -j 1
+cmake --build --preset build-gcc-debug -j 4
 ctest --preset test-gcc-debug --output-on-failure
 ```
 
@@ -150,6 +150,10 @@ To run with AddressSanitizer + UndefinedBehaviorSanitizer:
 
 ```bash
 cmake --preset gcc-asan
-cmake --build --preset build-gcc-asan -j 1
+cmake --build --preset build-gcc-asan -j 4
 ctest --preset test-gcc-asan --output-on-failure
 ```
+
+## License
+
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.

@@ -233,6 +233,14 @@ namespace
     // Phase 38: Runtime SQLite Schema & Table Introspection API
     // =========================================================================
 
+    struct CompositePkPairDTO
+    {
+        static constexpr const char* tablename = "CompositePkPairs";
+        sqlgen::PrimaryKey<std::string, false> first{};
+        sqlgen::PrimaryKey<std::string, false> second{};
+        std::string value{};
+    };
+
     TEST(Phase38SchemaIntrospectionTest, ListTablesTableInfoAndExecuteRaw)
     {
         auto connRes = DAL::SQLiteConnection::connect(":memory:");
@@ -260,6 +268,33 @@ namespace
         ASSERT_EQ(somethingColsRes->size(), 4u);
         EXPECT_EQ((*somethingColsRes)[3].name, "description");
         EXPECT_FALSE((*somethingColsRes)[3].not_null);
+
+        auto psColsRes = db.table_info("Person_Something");
+        ASSERT_TRUE(psColsRes.has_value()) << psColsRes.error().to_string();
+        ASSERT_EQ(psColsRes->size(), 3u);
+        EXPECT_EQ((*psColsRes)[0].name, "person_id");
+        EXPECT_EQ((*psColsRes)[0].pk_index, 1);
+        EXPECT_EQ((*psColsRes)[1].name, "something_id");
+        EXPECT_EQ((*psColsRes)[1].pk_index, 2);
+        EXPECT_EQ((*psColsRes)[2].name, "association_type");
+        EXPECT_EQ((*psColsRes)[2].pk_index, 0);
+
+        ASSERT_TRUE(connRes.value()->ensure_table_created<CompositePkPairDTO>().has_value());
+        auto pairColsRes = db.table_info("CompositePkPairs");
+        ASSERT_TRUE(pairColsRes.has_value()) << pairColsRes.error().to_string();
+        ASSERT_EQ(pairColsRes->size(), 3u);
+        EXPECT_EQ((*pairColsRes)[0].name, "first");
+        EXPECT_EQ((*pairColsRes)[0].pk_index, 1);
+        EXPECT_EQ((*pairColsRes)[1].name, "second");
+        EXPECT_EQ((*pairColsRes)[1].pk_index, 2);
+        EXPECT_EQ((*pairColsRes)[2].name, "value");
+        EXPECT_EQ((*pairColsRes)[2].pk_index, 0);
+        DAL::DbSet<CompositePkPairDTO, CompositePkPairDTO, DAL::SQLiteConnection> pairSet(connRes.value());
+        EXPECT_TRUE(pairSet.add(CompositePkPairDTO{ .first = "a", .second = "b", .value = "v1" }).has_value());
+        EXPECT_TRUE(pairSet.add(CompositePkPairDTO{ .first = "a", .second = "c", .value = "v2" }).has_value());
+        auto dupPair = pairSet.add(CompositePkPairDTO{ .first = "a", .second = "b", .value = "dup" });
+        ASSERT_FALSE(dupPair.has_value());
+        EXPECT_EQ(dupPair.error().code, Core::DbErrorCode::DuplicateKey);
 
         EXPECT_TRUE(db.execute_raw("CREATE INDEX IF NOT EXISTS idx_person_last ON Person (last_name);").has_value());
         EXPECT_FALSE(db.execute_raw("").has_value());

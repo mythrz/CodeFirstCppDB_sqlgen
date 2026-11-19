@@ -128,11 +128,6 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot create table: database connection is closed") };
             }
-            auto res = sqlgen::CreateTable<DTO>{ .if_not_exists_ = true }((*conn_));
-            if (!res)
-            {
-                return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
-            }
             if constexpr (Schema::CompositePrimaryKey<DTO>)
             {
                 static constexpr auto key_members = Schema::key_members_of<DTO>();
@@ -147,12 +142,43 @@ export namespace DAL
                     cols += std::format("\"{}\"", std::meta::identifier_of(m));
                     ++idx;
                 }
+
+                // Clear per-column PRIMARY KEY markers so multi-PrimaryKey and multi-ForeignKey DTOs emit one table-level PRIMARY KEY
+                // constraint.
+                auto stmt = sqlgen::transpilation::to_create_table<DTO>(true);
+                for (auto& col : stmt.columns)
+                {
+                    col.type.visit(
+                        [](auto& t)
+                        {
+                            t.properties.primary = false;
+                            t.properties.auto_incr = false;
+                        });
+                }
+                std::string create_sql = (*conn_)->to_sql(stmt);
+                if (const auto close_pos = create_sql.rfind(");"); close_pos != std::string::npos)
+                {
+                    create_sql.insert(close_pos, std::format(", PRIMARY KEY ({})", cols));
+                }
+                if (auto res = (*conn_)->execute(create_sql); !res)
+                {
+                    return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
+                }
+
                 const std::string_view table_name = DTO::tablename;
                 const std::string index_sql =
                     std::format("CREATE UNIQUE INDEX IF NOT EXISTS \"ux_{}_composite_pk\" ON \"{}\" ({});", table_name, table_name, cols);
                 if (auto idx_res = (*conn_)->execute(index_sql); !idx_res)
                 {
                     return std::unexpected<Core::DbError>{ map_sqlite_error(idx_res.error().what()) };
+                }
+            }
+            else
+            {
+                auto res = sqlgen::CreateTable<DTO>{ .if_not_exists_ = true }((*conn_));
+                if (!res)
+                {
+                    return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
                 }
             }
             return {};

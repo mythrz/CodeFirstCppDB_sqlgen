@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 4.0)
 if(NOT DEFINED CMAKE_EXPERIMENTAL_CXX_IMPORT_STD)
-    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "f35a9ac6-8463-4d38-8eec-5d6008153e7d")
+    if(CMAKE_VERSION VERSION_LESS "4.3")
+        set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "a9e1cf81-9932-4810-974b-6eccaf14e457")
+    elseif(CMAKE_VERSION VERSION_LESS "4.4")
+        set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
+    elseif(CMAKE_VERSION VERSION_LESS "4.5")
+        set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "f35a9ac6-8463-4d38-8eec-5d6008153e7d")
+    endif()
 endif()
 project(CodeFirstCppDB VERSION 1.0.0 LANGUAGES CXX)
 
@@ -143,5 +149,10 @@ if(CODEFIRST_INSTALL)
             "${CMAKE_CURRENT_BINARY_DIR}/CodeFirstCppDBConfig.cmake"
             "${CMAKE_CURRENT_BINARY_DIR}/CodeFirstCppDBConfigVersion.cmake"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/CodeFirstCppDB"
+    )
+    install(
+        FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/CodeFirstCppDB"
     )
 endif()

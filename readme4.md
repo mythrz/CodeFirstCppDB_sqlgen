@@ -1,10 +1,11 @@
 # CodeFirstCppDB_sqlgen — Architecture, Reusability & Next-Gen Roadmap
 
-> **Document Version:** 16.0 (Post-Review 6 & Phase 47 Reliability, Ownership, SQLite Boundary & Packaging Hardening)  
+> **Document Version:** 16.1 (Post-Review 6, Composite `PRIMARY KEY` DDL, CI & MIT License Finalization)  
 > **Date:** 2026-11-19  
 > **Active Branch:** `main`  
-> **Toolchain Baseline:** GCC 16.2+ (`-std=c++26 -freflection`), CMake 4.0+ (verified on 4.5.0), Ninja, SQLite 3  
-> **Status:** Phases 1–48 Completed (`91/91` GoogleTests across `43` suites passing on `gcc-debug` and `gcc-asan`; `14/14` `review6` regression cases & `2/2` ASan lifetime checks `dangling` and `escaped_query` passing)
+> **Toolchain Baseline:** GCC 16.1+ (`-std=c++26 -freflection`), CMake 4.0+ (verified on 4.5.0; CI pinned to 4.5.1), Ninja, SQLite 3  
+> **License:** MIT ([LICENSE](LICENSE))  
+> **Status:** Phases 1–48 Completed (`91/91` GoogleTests across `43` suites passing on `gcc-debug` and `gcc-asan`; `14/14` `review6` regression cases & `2/2` ASan lifetime checks passing; all `readme5.md` and `review6` findings resolved and archived/removed)
 
 ---
 
@@ -12,7 +13,7 @@
 
 1. [Executive Summary & Vision](#1-executive-summary--vision)
 2. [Quick Start, Coding Standards & Developer Setup](#2-quick-start-coding-standards--developer-setup)
-3. [Current Architecture & Library Stack (v16.0)](#3-current-architecture--library-stack-v160)
+3. [Current Architecture & Library Stack (v16.1)](#3-current-architecture--library-stack-v161)
    - [Directory Layout](#directory-layout)
    - [Layer Boundaries](#layer-boundaries)
    - [External Submodule Libraries Assessment](#external-submodule-libraries-assessment)
@@ -20,7 +21,7 @@
    - [Core Technical Pillars](#core-technical-pillars)
 4. [Completed Engineering Roadmap (Phases 1–48)](#4-completed-engineering-roadmap-phases-148)
 5. [Multi-Stage Audits (`readme5.md` Triage, Downstream Feedback & Review 6 Hardening)](#5-multi-stage-audits-readme5md-triage-downstream-feedback--review-6-hardening)
-   - [5.1 Independent Review (`readme5.md`) Triage](#51-independent-review-readme5md-triage)
+   - [5.1 Independent Review (`readme5.md` — Archived/Removed) Triage](#51-independent-review-readme5md--archivedremoved-triage)
    - [5.2 Re-Evaluation of Phases 35–38 (`521c561`) & Phases 39–46 (`00797dc` -> `c20efde`)](#52-re-evaluation-of-phases-3538-521c561--phases-3946-00797dc--c20efde)
    - [5.3 Downstream Consumer Re-Evaluation ("Project Horizon")](#53-downstream-consumer-re-evaluation-project-horizon)
    - [5.4 Phase 47 Polish & Review 6 Reliability/Lifetime Audit (`R01`–`R16`)](#54-phase-47-polish--review-6-reliabilitylifetime-audit-r01r16)
@@ -104,25 +105,25 @@ ctest --preset test-gcc-asan
 ./build/linux/arch/gcc/debug/Startup/Startup --no-reset
 ```
 
-Before modifying core modules, DTO traits, or build targets, review [CODING_STANDARDS.md](CODING_STANDARDS.md). For historical context on earlier audits, see [readme5.md](readme5.md) and `readme6.md` (from the external Review 6 archive).
+Before modifying core modules, DTO traits, or build targets, review [CODING_STANDARDS.md](CODING_STANDARDS.md). All earlier findings from `readme5.md` (branch `Review101_pkstl`) and `review6` (`readme6.md`) have been resolved and covered by tests on `main`, and those temporary review artifacts/branches have been removed.
 
 ---
 
-## 3. Current Architecture & Library Stack (v16.0)
+## 3. Current Architecture & Library Stack (v16.1)
 
 ### Directory Layout
 
 ```text
 CodeFirstCppDB_sqlgen/
-├── .github/workflows/ci.yml        # GitHub Actions CI: format, Debug/ASan, -fcontracts, find_package & add_subdirectory consumers
-├── CMakeLists.txt                  # Root CMake config (C++26, PROJECT_IS_TOP_LEVEL guards, install()/export rules)
+├── .github/workflows/ci.yml        # GitHub Actions CI: clang-format>=21, CMake 4.5.1, Debug/ASan, -fcontracts, consumer checks
+├── LICENSE                         # MIT License
+├── CMakeLists.txt                  # Root CMake config (C++26, versioned import std, PROJECT_IS_TOP_LEVEL guards, install()/export rules)
 ├── CMakePresets.json               # Presets for gcc-debug, gcc-release, gcc-asan & testPresets (no hardcoded compiler paths)
 ├── cmake/
 │   └── CodeFirstCppDBConfig.cmake.in
 ├── CODING_STANDARDS.md             # Project coding, naming, SQLite & CMake packaging standards
-├── README.md                       # Top-level user guide (compiled Quick Start + FetchContent/install instructions)
+├── README.md                       # Top-level user guide (compiled Quick Start, FetchContent/install & MIT License)
 ├── readme4.md                      # Master architectural specification, audit triage & roadmap
-├── readme5.md                      # Historical architecture/C++26 review snapshot (Review101_pkstl @ 01853df)
 │
 ├── Core/                           # Module: `core` (Domain Primitives & Repository Contracts)
 │   ├── CMakeLists.txt              # Target `CodeFirstCppDB_Core` (OUTPUT_NAME Core, PUBLIC cxx_std_26) + stdc++exp on GNU + aliases
@@ -242,20 +243,20 @@ flowchart LR
 - [x] **Phases 35–38 (`521c561`) — CMake Superbuild Consumer Readiness, `Samples` Target Split, `m_` Prefix Reflection, FK Hardening & Runtime Introspection.**
 - [x] **Phase 39 (`00797dc`) — Transactional Correctness (`SAVEPOINT` `save_changes()`), `explicit Core::Id`, `Startup --no-reset`, `[this]` Capture Removal, `track_copy()`, Atomic `update()` & `close()`.**
 - [x] **Phases 40–46 (`c20efde`) — Consumer Packaging (`FetchContent`/`add_subdirectory` + `CODEFIRST_INSTALL=ON`), Verified `README.md`, End-to-End P3394 `AnnotatedDto` + `references<Parent>` + `[[=column]]`, C++26 Cleanups & P2900 `pre(...)` Contracts, Direct SQLite C-API Introspection (Zero `TEMP VIEW`s), `DbError` `native_code` + Debug `std::stacktrace`, `[[nodiscard]]` Pass, Modularized `DAL/tests/`, & Physical Relocation of `Samples/`.**
-- [x] **Phases 47–48 — Phase 47 Polish (`find_tracked_ref` `std::constructible_from`, `upsert` error-map parity, `map_from_message()` traces, `SQLiteConnection` `[[nodiscard]]`, CI/README fixes) & Review 6 Reliability/Lifetime Hardening (`R01`–`R16` resolved across `DbContextBase`, `DbSet`, `SQLiteConnection`, `MapperTraits`, and `Core::Key`).**
+- [x] **Phases 47–48 — Phase 47 Polish, Review 6 Hardening (`R01`–`R16`), Real Composite `PRIMARY KEY` DDL, CI & MIT License:** Completed `find_tracked_ref` `std::constructible_from`, `upsert` `map_error`, `map_from_message()` Debug stacktraces, `SQLiteConnection` `[[nodiscard]]`, table-level composite `PRIMARY KEY (...)` DDL in `ensure_table_created<DTO>()`, all `R01`–`R16` reliability/lifetime fixes, CI fixes (`cmake` 4.5.1 tarball & `clang-format>=21` on Ubuntu 24.04), MIT [LICENSE](LICENSE), and removal of temporary `readme5.md`, `review6.zip`, and `Review101_pkstl`.
 
 ---
 
 ## 5. Multi-Stage Audits (`readme5.md` Triage, Downstream Feedback & Review 6 Hardening)
 
-### 5.1 Independent Review ([readme5.md](readme5.md)) Triage
+### 5.1 Independent Review (`readme5.md` — Archived/Removed) Triage
 
-All items tracked from [readme5.md](readme5.md) (`Review101_pkstl` @ `01853df`) have been resolved through Phases 39–47:
+All items tracked from the historical `readme5.md` snapshot (`Review101_pkstl` @ `01853df`) have been resolved through Phases 39–48:
 
 | Item in `readme5.md` | Status on `main` | Verdict & Verification Evidence |
 | :--- | :--- | :--- |
 | **C1** Auto-increment PK drops domain ID (`Startup --no-reset`) | **Resolved (Phase 39)** | Verified by running `Startup` followed by `Startup --no-reset` (`count() == 0` guard + `add_returning`). `explicit Core::Id` prevents raw-int coercions. |
-| **C2** Composite junction PK/UNIQUE missing | **Resolved (Phases 37 & 46)** | `ensure_table_created` creates `ux_<table>_composite_pk` ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx)); `CompositeKeyUpsertReplacesSingleRowCleanly` exercises live composite `.upsert()`. |
+| **C2** Composite junction PK/UNIQUE missing | **Resolved (Phases 37, 46 & 48)** | `ensure_table_created<DTO>()` ([DAL/context/SQLiteConnection.ixx](DAL/context/SQLiteConnection.ixx)) emits a real table-level `PRIMARY KEY ("col1", "col2", ...)` constraint plus `ux_<table>_composite_pk`; `Phase38SchemaIntrospectionTest` verifies `pk_index` (`1`, `2`) on both `Person_Something` and multi-`PrimaryKey` `CompositePkPairDTO`. |
 | **C3** `DbSet::track(Domain&)` raw pointer & `[this]` captures | **Resolved (Phases 39, 42, 47 & 48)** | `[this]` captures removed; `track_copy()` added; `find_tracked_ref()` supports `std::constructible_from` keys (`explicit Core::Id`) and safely owns tracked instances in standalone sets (`R15`). |
 | **C4** `save_changes()` commits caller's outer transaction | **Resolved (Phase 39 & 48)** | `started_tx = !in_transaction()` + `SAVEPOINT` nesting + `BaselineCheckpoint` restore on rollback/failure (`R01`–`R04`). |
 | **C5** `PRAGMA foreign_keys = ON` missing on `connect()` | **Resolved (Phases 37 & 40)** | `SQLiteConnection::connect(dbPath, SQLiteConnectionOptions)` enables FKs by default; reopened on-disk FK enforcement verified in `Phase43ReopenForeignKeyTest`. |
@@ -379,11 +380,11 @@ import dal;
 
 ## 8. Architecture Comparison Matrix
 
-| Feature / Aspect | Early v3 Baseline | Previous `main` (`c20efde`) | Current `main` (v16.0 — Phases 47 & 48 / Review 6) | C# Entity Framework Core |
+| Feature / Aspect | Early v3 Baseline | Previous `main` (`c20efde`) | Current `main` (v16.1 — Phases 47 & 48 / Final) | C# Entity Framework Core |
 | :--- | :--- | :--- | :--- | :--- |
-| **Packaging & Reuse** | Monolithic test repo (`SqlGenIsolationTest`) | `FetchContent`/`add_subdirectory` & `CODEFIRST_INSTALL=ON`, physical `Samples/` | + `PUBLIC cxx_std_26`, fixed CI flags & `add_subdirectory` smoke check, aligned `README.md` | NuGet `Microsoft.EntityFrameworkCore.Sqlite` |
+| **Packaging & Reuse** | Monolithic test repo (`SqlGenIsolationTest`) | `FetchContent`/`add_subdirectory` & `CODEFIRST_INSTALL=ON`, physical `Samples/` | + MIT [LICENSE](LICENSE) (installed with package), `PUBLIC cxx_std_26`, fixed CI (`CMake` 4.5.1 & `clang-format>=21`), aligned `README.md` | NuGet `Microsoft.EntityFrameworkCore.Sqlite` |
 | **Domain Definition** | Encapsulated classes + DTOs | P3394 `AnnotatedDto` (`[[=references]]`, `[[=column]]`), `m_` aggregates, ctor hydration | + Shared `to_string_literal`, checked `try_with_primary_key()` (`R13`), `std::ranges::to` | `[Table]` / `[Column]` attributes + POCOs |
-| **Keys & Integrity** | Manual ID lookups | Explicit `Core::Id`, `PRAGMA foreign_keys`, composite PK index, P2900 `pre(...)` | + Injective `Core::encode_key()` & quoted `CompositeKey` formatter (`R14`), `find_tracked_ref` `constructible_from` | `HasKey(x => new { x.A, x.B })`, strong keys |
+| **Keys & Integrity** | Manual ID lookups | Explicit `Core::Id`, `PRAGMA foreign_keys`, composite PK index, P2900 `pre(...)` | + Table-level composite `PRIMARY KEY (...)` DDL + `ux_<table>_composite_pk`, injective `Core::encode_key()` & quoted `CompositeKey` formatter (`R14`), `find_tracked_ref` `constructible_from` | `HasKey(x => new { x.A, x.B })`, strong keys |
 | **Runtime Introspection & Raw SQL** | None | `list_tables()`, `table_info()`, `execute_raw()`, parameterized `query_rows()` & `execute_prepared()` | + Exact bind count checks (`R05`), empty BLOB `zeroblob` (`R06`), tail/NUL rejection (`R07`), engine autocommit (`R08`), savepoint identifier validation (`R09`) | `Database.SqlQueryRaw<T>()` & `GetSchema()` |
 | **Error & Lifetime Discipline** | Swallowed defaults + raw refs | `track_copy()`, `DbError::native_code` + Debug traces, split `DAL/tests/` (85/85) | + `BaselineCheckpoint` tx/scope rollback (`R01`–`R04`), `weak_ptr`/local `ContextState` (`R15`–`R16`), capability/limit guards (`R10`–`R12`), `[[nodiscard]]` & `upsert` `map_error` parity (`91/91`) | Exceptions / `DbUpdateException` |
 
@@ -397,5 +398,5 @@ import dal;
    - `Samples` (`CodeFirstCppDB::Samples`, `export module samples;`) isolates all demo entities, DTOs, and sample repositories physically under [Samples/](Samples/). It builds automatically when `PROJECT_IS_TOP_LEVEL` or `CODEFIRST_BUILD_TESTS` is `ON`, while external consumers (`PROJECT_IS_TOP_LEVEL=OFF`) only compile `CodeFirstCppDB::Core` and `CodeFirstCppDB::DAL`.
 3. **Why keep both `m_` pure aggregates and optional P3394 annotations?**
    - Downstream libraries that isolate pure data structs (`import std;` only, shared across UI and storage layers) cannot add ORM attributes inside their data module; `m_`-aware `MapperTraits` keeps them zero-dependency, while optional P3394 `[[=...]]` annotations (Phases 42 & 45) give self-contained ORM users zero-DTO 1-class ergonomics.
-4. **What is the status of `Review101_pkstl` / [readme5.md](readme5.md) and Review 6 (`readme6.md`)?**
-   - All Phase 47 polish tasks (`47.1`–`47.4`) and all 16 Review 6 findings (`R01`–`R16`) are now implemented and verified with permanent regression coverage on `main` (`91/91` tests across `43` suites, plus `14/14` `review6` assertions and `2/2` ASan lifetime checks). [readme5.md](readme5.md) and branch `Review101_pkstl` are retained only as historical baseline records until explicitly archived.
+4. **What is the status of `Review101_pkstl` / `readme5.md` and Review 6 (`review6.zip` / `readme6.md`)?**
+   - All Phase 47 polish tasks (`47.1`–`47.4`), all `readme5.md` items, and all 16 Review 6 findings (`R01`–`R16`, plus real table-level composite `PRIMARY KEY` DDL) are implemented and verified with permanent regression coverage on `main` (`91/91` tests across `43` suites). Accordingly, `readme5.md`, `review6.zip`, and branch `Review101_pkstl` have been removed from the repository.
