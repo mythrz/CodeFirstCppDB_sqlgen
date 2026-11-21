@@ -440,7 +440,7 @@ export namespace DAL
             {
                 return {};
             }
-            auto query = sqlgen::read<std::vector<DTO>> | sqlgen::where(sqlgen::Col<ColLiteral>{} == val);
+            auto query = sqlgen::read<std::vector<DTO>> | sqlgen::where(sqlgen::col<ColLiteral> == val);
             auto res = query((*conn_));
             if (res)
             {

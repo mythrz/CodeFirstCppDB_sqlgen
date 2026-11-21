@@ -347,7 +347,7 @@ export namespace DAL::Schema
     }
 
     template<std::meta::info Member>
-    inline constexpr auto col_of = sqlgen::Col<col_literal_of<Member>()>{};
+    inline constexpr auto col_of = sqlgen::Col<col_literal_of<Member>(), "", false>{};
 
     template<typename DTO>
     consteval std::size_t total_member_count()

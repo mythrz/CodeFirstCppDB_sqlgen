@@ -166,7 +166,7 @@ namespace
         EXPECT_EQ(smithDescPage[1].getFirstName(), "Bob");
 
         // where_sql with raw sqlgen condition + first_or_default()
-        auto firstJones = db.people.where_sql(sqlgen::Col<"last_name">{} == std::string("Jones")).first_or_default();
+        auto firstJones = db.people.where_sql(sqlgen::Col<"last_name", "", false>{} == std::string("Jones")).first_or_default();
         ASSERT_TRUE(firstJones.has_value());
         EXPECT_EQ(firstJones->getFirstName(), "Diana");
 
