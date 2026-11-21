@@ -22,7 +22,7 @@ export namespace Core
 
         [[nodiscard]] static std::string capture_debug_trace()
         {
-#ifndef NDEBUG
+#if defined(CODEFIRST_ENABLE_STACKTRACE) && !defined(NDEBUG)
             const auto st = std::stacktrace::current(2, 8);
             return st.empty() ? std::string{} : std::to_string(st);
 #else

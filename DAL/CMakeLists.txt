@@ -1,5 +1,11 @@
-add_library(CodeFirstCppDB_DAL)
-set_target_properties(CodeFirstCppDB_DAL PROPERTIES OUTPUT_NAME DAL EXPORT_NAME DAL)
+add_library(CodeFirstCppDB_DAL ${_codefirst_lib_type})
+set_target_properties(CodeFirstCppDB_DAL PROPERTIES
+    OUTPUT_NAME DAL
+    EXPORT_NAME DAL
+    UNITY_BUILD OFF
+    CXX_SCAN_FOR_MODULES ON
+    CXX_MODULE_STD ON
+)
 add_library(CodeFirstCppDB::DAL ALIAS CodeFirstCppDB_DAL)
 add_library(CodeFirst::DAL ALIAS CodeFirstCppDB_DAL)
 

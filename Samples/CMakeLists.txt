@@ -1,5 +1,10 @@
-add_library(CodeFirstCppDB_Samples)
-set_target_properties(CodeFirstCppDB_Samples PROPERTIES OUTPUT_NAME Samples)
+add_library(CodeFirstCppDB_Samples ${_codefirst_lib_type})
+set_target_properties(CodeFirstCppDB_Samples PROPERTIES
+    OUTPUT_NAME Samples
+    UNITY_BUILD OFF
+    CXX_SCAN_FOR_MODULES ON
+    CXX_MODULE_STD ON
+)
 add_library(CodeFirstCppDB::Samples ALIAS CodeFirstCppDB_Samples)
 add_library(CodeFirst::Samples ALIAS CodeFirstCppDB_Samples)
 
