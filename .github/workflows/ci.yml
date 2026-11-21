@@ -125,7 +125,7 @@ jobs:
           set(CMAKE_CXX_EXTENSIONS OFF)
           set(CMAKE_CXX_SCAN_FOR_MODULES ON)
           set(CMAKE_CXX_MODULE_STD ON)
-          add_subdirectory("${{ github.workspace }}" codefirst_dep)
+          add_subdirectory("$GITHUB_WORKSPACE" codefirst_dep)
           add_executable(subdir_consumer main.cpp)
           target_link_libraries(subdir_consumer PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
           EOF
