@@ -1,6 +1,6 @@
 module;
 #include <meta>
-#include <rfl/internal/num_fields.hpp>
+#include <rfl/internal/cpp20/num_fields.hpp>
 #include <sqlgen/ForeignKey.hpp>
 #include <sqlgen/PrimaryKey.hpp>
 #include <sqlgen/Unique.hpp>
@@ -719,7 +719,8 @@ export namespace DAL::Schema
 
 } // namespace DAL::Schema
 
-namespace rfl::internal
+#ifndef REFLECTCPP_USE_CPP26_REFLECTION
+namespace rfl::internal::cpp20
 {
     template<typename Domain>
         requires(DAL::Schema::has_table_annotation<Domain>())
@@ -736,4 +737,5 @@ namespace rfl::internal
     struct CountFieldsHelper<const DAL::Schema::AnnotatedDto<Domain>> : CountFieldsHelper<DAL::Schema::AnnotatedDto<Domain>>
     {
     };
-} // namespace rfl::internal
+} // namespace rfl::internal::cpp20
+#endif
