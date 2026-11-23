@@ -1105,4 +1105,104 @@ namespace
 #endif
     }
 
+    // =========================================================================
+    // Phase 49 (P0): Direct Prepared-Statement Typed SQLite Reader Regressions
+    // =========================================================================
+
+    struct OverflowViewRowDTO
+    {
+        static constexpr const char* tablename = "OverflowView";
+        sqlgen::PrimaryKey<std::int64_t, false> id{ 0 };
+        std::int64_t computed{ 0 };
+    };
+
+    TEST(TypedSqliteReaderHardeningTest, PreservesEmbeddedNulTextBytesAcrossTypedReads)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        const std::string nulText("A\0B", 3);
+        const std::string lastText("X\0\0Y", 4);
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, nulText, lastText)).has_value());
+
+        auto byId = db.people.try_find(1);
+        ASSERT_TRUE(byId.has_value()) << byId.error().to_string();
+        ASSERT_TRUE(byId->has_value());
+        EXPECT_EQ((*byId)->getFirstName().size(), 3u);
+        EXPECT_EQ((*byId)->getFirstName(), nulText);
+        EXPECT_EQ((*byId)->getLastName().size(), 4u);
+        EXPECT_EQ((*byId)->getLastName(), lastText);
+
+        auto all = db.people.try_to_vector();
+        ASSERT_TRUE(all.has_value()) << all.error().to_string();
+        ASSERT_EQ(all->size(), 1u);
+        EXPECT_EQ(all->front().getFirstName(), nulText);
+
+        auto colProj = db.people.query().try_select<"firstName">();
+        ASSERT_TRUE(colProj.has_value()) << colProj.error().to_string();
+        ASSERT_EQ(colProj->size(), 1u);
+        EXPECT_EQ(colProj->front(), nulText);
+
+        auto tupleProj = db.people.query().try_select_columns<"firstName", "lastName">();
+        ASSERT_TRUE(tupleProj.has_value()) << tupleProj.error().to_string();
+        ASSERT_EQ(tupleProj->size(), 1u);
+        EXPECT_EQ(std::get<0>(tupleProj->front()), nulText);
+        EXPECT_EQ(std::get<1>(tupleProj->front()), lastText);
+    }
+
+    TEST(TypedSqliteReaderHardeningTest, PropagatesMidQuerySqliteStepErrorInsteadOfTruncatingAsEof)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        ASSERT_TRUE(conn->execute_raw(
+                            "CREATE TABLE OverflowSrc (id INTEGER PRIMARY KEY, val INTEGER NOT NULL);"
+                            "INSERT INTO OverflowSrc (id, val) VALUES (1, 10);"
+                            "INSERT INTO OverflowSrc (id, val) VALUES (2, -9223372036854775807 - 1);"
+                            "CREATE VIEW OverflowView AS SELECT id, abs(val) AS computed FROM OverflowSrc ORDER BY id;")
+                        .has_value());
+
+        // Row 1 succeeds, row 2 triggers SQLite integer overflow on sqlite3_step.
+        // Typed reads MUST return an error rather than a partial 1-row batch.
+        auto directRes = conn->try_fetch_all<OverflowViewRowDTO>();
+        ASSERT_FALSE(directRes.has_value());
+        EXPECT_NE(directRes.error().message.find("overflow"), std::string::npos);
+
+        DAL::DbSet<OverflowViewRowDTO, OverflowViewRowDTO, DAL::SQLiteConnection> viewSet(conn);
+        auto setRes = viewSet.try_to_vector();
+        ASSERT_FALSE(setRes.has_value());
+
+        auto tupleRes = viewSet.query().try_select_columns<"id", "computed">();
+        ASSERT_FALSE(tupleRes.has_value());
+    }
+
+    TEST(TypedSqliteReaderHardeningTest, FinalizesStatementsImmediatelyAllowingCleanCloseAfterEscapedReads)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        {
+            Phase30DbContext db(conn);
+            ASSERT_TRUE(db.ensure_created().has_value());
+            ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Ada", "Lovelace")).has_value());
+            ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Grace", "Hopper")).has_value());
+        }
+
+        // Run typed reads and escaped query, then close connection immediately.
+        auto rowsRes = conn->try_fetch_all<DAL::Schema::PersonDTO>();
+        ASSERT_TRUE(rowsRes.has_value());
+        EXPECT_EQ(rowsRes->size(), 2u);
+
+        auto cntRes = conn->try_count<DAL::Schema::PersonDTO>();
+        ASSERT_TRUE(cntRes.has_value());
+        EXPECT_EQ(*cntRes, 2u);
+
+        conn->close();
+        EXPECT_FALSE(conn->is_open());
+        EXPECT_FALSE(conn->try_fetch_all<DAL::Schema::PersonDTO>().has_value());
+    }
+
 } // namespace
