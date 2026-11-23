@@ -29,6 +29,9 @@ export namespace DAL::Schema
     struct unique
     {
     };
+    struct composite_key
+    {
+    };
     template<typename Parent>
     struct references
     {
@@ -82,20 +85,29 @@ export namespace DAL::Schema
     template<typename F>
     concept SqlgenForeignKeyField = is_sqlgen_foreign_key_v<std::remove_cvref_t<F>>;
 
+    template<typename T, std::size_t Idx>
+    consteval bool is_dto_primary_key_at()
+    {
+        if constexpr (requires { T::pk_field_flags; })
+        {
+            return T::pk_field_flags[Idx];
+        }
+        else
+        {
+            using RawFieldType = [:std::meta::type_of(members_v<T>[Idx]):];
+            using FieldType = std::remove_cvref_t<RawFieldType>;
+            return SqlgenPrimaryKeyField<FieldType>;
+        }
+    }
+
     template<typename T>
     consteval std::size_t primary_key_count()
     {
-        std::size_t count = 0;
-        template for (constexpr auto m : members_v<T>)
+        constexpr std::size_t N = members_v<T>.size();
+        return []<std::size_t... Is>(std::index_sequence<Is...>) consteval
         {
-            using RawFieldType = [:std::meta::type_of(m):];
-            using FieldType = std::remove_cvref_t<RawFieldType>;
-            if constexpr (SqlgenPrimaryKeyField<FieldType>)
-            {
-                ++count;
-            }
-        }
-        return count;
+            return (static_cast<std::size_t>(is_dto_primary_key_at<T, Is>() ? 1u : 0u) + ... + 0u);
+        }(std::make_index_sequence<N>{});
     }
 
     template<typename T>
@@ -114,15 +126,32 @@ export namespace DAL::Schema
         return count;
     }
 
+    template<typename T>
+    consteval bool has_explicit_composite_key()
+    {
+        if constexpr (requires {
+                          { T::composite_primary_key } -> std::convertible_to<bool>;
+                      })
+        {
+            if (static_cast<bool>(T::composite_primary_key))
+            {
+                return true;
+            }
+        }
+        return !std::meta::annotations_of_with_type(^^T, ^^composite_key).empty();
+    }
+
     // Entities with a single primary key (e.g. PersonDTO, SomethingDTO)
     template<typename T>
     concept SinglePrimaryKey = HasTableName<T> && (primary_key_count<T>() == 1);
 
-    // Entities with composite keys (e.g. junction tables like Person_SomethingDTO,
-    // or multi-column PrimaryKey DTOs)
+    // Entities with composite primary keys: either 2+ explicit primary key fields
+    // (sqlgen::PrimaryKey or [[=DAL::Schema::primary_key{false}]]), or an explicitly marked
+    // junction DTO (`static constexpr bool composite_primary_key = true` / `[[=composite_key{}]]`)
+    // with 2+ foreign key columns. Never silently inferred from 2+ arbitrary foreign keys.
     template<typename T>
     concept CompositePrimaryKey = HasTableName<T> && !SinglePrimaryKey<T> &&
-        ((primary_key_count<T>() >= 2) || (primary_key_count<T>() == 0 && foreign_key_count<T>() >= 2));
+        ((primary_key_count<T>() >= 2) || (primary_key_count<T>() == 0 && has_explicit_composite_key<T>() && foreign_key_count<T>() >= 2));
 
     // Generalized relational entity concept accommodating both single and composite key entities
     template<typename T>
@@ -182,9 +211,47 @@ export namespace DAL::Schema
 
     template<typename Domain>
         requires(has_table_annotation<Domain>())
+    consteval auto annotated_pk_flags()
+    {
+        static constexpr auto& dom_members = unchecked_members_v<Domain>;
+        std::array<bool, dom_members.size()> flags{};
+        std::size_t idx = 0;
+        template for (constexpr auto m : dom_members)
+        {
+            flags[idx++] = !std::meta::annotations_of_with_type(m, ^^primary_key).empty();
+        }
+        return flags;
+    }
+
+    template<typename Domain>
+        requires(has_table_annotation<Domain>())
+    consteval auto annotated_unique_flags()
+    {
+        static constexpr auto& dom_members = unchecked_members_v<Domain>;
+        std::array<bool, dom_members.size()> flags{};
+        std::size_t idx = 0;
+        template for (constexpr auto m : dom_members)
+        {
+            flags[idx++] = !std::meta::annotations_of_with_type(m, ^^unique).empty();
+        }
+        return flags;
+    }
+
+    template<typename Domain>
+        requires(has_table_annotation<Domain>())
     consteval void synthesize_annotated_dto_fields(std::meta::info target_fields_struct)
     {
         static constexpr auto& dom_members = unchecked_members_v<Domain>;
+        constexpr auto pk_flags = annotated_pk_flags<Domain>();
+        std::size_t total_pk_count = 0;
+        for (bool is_pk : pk_flags)
+        {
+            if (is_pk)
+            {
+                ++total_pk_count;
+            }
+        }
+
         std::vector<std::meta::info> specs;
         specs.reserve(dom_members.size());
 
@@ -197,13 +264,19 @@ export namespace DAL::Schema
             constexpr auto uniq_anns = std::define_static_array(std::meta::annotations_of_with_type(m, ^^unique));
             static constexpr auto all_anns = std::define_static_array(std::meta::annotations_of(m));
 
+            if constexpr (pk_anns.size() > 1)
+            {
+                throw std::invalid_argument("Field cannot have multiple [[=DAL::Schema::primary_key]] annotations");
+            }
+
             std::meta::info fk_target_type{};
-            bool has_fk = false;
+            std::size_t fk_count = 0;
             template for (constexpr auto ann : all_anns)
             {
                 constexpr auto ann_type = std::meta::type_of(ann);
                 if constexpr (std::meta::has_template_arguments(ann_type) && std::meta::template_of(ann_type) == ^^references)
                 {
+                    ++fk_count;
                     using AnnT = [:ann_type:];
                     using ParentDomain = [:std::meta::template_arguments_of(ann_type)[0]:];
                     constexpr auto ref_lit = to_string_literal<[]() consteval
@@ -212,15 +285,31 @@ export namespace DAL::Schema
                                                                }>();
                     using FieldT = [:field_type:];
                     fk_target_type = ^^sqlgen::ForeignKey<FieldT, SchemaOf_t<ParentDomain>, ref_lit>;
-                    has_fk = true;
                 }
             }
+            if (fk_count > 1)
+            {
+                throw std::invalid_argument("Field cannot have multiple [[=DAL::Schema::references<...>]] annotations");
+            }
+            const bool has_fk = (fk_count == 1);
 
             if constexpr (!pk_anns.empty())
             {
                 constexpr auto pk = std::meta::extract<primary_key>(pk_anns[0]);
                 if constexpr (pk.auto_increment)
                 {
+                    if (has_fk)
+                    {
+                        throw std::invalid_argument(
+                            "Conflicting annotations: auto-increment [[=DAL::Schema::primary_key{true}]] cannot be combined with "
+                            "[[=DAL::Schema::references<...>]]");
+                    }
+                    if (total_pk_count >= 2)
+                    {
+                        throw std::invalid_argument(
+                            "Conflicting annotations: auto-increment [[=DAL::Schema::primary_key{true}]] cannot be used in a composite "
+                            "primary key");
+                    }
                     target_type = std::meta::substitute(
                         ^^AnnotatedPkAuto,
                         {
@@ -228,6 +317,8 @@ export namespace DAL::Schema
                 }
                 else if (has_fk)
                 {
+                    // Compose manual PK + FK: keep sqlgen::ForeignKey for FK metadata/DDL while
+                    // AnnotatedDto::pk_field_flags records primary key membership for table/column DDL.
                     target_type = fk_target_type;
                 }
                 else
@@ -240,6 +331,8 @@ export namespace DAL::Schema
             }
             else if (has_fk)
             {
+                // Compose FK + optional [[=unique{}]]: keep sqlgen::ForeignKey while
+                // AnnotatedDto::unique_field_flags propagates UNIQUE into DDL.
                 target_type = fk_target_type;
             }
             else if constexpr (!uniq_anns.empty())
@@ -293,7 +386,10 @@ export namespace DAL::Schema
         requires(has_table_annotation<Domain>())
     struct AnnotatedDto : public AnnotatedDtoHolder<Domain>::Fields
     {
+        using source_domain_type = Domain;
         static constexpr auto tablename = std::define_static_string(annotated_table_name<Domain>());
+        static constexpr auto pk_field_flags = annotated_pk_flags<Domain>();
+        static constexpr auto unique_field_flags = annotated_unique_flags<Domain>();
     };
 
     template<typename Domain>
@@ -366,16 +462,27 @@ export namespace DAL::Schema
         requires SinglePrimaryKey<DTO>
     consteval std::meta::info primary_key_member()
     {
-        template for (constexpr auto m : members_v<DTO>)
+        constexpr std::size_t N = members_v<DTO>.size();
+        std::meta::info found{};
+        bool has_found = false;
+        [&]<std::size_t... Is>(std::index_sequence<Is...>) consteval
         {
-            using RawFieldType = [:std::meta::type_of(m):];
-            using FieldType = std::remove_cvref_t<RawFieldType>;
-            if constexpr (SqlgenPrimaryKeyField<FieldType>)
-            {
-                return m;
-            }
+            (
+                [&]() consteval
+                {
+                    if constexpr (is_dto_primary_key_at<DTO, Is>())
+                    {
+                        found = members_v<DTO>[Is];
+                        has_found = true;
+                    }
+                }(),
+                ...);
+        }(std::make_index_sequence<N>{});
+        if (!has_found)
+        {
+            throw std::invalid_argument("primary_key_member: no PrimaryKey field found");
         }
-        throw std::invalid_argument("primary_key_member: no PrimaryKey field found");
+        return found;
     }
 
     template<typename DTO>
@@ -384,18 +491,25 @@ export namespace DAL::Schema
     {
         constexpr std::size_t k_count = key_member_count<DTO>();
         constexpr bool use_pk = (primary_key_count<DTO>() > 0);
+        constexpr std::size_t N = members_v<DTO>.size();
         std::array<std::meta::info, k_count> result{};
         std::size_t idx = 0;
 
-        template for (constexpr auto m : members_v<DTO>)
+        [&]<std::size_t... Is>(std::index_sequence<Is...>) consteval
         {
-            using RawFieldType = [:std::meta::type_of(m):];
-            using FieldType = std::remove_cvref_t<RawFieldType>;
-            if constexpr (use_pk ? SqlgenPrimaryKeyField<FieldType> : SqlgenForeignKeyField<FieldType>)
-            {
-                result[idx++] = m;
-            }
-        }
+            (
+                [&]() consteval
+                {
+                    constexpr auto m = members_v<DTO>[Is];
+                    using RawFieldType = [:std::meta::type_of(m):];
+                    using FieldType = std::remove_cvref_t<RawFieldType>;
+                    if constexpr (use_pk ? is_dto_primary_key_at<DTO, Is>() : SqlgenForeignKeyField<FieldType>)
+                    {
+                        result[idx++] = m;
+                    }
+                }(),
+                ...);
+        }(std::make_index_sequence<N>{});
         return result;
     }
 
@@ -405,18 +519,25 @@ export namespace DAL::Schema
     {
         constexpr std::size_t nk_count = total_member_count<DTO>() - key_member_count<DTO>();
         constexpr bool use_pk = (primary_key_count<DTO>() > 0);
+        constexpr std::size_t N = members_v<DTO>.size();
         std::array<std::meta::info, nk_count> result{};
         std::size_t idx = 0;
 
-        template for (constexpr auto m : members_v<DTO>)
+        [&]<std::size_t... Is>(std::index_sequence<Is...>) consteval
         {
-            using RawFieldType = [:std::meta::type_of(m):];
-            using FieldType = std::remove_cvref_t<RawFieldType>;
-            if constexpr (!(use_pk ? SqlgenPrimaryKeyField<FieldType> : SqlgenForeignKeyField<FieldType>))
-            {
-                result[idx++] = m;
-            }
-        }
+            (
+                [&]() consteval
+                {
+                    constexpr auto m = members_v<DTO>[Is];
+                    using RawFieldType = [:std::meta::type_of(m):];
+                    using FieldType = std::remove_cvref_t<RawFieldType>;
+                    if constexpr (!(use_pk ? is_dto_primary_key_at<DTO, Is>() : SqlgenForeignKeyField<FieldType>))
+                    {
+                        result[idx++] = m;
+                    }
+                }(),
+                ...);
+        }(std::make_index_sequence<N>{});
         return result;
     }
 

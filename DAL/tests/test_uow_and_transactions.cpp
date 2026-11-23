@@ -875,6 +875,7 @@ namespace
     struct StringPairRowDTO
     {
         static constexpr const char* tablename = "StringPairRows";
+        static constexpr bool composite_primary_key = true;
         sqlgen::ForeignKey<std::string, StringPartKeyDTO, "val"> part_a{};
         sqlgen::ForeignKey<std::string, StringPartKeyDTO, "val"> part_b{};
         std::string payload{};

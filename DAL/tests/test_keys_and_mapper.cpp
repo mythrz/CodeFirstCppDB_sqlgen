@@ -580,6 +580,7 @@ namespace
     struct Order_ProductDTO
     {
         static constexpr auto tablename = "Order_Product";
+        static constexpr bool composite_primary_key = true;
         sqlgen::ForeignKey<std::int32_t, CustomOrderDTO, "order_id"> order_fk{ 0 };
         sqlgen::ForeignKey<std::int32_t, CustomProductDTO, "product_id"> product_fk{ 0 };
         std::int32_t quantity{ 1 };
@@ -772,6 +773,7 @@ namespace
     struct PocoTenantMetric
     {
         static constexpr auto tablename = "PocoTenantMetrics";
+        static constexpr bool composite_primary_key = true;
         sqlgen::ForeignKey<std::string, PocoDocument, "doc_slug"> tenant;
         sqlgen::ForeignKey<std::int64_t, PocoEvent, "event_id"> metric_id{ 0 };
         std::string label;

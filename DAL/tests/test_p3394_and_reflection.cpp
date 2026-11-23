@@ -200,4 +200,114 @@ namespace
         EXPECT_EQ(hydrated.getSku(), "GOOD-SKU");
         EXPECT_TRUE(hydrated.isActive());
     }
+
+    // =========================================================================
+    // Phase 50 (P1): Annotation Composition & Explicit Composite PK Rules
+    // =========================================================================
+
+    struct[[= DAL::Schema::table{ std::define_static_string("ComposedProfiles") }]] ComposedUniqueFkProfile
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        [[= DAL::Schema::unique{}]][[= DAL::Schema::references<AnnotatedAuthor>{ std::define_static_string("id") }]] std::int32_t
+            author_id = 0;
+        std::string bio;
+    };
+
+    struct[[= DAL::Schema::table{ std::define_static_string("SharedPkSettings") }]] SharedPkFkSetting
+    {
+        [[= DAL::Schema::primary_key{
+            false }]][[= DAL::Schema::references<AnnotatedAuthor>{ std::define_static_string("id") }]] std::int32_t author_id = 0;
+        std::string theme;
+    };
+
+    struct[[= DAL::Schema::table{ std::define_static_string("AnnotatedAuthorArticles") }]] ExplicitCompositeAnnotatedLink
+    {
+        [[= DAL::Schema::primary_key{
+            false }]][[= DAL::Schema::references<AnnotatedAuthor>{ std::define_static_string("id") }]] std::int32_t author_id = 0;
+        [[= DAL::Schema::primary_key{
+            false }]][[= DAL::Schema::references<AnnotatedArticle>{ std::define_static_string("id") }]] std::int32_t article_id = 0;
+        std::string role;
+    };
+
+    struct[[= DAL::Schema::table{ std::define_static_string("UnmarkedTwoFkEvents") }]] UnmarkedTwoFkEvent
+    {
+        [[= DAL::Schema::references<AnnotatedAuthor>{ std::define_static_string("id") }]] std::int32_t author_id = 0;
+        [[= DAL::Schema::references<AnnotatedArticle>{ std::define_static_string("id") }]] std::int32_t article_id = 0;
+        std::string event_kind;
+    };
+
+    struct UnmarkedRawTwoFkDTO
+    {
+        static constexpr auto tablename = "UnmarkedRawTwoFk";
+        sqlgen::ForeignKey<std::int32_t, PocoUser, "user_id"> user_id{ 0 };
+        sqlgen::ForeignKey<std::int32_t, PocoRole, "role_id"> role_id{ 0 };
+        std::string note;
+    };
+
+    struct ComposedAnnotationContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<ComposedUniqueFkProfile> profiles{ this };
+        Set<SharedPkFkSetting> settings{ this };
+        Set<ExplicitCompositeAnnotatedLink> links{ this };
+        Set<AnnotatedArticle> articles{ this };
+        Set<AnnotatedAuthor> authors{ this };
+
+        explicit ComposedAnnotationContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(Phase50SchemaSafetyTest, ComposedUniqueFkSharedPkFkAndExplicitCompositePk)
+    {
+        // 2+ FKs without explicit PK or composite_primary_key MUST NOT silently become a composite PK.
+        static_assert(!DAL::Schema::CompositePrimaryKey<DAL::Schema::SchemaOf_t<UnmarkedTwoFkEvent>>);
+        static_assert(!DAL::Schema::RelationalEntity<DAL::Schema::SchemaOf_t<UnmarkedTwoFkEvent>>);
+        static_assert(!DAL::Schema::CompositePrimaryKey<UnmarkedRawTwoFkDTO>);
+        static_assert(!DAL::Schema::RelationalEntity<UnmarkedRawTwoFkDTO>);
+
+        // Explicit composite PK + FK on annotated entity satisfies CompositePrimaryKey.
+        static_assert(DAL::Schema::CompositePrimaryKey<DAL::Schema::SchemaOf_t<ExplicitCompositeAnnotatedLink>>);
+        static_assert(DAL::Schema::SinglePrimaryKey<DAL::Schema::SchemaOf_t<SharedPkFkSetting>>);
+
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        ComposedAnnotationContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        auto author = db.authors.add_returning(AnnotatedAuthor{ .id = 0, .handle = "@grace", .name = "Grace" });
+        ASSERT_TRUE(author.has_value()) << author.error().to_string();
+        auto article = db.articles.add_returning(AnnotatedArticle{ .id = 0, .author_id = author->id, .title = "Compilers" });
+        ASSERT_TRUE(article.has_value()) << article.error().to_string();
+
+        // 1. [[=unique]] + [[=references]] enforces BOTH FK and UNIQUE.
+        EXPECT_FALSE(db.profiles.add(ComposedUniqueFkProfile{ .id = 0, .author_id = 999, .bio = "BadFK" }).has_value());
+        ASSERT_TRUE(db.profiles.add(ComposedUniqueFkProfile{ .id = 0, .author_id = author->id, .bio = "First" }).has_value());
+        auto dupProfile = db.profiles.add(ComposedUniqueFkProfile{ .id = 0, .author_id = author->id, .bio = "Second" });
+        ASSERT_FALSE(dupProfile.has_value());
+        EXPECT_EQ(dupProfile.error().code, Core::DbErrorCode::DuplicateKey);
+
+        // 2. [[=primary_key{false}]] + [[=references]] enforces BOTH PK and FK (1:1 shared PK).
+        EXPECT_FALSE(db.settings.add(SharedPkFkSetting{ .author_id = 999, .theme = "Dark" }).has_value());
+        ASSERT_TRUE(db.settings.add(SharedPkFkSetting{ .author_id = author->id, .theme = "Dark" }).has_value());
+        auto dupSetting = db.settings.add(SharedPkFkSetting{ .author_id = author->id, .theme = "Light" });
+        ASSERT_FALSE(dupSetting.has_value());
+        EXPECT_EQ(dupSetting.error().code, Core::DbErrorCode::DuplicateKey);
+        auto settingInfo = db.table_info("SharedPkSettings");
+        ASSERT_TRUE(settingInfo.has_value());
+        EXPECT_EQ((*settingInfo)[0].pk_index, 1);
+
+        // 3. Explicit composite [[=primary_key{false}]] + [[=references]] junction table.
+        EXPECT_FALSE(db.links.add(ExplicitCompositeAnnotatedLink{ .author_id = 999, .article_id = article->id, .role = "X" }).has_value());
+        ASSERT_TRUE(
+            db.links.add(ExplicitCompositeAnnotatedLink{ .author_id = author->id, .article_id = article->id, .role = "Lead" }).has_value());
+        auto dupLink = db.links.add(ExplicitCompositeAnnotatedLink{ .author_id = author->id, .article_id = article->id, .role = "Dup" });
+        ASSERT_FALSE(dupLink.has_value());
+        EXPECT_EQ(dupLink.error().code, Core::DbErrorCode::DuplicateKey);
+        auto linkInfo = db.table_info("AnnotatedAuthorArticles");
+        ASSERT_TRUE(linkInfo.has_value());
+        EXPECT_EQ((*linkInfo)[0].pk_index, 1);
+        EXPECT_EQ((*linkInfo)[1].pk_index, 2);
+        EXPECT_EQ((*linkInfo)[2].pk_index, 0);
+    }
 } // namespace

@@ -15,6 +15,7 @@ export namespace DAL::Schema
     struct Person_SomethingDTO
     {
         static constexpr auto tablename = "Person_Something";
+        static constexpr bool composite_primary_key = true;
         sqlgen::ForeignKey<std::int32_t, PersonDTO, "id"> person_id{ 0 };
         sqlgen::ForeignKey<std::int32_t, SomethingDTO, "id"> something_id{ 0 };
         std::string association_type;

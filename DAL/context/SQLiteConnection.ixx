@@ -133,49 +133,79 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot create table: database connection is closed") };
             }
-            if constexpr (Schema::CompositePrimaryKey<DTO>)
-            {
-                static constexpr auto key_members = Schema::key_members_of<DTO>();
-                std::string cols;
-                std::size_t idx = 0;
-                template for (constexpr auto m : key_members)
-                {
-                    if (idx > 0)
-                    {
-                        cols += ", ";
-                    }
-                    cols += std::format("\"{}\"", std::meta::identifier_of(m));
-                    ++idx;
-                }
 
-                // Clear per-column PRIMARY KEY markers so multi-PrimaryKey and multi-ForeignKey DTOs emit one table-level PRIMARY KEY
-                // constraint.
+            constexpr bool has_unique_flags = requires { DTO::unique_field_flags; };
+            constexpr bool has_pk_flags = requires { DTO::pk_field_flags; };
+
+            if constexpr (Schema::CompositePrimaryKey<DTO> || has_unique_flags || has_pk_flags)
+            {
                 auto stmt = sqlgen::transpilation::to_create_table<DTO>(true);
-                for (auto& col : stmt.columns)
+                for (std::size_t i = 0; i < stmt.columns.size(); ++i)
                 {
-                    col.type.visit(
-                        [](auto& t)
+                    stmt.columns[i].type.visit(
+                        [&](auto& t)
                         {
-                            t.properties.primary = false;
-                            t.properties.auto_incr = false;
+                            if constexpr (Schema::CompositePrimaryKey<DTO>)
+                            {
+                                // Clear per-column PRIMARY KEY markers so multi-PrimaryKey and
+                                // composite FK junction DTOs emit one table-level PRIMARY KEY.
+                                t.properties.primary = false;
+                                t.properties.auto_incr = false;
+                            }
+                            else if constexpr (has_pk_flags)
+                            {
+                                if (i < DTO::pk_field_flags.size() && DTO::pk_field_flags[i])
+                                {
+                                    t.properties.primary = true;
+                                }
+                            }
+                            if constexpr (has_unique_flags)
+                            {
+                                if (i < DTO::unique_field_flags.size() && DTO::unique_field_flags[i])
+                                {
+                                    t.properties.unique = true;
+                                }
+                            }
                         });
                 }
-                std::string create_sql = (*conn_)->to_sql(stmt);
-                if (const auto close_pos = create_sql.rfind(");"); close_pos != std::string::npos)
-                {
-                    create_sql.insert(close_pos, std::format(", PRIMARY KEY ({})", cols));
-                }
-                if (auto res = (*conn_)->execute(create_sql); !res)
-                {
-                    return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
-                }
 
-                const std::string_view table_name = DTO::tablename;
-                const std::string index_sql =
-                    std::format("CREATE UNIQUE INDEX IF NOT EXISTS \"ux_{}_composite_pk\" ON \"{}\" ({});", table_name, table_name, cols);
-                if (auto idx_res = (*conn_)->execute(index_sql); !idx_res)
+                std::string create_sql = (*conn_)->to_sql(stmt);
+                if constexpr (Schema::CompositePrimaryKey<DTO>)
                 {
-                    return std::unexpected<Core::DbError>{ map_sqlite_error(idx_res.error().what()) };
+                    static constexpr auto key_members = Schema::key_members_of<DTO>();
+                    std::string cols;
+                    std::size_t idx = 0;
+                    template for (constexpr auto m : key_members)
+                    {
+                        if (idx > 0)
+                        {
+                            cols += ", ";
+                        }
+                        cols += std::format("\"{}\"", std::meta::identifier_of(m));
+                        ++idx;
+                    }
+                    if (const auto close_pos = create_sql.rfind(");"); close_pos != std::string::npos)
+                    {
+                        create_sql.insert(close_pos, std::format(", PRIMARY KEY ({})", cols));
+                    }
+                    if (auto res = (*conn_)->execute(create_sql); !res)
+                    {
+                        return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
+                    }
+                    const std::string_view table_name = DTO::tablename;
+                    const std::string index_sql = std::format(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS \"ux_{}_composite_pk\" ON \"{}\" ({});", table_name, table_name, cols);
+                    if (auto idx_res = (*conn_)->execute(index_sql); !idx_res)
+                    {
+                        return std::unexpected<Core::DbError>{ map_sqlite_error(idx_res.error().what()) };
+                    }
+                }
+                else
+                {
+                    if (auto res = (*conn_)->execute(create_sql); !res)
+                    {
+                        return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
+                    }
                 }
             }
             else
@@ -870,6 +900,56 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
                     std::format("Failed to activate WAL journal mode (effective mode: '{}')", effective)) };
+            }
+            return {};
+        }
+
+        [[nodiscard]] std::expected<std::int32_t, Core::DbError> try_user_version() const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            auto res = query_rows("PRAGMA user_version;");
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ res.error() };
+            }
+            if (res->rows.empty() || res->rows[0].cells.empty() || !std::holds_alternative<std::int64_t>(res->rows[0].cells[0]))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("PRAGMA user_version did not return an integer") };
+            }
+            const std::int64_t val = std::get<std::int64_t>(res->rows[0].cells[0]);
+            if (!std::in_range<std::int32_t>(val))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("PRAGMA user_version exceeds int32_t range") };
+            }
+            return static_cast<std::int32_t>(val);
+        }
+
+        [[nodiscard]] std::expected<void, Core::DbError> set_user_version(std::int32_t version)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (version < 0)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Schema user_version cannot be negative") };
+            }
+            if (auto res = execute_raw(std::format("PRAGMA user_version = {};", version)); !res)
+            {
+                return res;
+            }
+            auto readback = try_user_version();
+            if (!readback)
+            {
+                return std::unexpected<Core::DbError>{ readback.error() };
+            }
+            if (*readback != version)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    std::format("Failed to persist PRAGMA user_version = {} (read back {})", version, *readback)) };
             }
             return {};
         }

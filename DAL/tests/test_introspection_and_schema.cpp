@@ -393,4 +393,118 @@ namespace
 
         std::filesystem::remove(dbPath);
     }
+
+    // =========================================================================
+    // Phase 50 (P1): Transactional ensure_created() & PRAGMA user_version Hooks
+    // =========================================================================
+
+    struct FirstGoodSchemaDTO
+    {
+        static constexpr auto tablename = "FirstGoodSchema";
+        sqlgen::PrimaryKey<std::int32_t, true> id{ 0 };
+        std::string name;
+    };
+
+    struct SecondBadSchemaDTO
+    {
+        // Deliberately invalid quoted table name to force DDL failure on second table.
+        static constexpr auto tablename = "Bad\"Table";
+        sqlgen::PrimaryKey<std::int32_t, true> id{ 0 };
+        std::string name;
+    };
+
+    struct PartialFailSchemaContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<FirstGoodSchemaDTO> first{ this };
+        Set<SecondBadSchemaDTO> second{ this };
+
+        explicit PartialFailSchemaContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(Phase50SchemaVersioningTest, EnsureCreatedIsTransactionalAndRollsBackEarlierTablesOnFailure)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        PartialFailSchemaContext db(connRes.value());
+
+        auto res = db.ensure_created();
+        ASSERT_FALSE(res.has_value());
+        EXPECT_FALSE(db.in_transaction());
+
+        // FirstGoodSchema MUST NOT be left behind after SecondBadSchema failed!
+        auto tablesRes = db.list_tables();
+        ASSERT_TRUE(tablesRes.has_value());
+        EXPECT_FALSE(std::ranges::contains(*tablesRes, std::string_view{ "FirstGoodSchema" }));
+    }
+
+    TEST(Phase50SchemaVersioningTest, UserVersionAndTransactionalMigrateToHook)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+
+        auto v0 = db.try_user_version();
+        ASSERT_TRUE(v0.has_value());
+        EXPECT_EQ(*v0, 0);
+
+        // Upgrade 0 -> 1: creates base tables + adds an extra column via migration callback.
+        int calls = 0;
+        auto m1 = db.migrate_to(
+            1,
+            [&](std::int32_t from_v, std::int32_t to_v) -> std::expected<void, Core::DbError>
+            {
+                ++calls;
+                EXPECT_EQ(from_v, 0);
+                EXPECT_EQ(to_v, 1);
+                return db.execute_raw("ALTER TABLE Person ADD COLUMN nickname TEXT;");
+            });
+        ASSERT_TRUE(m1.has_value()) << m1.error().to_string();
+        EXPECT_EQ(calls, 1);
+        EXPECT_EQ(db.try_user_version().value(), 1);
+
+        // Idempotent re-run at version 1 must not re-invoke migration callback.
+        auto m1Again = db.migrate_to(
+            1,
+            [&](std::int32_t, std::int32_t) -> std::expected<void, Core::DbError>
+            {
+                ++calls;
+                return {};
+            });
+        ASSERT_TRUE(m1Again.has_value());
+        EXPECT_EQ(calls, 1);
+
+        // Failed migration 1 -> 2 must roll back both DDL changes and user_version.
+        auto m2Fail = db.migrate_to(
+            2,
+            [&](std::int32_t from_v, std::int32_t to_v) -> std::expected<void, Core::DbError>
+            {
+                EXPECT_EQ(from_v, 1);
+                EXPECT_EQ(to_v, 2);
+                auto ok = db.execute_raw("CREATE TABLE TempV2 (id INTEGER PRIMARY KEY);");
+                if (!ok)
+                {
+                    return ok;
+                }
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("abort v2 migration") };
+            });
+        ASSERT_FALSE(m2Fail.has_value());
+        EXPECT_EQ(db.try_user_version().value(), 1);
+        auto tablesAfterFail = db.list_tables();
+        ASSERT_TRUE(tablesAfterFail.has_value());
+        EXPECT_FALSE(std::ranges::contains(*tablesAfterFail, std::string_view{ "TempV2" }));
+
+        // Downgrade 1 -> 0 must be rejected cleanly.
+        auto downgrade = db.migrate_to(
+            0,
+            [](std::int32_t, std::int32_t) -> std::expected<void, Core::DbError>
+            {
+                return {};
+            });
+        ASSERT_FALSE(downgrade.has_value());
+        EXPECT_EQ(downgrade.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(db.try_user_version().value(), 1);
+    }
 } // namespace

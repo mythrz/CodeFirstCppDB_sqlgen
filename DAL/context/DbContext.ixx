@@ -199,21 +199,34 @@ export namespace DAL
             static constexpr auto dbset_members = dbset_members_of<DerivedType>();
             static constexpr auto order = topological_dbset_order<DerivedType>();
 
-            std::expected<void, Core::DbError> result{};
-            template for (constexpr std::size_t idx : order)
             {
-                constexpr auto m = dbset_members[idx];
-                using RawMemberType = [:std::meta::type_of(m):];
-                using MemberType = std::remove_cvref_t<RawMemberType>;
-                if (result)
+                detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(self.conn_);
+                if (auto begin_res = tx_guard.begin(); !begin_res)
                 {
-                    result = self.conn_->template ensure_table_created<typename MemberType::DTOType>();
+                    return begin_res;
                 }
-            }
 
-            if (!result)
-            {
-                return result;
+                std::expected<void, Core::DbError> result{};
+                template for (constexpr std::size_t idx : order)
+                {
+                    constexpr auto m = dbset_members[idx];
+                    using RawMemberType = [:std::meta::type_of(m):];
+                    using MemberType = std::remove_cvref_t<RawMemberType>;
+                    if (result)
+                    {
+                        result = self.conn_->template ensure_table_created<typename MemberType::DTOType>();
+                    }
+                }
+
+                if (!result)
+                {
+                    return result;
+                }
+
+                if (auto commit_res = tx_guard.commit(); !commit_res)
+                {
+                    return commit_res;
+                }
             }
 
             return self.conn_->enable_foreign_keys();
@@ -236,16 +249,133 @@ export namespace DAL
                 }...
             };
 
-            for (std::size_t idx : order)
             {
-                auto res = creators[idx]();
-                if (!res)
+                detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn_);
+                if (auto begin_res = tx_guard.begin(); !begin_res)
                 {
-                    return res;
+                    return begin_res;
+                }
+
+                for (std::size_t idx : order)
+                {
+                    auto res = creators[idx]();
+                    if (!res)
+                    {
+                        return res;
+                    }
+                }
+
+                if (auto commit_res = tx_guard.commit(); !commit_res)
+                {
+                    return commit_res;
                 }
             }
 
             return conn_->enable_foreign_keys();
+        }
+
+        [[nodiscard]] std::expected<std::int32_t, Core::DbError> try_user_version() const
+        {
+            if (!is_connected())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot read schema version: database connection is closed") };
+            }
+            if constexpr (requires(const ConnectionHandle& c) { c.try_user_version(); })
+            {
+                return conn_->try_user_version();
+            }
+            return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Connection does not support PRAGMA user_version") };
+        }
+
+        [[nodiscard]] std::expected<void, Core::DbError> set_user_version(std::int32_t version)
+        {
+            if (!is_connected())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot update schema version: database connection is closed") };
+            }
+            if constexpr (requires(ConnectionHandle& c, std::int32_t v) { c.set_user_version(v); })
+            {
+                return conn_->set_user_version(version);
+            }
+            return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Connection does not support PRAGMA user_version") };
+        }
+
+        // Transactional PRAGMA user_version schema-versioning / migration hook.
+        // Ensures base tables exist, invokes migration_fn(current_version, target_version) when
+        // current_version < target_version, and persists target_version atomically on commit.
+        template<typename Self, typename Fn>
+        [[nodiscard]] std::expected<void, Core::DbError> migrate_to(this Self&& self, std::int32_t target_version, Fn&& migration_fn)
+        {
+            if (!self.is_connected())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot migrate schema: database connection is closed") };
+            }
+            if (target_version < 0)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    "Target schema user_version cannot be negative") };
+            }
+
+            auto current_res = self.try_user_version();
+            if (!current_res)
+            {
+                return std::unexpected<Core::DbError>{ current_res.error() };
+            }
+            const std::int32_t current_version = *current_res;
+            if (current_version > target_version)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    std::format(
+                        "Database schema version {} is newer than target version {} (downgrade not supported)",
+                        current_version,
+                        target_version)) };
+            }
+            if (current_version == target_version)
+            {
+                return self.ensure_created();
+            }
+
+            {
+                detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(self.conn_);
+                if (auto begin_res = tx_guard.begin(); !begin_res)
+                {
+                    return begin_res;
+                }
+
+                if (auto ec_res = self.ensure_created(); !ec_res)
+                {
+                    return ec_res;
+                }
+
+                using FnResult = std::invoke_result_t<Fn, std::int32_t, std::int32_t>;
+                if constexpr (std::is_void_v<FnResult>)
+                {
+                    std::invoke(std::forward<Fn>(migration_fn), current_version, target_version);
+                }
+                else
+                {
+                    auto mig_res = std::invoke(std::forward<Fn>(migration_fn), current_version, target_version);
+                    if (!mig_res)
+                    {
+                        return mig_res;
+                    }
+                }
+
+                if (auto ver_res = self.set_user_version(target_version); !ver_res)
+                {
+                    return ver_res;
+                }
+
+                if (auto commit_res = tx_guard.commit(); !commit_res)
+                {
+                    return commit_res;
+                }
+            }
+
+            return self.conn_->enable_foreign_keys();
         }
 
         template<typename Self>

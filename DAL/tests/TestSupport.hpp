@@ -431,6 +431,7 @@ namespace
     struct PocoUserRole
     {
         static constexpr auto tablename = "PocoUserRoles";
+        static constexpr bool composite_primary_key = true;
         sqlgen::ForeignKey<std::int32_t, PocoUser, "user_id"> user_id{ 0 };
         sqlgen::ForeignKey<std::int32_t, PocoRole, "role_id"> role_id{ 0 };
         std::string assigned_by;

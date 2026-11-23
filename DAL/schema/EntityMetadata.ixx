@@ -34,27 +34,12 @@ export namespace DAL::Schema
 
         static consteval auto key_members()
         {
-            std::array<std::meta::info, key_arity> result{};
-            std::size_t idx = 0;
-            constexpr bool use_pk = (primary_key_count<DTO>() > 0);
-
-            template for (constexpr auto m : members_v<DTO>)
-            {
-                using RawFieldType = [:std::meta::type_of(m):];
-                using FieldType = std::remove_cvref_t<RawFieldType>;
-                if constexpr (use_pk ? SqlgenPrimaryKeyField<FieldType> : SqlgenForeignKeyField<FieldType>)
-                {
-                    if (idx < key_arity)
-                    {
-                        result[idx++] = m;
-                    }
-                }
-            }
-            if (idx != key_arity)
+            static constexpr auto km = key_members_of<DTO>();
+            if constexpr (km.size() != key_arity)
             {
                 throw std::invalid_argument("EntityMetadata: DTO key field count does not match Domain::Key::arity");
             }
-            return result;
+            return km;
         }
 
         static consteval auto key_column_names()
