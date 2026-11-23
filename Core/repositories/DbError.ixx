@@ -20,15 +20,7 @@ export namespace Core
         int native_code{ 0 };
         std::string trace{};
 
-        [[nodiscard]] static std::string capture_debug_trace()
-        {
-#if defined(CODEFIRST_ENABLE_STACKTRACE) && !defined(NDEBUG)
-            const auto st = std::stacktrace::current(2, 8);
-            return st.empty() ? std::string{} : std::to_string(st);
-#else
-            return {};
-#endif
-        }
+        [[nodiscard]] static std::string capture_debug_trace();
 
         [[nodiscard]] static DbError create(DbErrorCode err_code, std::string msg, int sql_native_code = 0)
         {

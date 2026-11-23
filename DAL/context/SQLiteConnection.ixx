@@ -892,9 +892,9 @@ export namespace DAL
             const std::string& effective = std::get<std::string>(res->rows[0].cells[0]);
             std::string lower;
             lower.reserve(effective.size());
-            for (unsigned char ch : effective)
+            for (const char raw_ch : effective)
             {
-                lower.push_back(static_cast<char>(std::tolower(ch)));
+                lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(raw_ch))));
             }
             if (lower != "wal")
             {
@@ -1262,8 +1262,9 @@ export namespace DAL
             {
                 return false;
             }
-            for (unsigned char ch : name)
+            for (const char raw_ch : name)
             {
+                const unsigned char ch = static_cast<unsigned char>(raw_ch);
                 const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_';
                 if (!ok)
                 {

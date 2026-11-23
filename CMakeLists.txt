@@ -7,6 +7,27 @@ option(CODEFIRST_INCLUDE_SAMPLES "Build CodeFirstCppDB sample entities and repos
 option(CODEFIRST_ENABLE_CONTRACTS "Enable C++26 pre/post contracts on invariant checks" OFF)
 option(CODEFIRST_BUILD_SHARED "Build CodeFirstCppDB libraries and bundled dependencies as shared libraries" OFF)
 option(CODEFIRST_ENABLE_STACKTRACE "Enable Debug std::stacktrace capture in Core::DbError" ON)
+
+set(_codefirst_parent_disables_exceptions OFF)
+get_directory_property(_codefirst_dir_compile_options COMPILE_OPTIONS)
+string(JOIN " " _codefirst_inherited_flags
+    "${CMAKE_CXX_FLAGS}"
+    "${CMAKE_CXX_FLAGS_DEBUG}"
+    "${CMAKE_CXX_FLAGS_RELEASE}"
+    "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}"
+    "${CMAKE_CXX_FLAGS_MINSIZEREL}"
+    "${CMAKE_CXX_FLAGS_PROFILE}"
+    "${_codefirst_dir_compile_options}"
+)
+if(_codefirst_inherited_flags MATCHES "(^|[ ;:,])-fno-exceptions($|[ ;:,>])")
+    set(_codefirst_parent_disables_exceptions ON)
+endif()
+option(
+    CODEFIRST_EXPLICIT_EXCEPTIONS
+    "Export -fexceptions PUBLIC on CodeFirstCppDB_Core (auto-enabled when parent sets -fno-exceptions)"
+    ${_codefirst_parent_disables_exceptions}
+)
+
 set(CODEFIRST_SQLITE_TARGET "" CACHE STRING "Optional existing CMake SQLite target to use instead of find_package(SQLite3)")
 if(CODEFIRST_BUILD_TESTS OR CODEFIRST_BUILD_EXAMPLES)
     set(CODEFIRST_INCLUDE_SAMPLES ON)

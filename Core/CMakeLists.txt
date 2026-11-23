@@ -11,25 +11,27 @@ add_library(CodeFirst::Core ALIAS CodeFirstCppDB_Core)
 
 target_sources(CodeFirstCppDB_Core
     PUBLIC
-    FILE_SET CXX_MODULES FILES
-    Id.ixx
-    Key.ixx
-    repositories/DbError.ixx
-    repositories/IGenericRepository.ixx
-    core.ixx
+        FILE_SET CXX_MODULES FILES
+            Id.ixx
+            Key.ixx
+            repositories/DbError.ixx
+            repositories/IGenericRepository.ixx
+            core.ixx
+    PRIVATE
+        repositories/DbError.cpp
 )
 
 target_compile_features(CodeFirstCppDB_Core PUBLIC cxx_std_26)
 
 target_compile_definitions(CodeFirstCppDB_Core
-    PUBLIC
+    PRIVATE
         $<$<AND:$<BOOL:${CODEFIRST_ENABLE_STACKTRACE}>,$<CONFIG:Debug>>:CODEFIRST_ENABLE_STACKTRACE>
 )
 
 target_compile_options(CodeFirstCppDB_Core
     PUBLIC
         $<$<CXX_COMPILER_ID:GNU>:-freflection>
-        $<$<CXX_COMPILER_ID:GNU>:-fexceptions>
+        $<$<AND:$<BOOL:${CODEFIRST_EXPLICIT_EXCEPTIONS}>,$<CXX_COMPILER_ID:GNU>>:-fexceptions>
         $<$<AND:$<BOOL:${CODEFIRST_ENABLE_CONTRACTS}>,$<CXX_COMPILER_ID:GNU>>:-fcontracts>
     PRIVATE
         $<$<CXX_COMPILER_ID:GNU>:-Wall;-Wextra;-Wpedantic;-Wshadow>
