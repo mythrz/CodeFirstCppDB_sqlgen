@@ -57,6 +57,11 @@ export namespace DAL
         {
         }
 
+        SQLiteConnection(const SQLiteConnection&) = delete;
+        SQLiteConnection& operator=(const SQLiteConnection&) = delete;
+        SQLiteConnection(SQLiteConnection&&) = delete;
+        SQLiteConnection& operator=(SQLiteConnection&&) = delete;
+
         ~SQLiteConnection() noexcept
         {
             close();
@@ -844,10 +849,27 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto res = (*conn_)->execute("PRAGMA journal_mode = WAL;");
+            auto res = query_rows("PRAGMA journal_mode = WAL;");
             if (!res)
             {
-                return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
+                return std::unexpected<Core::DbError>{ res.error() };
+            }
+            if (res->rows.empty() || res->rows[0].cells.empty() || !std::holds_alternative<std::string>(res->rows[0].cells[0]))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                    "PRAGMA journal_mode = WAL did not return an effective journal mode") };
+            }
+            const std::string& effective = std::get<std::string>(res->rows[0].cells[0]);
+            std::string lower;
+            lower.reserve(effective.size());
+            for (unsigned char ch : effective)
+            {
+                lower.push_back(static_cast<char>(std::tolower(ch)));
+            }
+            if (lower != "wal")
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    std::format("Failed to activate WAL journal mode (effective mode: '{}')", effective)) };
             }
             return {};
         }

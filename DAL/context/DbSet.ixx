@@ -257,9 +257,7 @@ export namespace DAL
         struct TrackedEntityEntry
         {
             std::shared_ptr<void> owned_instance{};
-            const void* borrowed_instance{ nullptr };
-            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&, const void*)>
-                detect_fn{};
+            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&)> detect_fn{};
             std::function<std::shared_ptr<void>()> snapshot_baseline_fn{};
             std::function<void(const std::shared_ptr<void>&)> restore_baseline_fn{};
         };
@@ -268,20 +266,28 @@ export namespace DAL
         {
             std::size_t saved_pending_size{ 0 };
             std::map<std::pair<std::type_index, std::string>, std::shared_ptr<void>> baselines{};
+            std::map<std::pair<std::type_index, std::string>, TrackedEntityEntry> saved_entries{};
         };
 
         struct ContextState
         {
             std::vector<std::move_only_function<std::expected<void, Core::DbError>()>> pending_ops_{};
+            std::vector<std::size_t> pending_base_stack_{};
             bool defer_changes_{ false };
             bool change_tracking_enabled_{ false };
             std::map<std::pair<std::type_index, std::string>, TrackedEntityEntry> tracked_entries_{};
             std::optional<BaselineCheckpoint> outer_tx_checkpoint_{};
 
+            [[nodiscard]] std::size_t current_pending_base() const noexcept
+            {
+                return pending_base_stack_.empty() ? 0u : pending_base_stack_.back();
+            }
+
             [[nodiscard]] BaselineCheckpoint capture_checkpoint() const
             {
                 BaselineCheckpoint cp;
                 cp.saved_pending_size = pending_ops_.size();
+                cp.saved_entries = tracked_entries_;
                 for (const auto& [k, entry] : tracked_entries_)
                 {
                     if (entry.snapshot_baseline_fn)
@@ -294,6 +300,13 @@ export namespace DAL
 
             void restore_baselines(const BaselineCheckpoint& cp)
             {
+                for (const auto& [k, entry] : cp.saved_entries)
+                {
+                    if (!tracked_entries_.contains(k))
+                    {
+                        tracked_entries_.emplace(k, entry);
+                    }
+                }
                 for (const auto& [k, snap] : cp.baselines)
                 {
                     auto it = tracked_entries_.find(k);
@@ -306,11 +319,45 @@ export namespace DAL
 
             void untrack_key(std::type_index type, const std::string& key_repr) noexcept
             {
-                tracked_entries_.erase(std::pair<std::type_index, std::string>{ type, key_repr });
+                const auto map_key = std::pair<std::type_index, std::string>{ type, key_repr };
+                auto it = tracked_entries_.find(map_key);
+                if (it == tracked_entries_.end())
+                {
+                    return;
+                }
+                if (outer_tx_checkpoint_.has_value())
+                {
+                    if (!outer_tx_checkpoint_->saved_entries.contains(map_key))
+                    {
+                        outer_tx_checkpoint_->saved_entries.emplace(map_key, it->second);
+                    }
+                    if (it->second.snapshot_baseline_fn && !outer_tx_checkpoint_->baselines.contains(map_key))
+                    {
+                        outer_tx_checkpoint_->baselines.emplace(map_key, it->second.snapshot_baseline_fn());
+                    }
+                }
+                tracked_entries_.erase(it);
             }
 
             void untrack_type(std::type_index type) noexcept
             {
+                if (outer_tx_checkpoint_.has_value())
+                {
+                    for (const auto& [k, entry] : tracked_entries_)
+                    {
+                        if (k.first == type)
+                        {
+                            if (!outer_tx_checkpoint_->saved_entries.contains(k))
+                            {
+                                outer_tx_checkpoint_->saved_entries.emplace(k, entry);
+                            }
+                            if (entry.snapshot_baseline_fn && !outer_tx_checkpoint_->baselines.contains(k))
+                            {
+                                outer_tx_checkpoint_->baselines.emplace(k, entry.snapshot_baseline_fn());
+                            }
+                        }
+                    }
+                }
                 std::erase_if(
                     tracked_entries_,
                     [type](const auto& kv)
@@ -324,9 +371,7 @@ export namespace DAL
                 std::string key_repr,
                 bool refresh_baseline,
                 std::shared_ptr<void> owned,
-                const void* borrowed,
-                std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&, const void*)>
-                    detect_fn,
+                std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&)> detect_fn,
                 std::function<std::shared_ptr<void>()> snapshot_baseline_fn = {},
                 std::function<void(const std::shared_ptr<void>&)> restore_baseline_fn = {})
             {
@@ -340,11 +385,8 @@ export namespace DAL
                     }
                     tracked_entries_.emplace(
                         std::move(map_key),
-                        TrackedEntityEntry{ std::move(owned),
-                                            borrowed,
-                                            std::move(detect_fn),
-                                            std::move(snapshot_baseline_fn),
-                                            std::move(restore_baseline_fn) });
+                        TrackedEntityEntry{
+                            std::move(owned), std::move(detect_fn), std::move(snapshot_baseline_fn), std::move(restore_baseline_fn) });
                     return;
                 }
 
@@ -357,10 +399,6 @@ export namespace DAL
                 if (owned)
                 {
                     it->second.owned_instance = std::move(owned);
-                }
-                if (borrowed != nullptr)
-                {
-                    it->second.borrowed_instance = borrowed;
                 }
                 if (refresh_baseline && detect_fn)
                 {
@@ -1885,15 +1923,20 @@ export namespace DAL
             return res;
         }
 
-        // Removes an entity by primary key (or stages if deferred)
+        // Removes an entity by primary key (or stages if deferred).
+        // Tracker eviction is deferred until SQLite confirms the delete.
         [[nodiscard]] std::expected<void, Core::DbError> remove(const KeyType& id)
         {
-            untrack_key(id);
             if (should_defer())
             {
                 return stage_remove(id);
             }
-            return repo_->delete_by_id(id);
+            auto res = repo_->delete_by_id(id);
+            if (res)
+            {
+                untrack_key(id);
+            }
+            return res;
         }
 
         // Upserts a single entity: uses SQLite ON CONFLICT DO UPDATE for assigned/composite keys,
@@ -2022,11 +2065,16 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
-            untrack_key(id);
+            const std::string key_repr = format_key(id);
             if (!enqueue_op_fn_(
-                    [repo = repo_, id]()
+                    [repo = repo_, untrack_fn = untrack_fn_, id, key_repr]()
                     {
-                        return repo->delete_by_id(id);
+                        auto res = repo->delete_by_id(id);
+                        if (res && untrack_fn)
+                        {
+                            untrack_fn(std::type_index(typeid(Domain)), key_repr);
+                        }
+                        return res;
                     }))
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
@@ -2487,23 +2535,8 @@ export namespace DAL
             auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
             auto owned = std::make_shared<Domain>(std::move(entity));
             auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*owned));
-            upsert_snapshot_entry(upsert_tracked_fn_, format_key(key), false, owned, nullptr, repo_, std::move(baseline));
+            upsert_snapshot_entry(upsert_tracked_fn_, format_key(key), false, owned, repo_, std::move(baseline));
             return owned;
-        }
-
-        // Binds a caller-owned Domain instance to the context's ChangeTracker.
-        // If find()/to_vector() previously recorded an original snapshot for this key,
-        // that original snapshot is preserved so mutations before or after track() are detected.
-        [[deprecated("Use track_copy() or find_tracked() for value-owned tracking")]]
-        void track(Domain& entity) const
-        {
-            if (!upsert_tracked_fn_)
-            {
-                return;
-            }
-            auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
-            auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity));
-            upsert_snapshot_entry(upsert_tracked_fn_, format_key(key), false, nullptr, &entity, repo_, std::move(baseline));
         }
 
         // Loads an entity into the identity map and returns a shared_ptr whose mutations
@@ -2525,7 +2558,7 @@ export namespace DAL
             }
             auto shared = std::make_shared<Domain>(std::move(*loaded));
             auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*shared));
-            upsert_snapshot_entry(upsert_tracked_fn_, key_repr, true, shared, nullptr, repo_, std::move(baseline));
+            upsert_snapshot_entry(upsert_tracked_fn_, key_repr, true, shared, repo_, std::move(baseline));
             return shared;
         }
 
@@ -2544,11 +2577,20 @@ export namespace DAL
             return find_tracked(KeyType{ std::forward<Ks>(parts)... });
         }
 
-        // Returns a non-owning reference to the tracked entity in the change tracker if present (P2988)
+        // Returns a non-owning reference to the tracked entity in the change tracker if present (P2988).
+        // Returns std::nullopt if the owning DbContext/tracker has expired so references can never dangle.
         [[nodiscard]] std::optional<Domain&> find_tracked_ref(const KeyType& id) const
         {
+            if (!is_tracker_alive_fn_ || !is_tracker_alive_fn_())
+            {
+                return std::nullopt;
+            }
             auto ptr = find_tracked(id);
             if (!ptr)
+            {
+                return std::nullopt;
+            }
+            if (!find_tracked_fn_ || !find_tracked_fn_(std::type_index(typeid(Domain)), format_key(id)))
             {
                 return std::nullopt;
             }
@@ -2589,7 +2631,7 @@ export namespace DAL
                 }
                 auto shared = std::make_shared<Domain>(std::move(item));
                 auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*shared));
-                upsert_snapshot_entry(upsert_tracked_fn_, key_repr, true, shared, nullptr, repo_, std::move(baseline));
+                upsert_snapshot_entry(upsert_tracked_fn_, key_repr, true, shared, repo_, std::move(baseline));
                 result.push_back(std::move(shared));
             }
             return result;
@@ -2630,28 +2672,31 @@ export namespace DAL
             std::string,
             bool,
             std::shared_ptr<void>,
-            const void*,
-            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&, const void*)>,
+            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&)>,
             std::function<std::shared_ptr<void>()>,
             std::function<void(const std::shared_ptr<void>&)>)>;
 
         void bind_tracking_callbacks(const std::weak_ptr<detail::ContextState>& weak_state)
         {
+            is_tracker_alive_fn_ = [weak_state]() noexcept
+            {
+                return !weak_state.expired();
+            };
             is_tracking_enabled_fn_ = [weak_state]() noexcept
             {
                 auto st = weak_state.lock();
                 return st && st->change_tracking_enabled_;
             };
-            upsert_tracked_fn_ = [weak_state](
-                                     std::type_index type,
-                                     std::string key_repr,
-                                     bool refresh_baseline,
-                                     std::shared_ptr<void> owned,
-                                     const void* borrowed,
-                                     std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                                         const std::shared_ptr<void>&, const void*)> detect_fn,
-                                     std::function<std::shared_ptr<void>()> snap_fn,
-                                     std::function<void(const std::shared_ptr<void>&)> restore_fn)
+            upsert_tracked_fn_ =
+                [weak_state](
+                    std::type_index type,
+                    std::string key_repr,
+                    bool refresh_baseline,
+                    std::shared_ptr<void> owned,
+                    std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&)>
+                        detect_fn,
+                    std::function<std::shared_ptr<void>()> snap_fn,
+                    std::function<void(const std::shared_ptr<void>&)> restore_fn)
             {
                 if (auto st = weak_state.lock())
                 {
@@ -2660,7 +2705,6 @@ export namespace DAL
                         std::move(key_repr),
                         refresh_baseline,
                         std::move(owned),
-                        borrowed,
                         std::move(detect_fn),
                         std::move(snap_fn),
                         std::move(restore_fn));
@@ -2890,22 +2934,13 @@ export namespace DAL
         [[nodiscard]] static auto make_detect_fn_with(std::shared_ptr<RepoType> repo, std::shared_ptr<DTO> baseline)
         {
             return [repo, baseline = std::move(baseline)](
-                       const std::shared_ptr<void>& owned,
-                       const void* borrowed) -> std::optional<std::function<std::expected<void, Core::DbError>()>>
+                       const std::shared_ptr<void>& owned) -> std::optional<std::function<std::expected<void, Core::DbError>()>>
             {
-                const Domain* ptr = nullptr;
-                if (owned)
-                {
-                    ptr = static_cast<const Domain*>(owned.get());
-                }
-                else if (borrowed != nullptr)
-                {
-                    ptr = static_cast<const Domain*>(borrowed);
-                }
-                if (ptr == nullptr)
+                if (!owned)
                 {
                     return std::nullopt;
                 }
+                const Domain* ptr = static_cast<const Domain*>(owned.get());
 
                 DTO current_dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*ptr);
                 if (DAL::Schema::dto_equals(current_dto, *baseline))
@@ -2932,7 +2967,6 @@ export namespace DAL
             std::string key_repr,
             bool refresh_baseline,
             std::shared_ptr<Domain> owned,
-            const Domain* borrowed,
             const std::shared_ptr<RepoType>& repo,
             std::shared_ptr<DTO> baseline)
         {
@@ -2956,7 +2990,6 @@ export namespace DAL
                 std::move(key_repr),
                 refresh_baseline,
                 std::move(owned),
-                borrowed,
                 make_detect_fn_with(repo, std::move(baseline)),
                 std::move(snap_fn),
                 std::move(restore_fn));
@@ -2976,7 +3009,7 @@ export namespace DAL
             }
             auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
             auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity));
-            upsert_snapshot_entry(upsert_tracked_fn, format_key(key), true, nullptr, nullptr, repo, std::move(baseline));
+            upsert_snapshot_entry(upsert_tracked_fn, format_key(key), true, nullptr, repo, std::move(baseline));
         }
 
         std::shared_ptr<RepoType> repo_;
@@ -2984,6 +3017,7 @@ export namespace DAL
         std::shared_ptr<detail::ContextState> local_state_{};
         std::function<bool()> is_deferred_fn_{};
         std::function<bool(std::move_only_function<std::expected<void, Core::DbError>()>)> enqueue_op_fn_{};
+        std::function<bool()> is_tracker_alive_fn_{};
         std::function<bool()> is_tracking_enabled_fn_{};
         UpsertTrackedFn upsert_tracked_fn_{};
         std::function<void(std::type_index, const std::string&)> untrack_fn_{};

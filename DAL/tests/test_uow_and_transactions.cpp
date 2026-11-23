@@ -609,7 +609,8 @@ namespace
         auto conn = connRes.value();
 
         EXPECT_TRUE(conn->set_busy_timeout(std::chrono::milliseconds(5000)).has_value());
-        EXPECT_TRUE(conn->enable_wal_mode().has_value());
+        // SQLite cannot enable WAL on :memory: databases (effective journal_mode stays "memory").
+        EXPECT_FALSE(conn->enable_wal_mode().has_value());
 
         Phase25Context db(conn);
         ASSERT_TRUE(db.ensure_created().has_value());
@@ -1360,6 +1361,145 @@ namespace
         ASSERT_TRUE(all.has_value());
         EXPECT_TRUE(all->empty());
         EXPECT_EQ(db.tracked_entities_count(), 0u);
+    }
+
+    // =========================================================================
+    // Phase 49 (P0): Ownership, Lifetimes, Deferred Eviction, Nested Tx & WAL
+    // =========================================================================
+
+    TEST(OwnershipAndLifetimeHardeningTest, SqliteConnectionIsNonCopyableAndWalVerifiesEffectiveMode)
+    {
+        static_assert(!std::is_copy_constructible_v<DAL::SQLiteConnection>);
+        static_assert(!std::is_copy_assignable_v<DAL::SQLiteConnection>);
+        static_assert(!std::is_move_constructible_v<DAL::SQLiteConnection>);
+        static_assert(!std::is_move_assignable_v<DAL::SQLiteConnection>);
+
+        // WAL on :memory: must fail because SQLite keeps journal_mode = memory.
+        auto memRes = DAL::SQLiteConnection::connect(":memory:", DAL::SQLiteConnectionOptions{ .wal_mode = true });
+        EXPECT_FALSE(memRes.has_value());
+
+        // WAL on an on-disk database must succeed and read back "wal".
+        const auto dbPath = (std::filesystem::temp_directory_path() / "codefirst_phase49_wal_check.db").string();
+        std::filesystem::remove(dbPath);
+        std::filesystem::remove(dbPath + "-wal");
+        std::filesystem::remove(dbPath + "-shm");
+
+        {
+            auto diskRes = DAL::SQLiteConnection::connect(dbPath, DAL::SQLiteConnectionOptions{ .wal_mode = true });
+            ASSERT_TRUE(diskRes.has_value()) << diskRes.error().to_string();
+            auto jmRes = (*diskRes)->query_rows("PRAGMA journal_mode;");
+            ASSERT_TRUE(jmRes.has_value());
+            ASSERT_EQ(jmRes->rows.size(), 1u);
+            EXPECT_EQ(std::get<std::string>(jmRes->rows[0].cells[0]), "wal");
+            (*diskRes)->close();
+        }
+        std::filesystem::remove(dbPath);
+        std::filesystem::remove(dbPath + "-wal");
+        std::filesystem::remove(dbPath + "-shm");
+    }
+
+    TEST(OwnershipAndLifetimeHardeningTest, EscapedDbSetFindTrackedRefReturnsNulloptWhenContextExpired)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        auto escapedSet = [&]()
+        {
+            Phase30DbContext local(conn);
+            EXPECT_TRUE(local.ensure_created().has_value());
+            EXPECT_TRUE(local.people.add(Core::Person(Core::PersonId{ 0 }, "Ada", "Lovelace")).has_value());
+            return local.people;
+        }();
+
+        // Context has expired: find_tracked_ref MUST return std::nullopt instead of a dangling reference.
+        auto expiredRef = escapedSet.find_tracked_ref(1);
+        EXPECT_FALSE(expiredRef.has_value());
+    }
+
+    TEST(OwnershipAndLifetimeHardeningTest, RemoveDefersTrackerEvictionUntilDeleteConfirmedAndRestoresOnRollback)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(db.somethings.add(Core::Something(Core::SomethingId{ 0 }, "Widget", "Tool")).has_value());
+        ASSERT_TRUE(db.personSomethings.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 1 }, "Owner")).has_value());
+
+        db.enable_change_tracking();
+        auto tracked = db.people.find_tracked(1);
+        ASSERT_NE(tracked, nullptr);
+        EXPECT_EQ(db.tracked_entities_count(), 1u);
+
+        // 1. Immediate remove rejected by FK constraint MUST keep entity tracked!
+        auto failedDel = db.people.remove(Core::Person::Key{ Core::PersonId{ 1 } });
+        ASSERT_FALSE(failedDel.has_value());
+        EXPECT_EQ(db.tracked_entities_count(), 1u);
+        tracked->setFirstName("StillTracked");
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "StillTracked");
+
+        // 2. Remove child link, then delete parent inside an outer transaction that rolls back:
+        //    tracker membership AND baseline must be restored!
+        ASSERT_TRUE(db.personSomethings.remove(Core::Person_Something::Key{ Core::PersonId{ 1 }, Core::SomethingId{ 1 } }).has_value());
+        ASSERT_TRUE(db.begin_transaction().has_value());
+        ASSERT_TRUE(db.people.remove(Core::Person::Key{ Core::PersonId{ 1 } }).has_value());
+        EXPECT_EQ(db.tracked_entities_count(), 0u);
+        ASSERT_TRUE(db.rollback().has_value());
+        EXPECT_EQ(db.tracked_entities_count(), 1u);
+        tracked->setFirstName("RestoredAfterRollback");
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "RestoredAfterRollback");
+    }
+
+    TEST(OwnershipAndLifetimeHardeningTest, NestedTransactionWithInnerSaveChangesAndRollbackPreservesOuterQueue)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        db.defer_changes(true);
+
+        auto outerRes = db.transaction(
+            [&]() -> std::expected<void, Core::DbError>
+            {
+                // Stage an outer operation before entering nested transaction.
+                auto r1 = db.people.add(Core::Person(Core::PersonId{ 0 }, "OuterKept", "User"));
+                if (!r1)
+                {
+                    return r1;
+                }
+
+                // Nested transaction stages an inner op, calls save_changes(), then returns error.
+                auto innerRes = db.transaction(
+                    [&]() -> std::expected<void, Core::DbError>
+                    {
+                        auto r2 = db.people.add(Core::Person(Core::PersonId{ 0 }, "InnerRolledBack", "User"));
+                        if (!r2)
+                        {
+                            return r2;
+                        }
+                        auto sc = db.save_changes();
+                        if (!sc)
+                        {
+                            return sc;
+                        }
+                        return std::unexpected<Core::DbError>{ Core::DbError::unknown("abort inner") };
+                    });
+                EXPECT_FALSE(innerRes.has_value());
+
+                // Outer staged operation MUST still be intact (no empty std::move_only_function slots).
+                return {};
+            });
+        ASSERT_TRUE(outerRes.has_value()) << outerRes.error().to_string();
+
+        auto all = db.people.try_to_vector();
+        ASSERT_TRUE(all.has_value());
+        ASSERT_EQ(all->size(), 1u);
+        EXPECT_EQ(all->front().getFirstName(), "OuterKept");
     }
 
 } // namespace
