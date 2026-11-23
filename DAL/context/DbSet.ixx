@@ -90,6 +90,170 @@ export namespace DAL
                 std::variant<typename AppendOne<PrevOrderBys, NewAscCol>::type..., typename AppendOne<PrevOrderBys, NewDescCol>::type...>;
         };
 
+        inline std::atomic<std::uint64_t> g_write_guard_sp_counter{ 0 };
+
+        // RAII transaction/savepoint guard for atomic single- and multi-row write operations.
+        // Begins a transaction when not already in one, or acquires a uniquely named savepoint
+        // when nested inside an active transaction, rolling back on every non-committed exit
+        // (returned errors or thrown exceptions).
+        template<typename ConnectionHandle>
+        class WriteBatchTxGuard
+        {
+        public:
+            explicit WriteBatchTxGuard(const std::shared_ptr<ConnectionHandle>& conn) noexcept
+                : conn_(conn)
+            {
+            }
+
+            WriteBatchTxGuard(const WriteBatchTxGuard&) = delete;
+            WriteBatchTxGuard& operator=(const WriteBatchTxGuard&) = delete;
+
+            [[nodiscard]] std::expected<void, Core::DbError> begin()
+            {
+                if (!conn_)
+                {
+                    return {};
+                }
+                if constexpr (requires(ConnectionHandle& c) {
+                                  c.in_transaction();
+                                  c.begin_transaction();
+                                  c.commit();
+                                  c.rollback();
+                              })
+                {
+                    if (!conn_->in_transaction())
+                    {
+                        auto tx_res = conn_->begin_transaction();
+                        if (!tx_res)
+                        {
+                            return tx_res;
+                        }
+                        started_tx_ = true;
+                        active_ = true;
+                        return {};
+                    }
+                    if constexpr (requires(ConnectionHandle& c, std::string_view n) {
+                                      c.savepoint(n);
+                                      c.release_savepoint(n);
+                                      c.rollback_to_savepoint(n);
+                                  })
+                    {
+                        sp_name_ = std::format("_codefirst_wg_{}", ++g_write_guard_sp_counter);
+                        auto sp_res = conn_->savepoint(sp_name_);
+                        if (!sp_res)
+                        {
+                            return sp_res;
+                        }
+                        started_sp_ = true;
+                        active_ = true;
+                    }
+                }
+                return {};
+            }
+
+            [[nodiscard]] std::expected<void, Core::DbError> commit()
+            {
+                if (!active_ || !conn_)
+                {
+                    return {};
+                }
+                if (started_sp_)
+                {
+                    if constexpr (requires(ConnectionHandle& c, std::string_view n) {
+                                      c.release_savepoint(n);
+                                      c.rollback_to_savepoint(n);
+                                  })
+                    {
+                        auto rel_res = conn_->release_savepoint(sp_name_);
+                        if (!rel_res)
+                        {
+                            (void)conn_->rollback_to_savepoint(sp_name_);
+                            (void)conn_->release_savepoint(sp_name_);
+                            active_ = false;
+                            return rel_res;
+                        }
+                    }
+                }
+                else if (started_tx_)
+                {
+                    if constexpr (requires(ConnectionHandle& c) {
+                                      c.commit();
+                                      c.in_transaction();
+                                      c.rollback();
+                                  })
+                    {
+                        auto commit_res = conn_->commit();
+                        if (!commit_res)
+                        {
+                            if (conn_->in_transaction())
+                            {
+                                (void)conn_->rollback();
+                            }
+                            active_ = false;
+                            return commit_res;
+                        }
+                    }
+                }
+                active_ = false;
+                return {};
+            }
+
+            void rollback_now() noexcept
+            {
+                if (!active_ || !conn_)
+                {
+                    return;
+                }
+                active_ = false;
+                if (started_sp_)
+                {
+                    if constexpr (requires(ConnectionHandle& c, std::string_view n) {
+                                      c.rollback_to_savepoint(n);
+                                      c.release_savepoint(n);
+                                  })
+                    {
+                        try
+                        {
+                            (void)conn_->rollback_to_savepoint(sp_name_);
+                            (void)conn_->release_savepoint(sp_name_);
+                        } catch (...)
+                        {
+                        }
+                    }
+                }
+                else if (started_tx_)
+                {
+                    if constexpr (requires(ConnectionHandle& c) {
+                                      c.in_transaction();
+                                      c.rollback();
+                                  })
+                    {
+                        try
+                        {
+                            if (conn_->in_transaction())
+                            {
+                                (void)conn_->rollback();
+                            }
+                        } catch (...)
+                        {
+                        }
+                    }
+                }
+            }
+
+            ~WriteBatchTxGuard() noexcept
+            {
+                rollback_now();
+            }
+
+        private:
+            std::shared_ptr<ConnectionHandle> conn_{};
+            std::string sp_name_{};
+            bool started_tx_{ false };
+            bool started_sp_{ false };
+            bool active_{ false };
+        };
+
         struct TrackedEntityEntry
         {
             std::shared_ptr<void> owned_instance{};
@@ -1617,56 +1781,17 @@ export namespace DAL
             return res;
         }
 
-        // Inserts a single entity immediately and returns a copy populated with any
+        // Inserts a single entity atomically (wrapping insert + rowid lookup + key hydration in a
+        // transaction or savepoint with RAII rollback) and returns a copy populated with any
         // database-generated auto-increment primary key.
         [[nodiscard]] std::expected<Domain, Core::DbError> add_returning(const Domain& item)
         {
-            auto ins_res = repo_->insert_one(item);
-            if (!ins_res)
-            {
-                return std::unexpected<Core::DbError>{ ins_res.error() };
-            }
-
-            Domain result = item;
-            if constexpr (Schema::SinglePrimaryKey<DTO> && Schema::has_auto_incr_primary_key<DTO>())
-            {
-                if (!conn_)
-                {
-                    return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
-                }
-                if constexpr (requires(const ConnectionHandle& c) { c.try_last_insert_rowid(); })
-                {
-                    auto rowid_res = conn_->try_last_insert_rowid();
-                    if (!rowid_res)
-                    {
-                        return std::unexpected<Core::DbError>{ rowid_res.error() };
-                    }
-                    auto hydrated = DAL::Mappers::MapperTraits<Domain, DTO>::try_with_primary_key(item, *rowid_res);
-                    if (!hydrated)
-                    {
-                        if constexpr (requires(ConnectionHandle& c, std::string_view sql, std::span<const DynamicCell> params) {
-                                          c.execute_prepared(sql, params);
-                                      })
-                        {
-                            const std::array<DynamicCell, 1> params{ *rowid_res };
-                            (void)conn_->execute_prepared(
-                                std::format("DELETE FROM \"{}\" WHERE rowid = ?;", DTO::tablename), std::span<const DynamicCell>{ params });
-                        }
-                        return std::unexpected<Core::DbError>{ hydrated.error() };
-                    }
-                    result = std::move(*hydrated);
-                }
-            }
-
-            if (is_tracking_enabled())
-            {
-                record_snapshot(result);
-            }
-            return result;
+            return add_returning_impl(item, true);
         }
 
-        // Inserts multiple entities immediately in a transaction (or savepoint if already in one)
-        // and returns copies populated with any database-generated auto-increment primary keys.
+        // Inserts multiple entities atomically in a transaction (or savepoint if already in one)
+        // with RAII rollback on both returned errors and thrown exceptions, updating tracker state
+        // only after commit.
         [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> add_range_returning(const std::vector<Domain>& items)
         {
             std::vector<Domain> results;
@@ -1676,115 +1801,63 @@ export namespace DAL
                 return results;
             }
 
-            bool started_tx = false;
-            bool started_sp = false;
-            constexpr std::string_view range_sp_name = "_codefirst_add_range_sp";
-            if constexpr (requires(ConnectionHandle& c) {
-                              c.in_transaction();
-                              c.begin_transaction();
-                              c.commit();
-                              c.rollback();
-                          })
+            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn_);
+            if (auto begin_res = tx_guard.begin(); !begin_res)
             {
-                if (conn_)
-                {
-                    if (!conn_->in_transaction())
-                    {
-                        auto tx_res = conn_->begin_transaction();
-                        if (!tx_res)
-                        {
-                            return std::unexpected<Core::DbError>{ tx_res.error() };
-                        }
-                        started_tx = true;
-                    }
-                    else if constexpr (requires(ConnectionHandle& c, std::string_view n) {
-                                           c.savepoint(n);
-                                           c.release_savepoint(n);
-                                           c.rollback_to_savepoint(n);
-                                       })
-                    {
-                        auto sp_res = conn_->savepoint(range_sp_name);
-                        if (!sp_res)
-                        {
-                            return std::unexpected<Core::DbError>{ sp_res.error() };
-                        }
-                        started_sp = true;
-                    }
-                }
+                return std::unexpected<Core::DbError>{ begin_res.error() };
             }
 
             for (const auto& item : items)
             {
-                auto res = add_returning(item);
+                auto res = add_returning_impl(item, false);
                 if (!res)
                 {
-                    if (started_sp)
-                    {
-                        if constexpr (requires(ConnectionHandle& c, std::string_view n) { c.rollback_to_savepoint(n); })
-                        {
-                            (void)conn_->rollback_to_savepoint(range_sp_name);
-                        }
-                    }
-                    else if (started_tx)
-                    {
-                        if constexpr (requires(ConnectionHandle& c) { c.rollback(); })
-                        {
-                            (void)conn_->rollback();
-                        }
-                    }
                     return std::unexpected<Core::DbError>{ res.error() };
                 }
                 results.push_back(std::move(*res));
             }
 
-            if (started_sp)
+            if (auto commit_res = tx_guard.commit(); !commit_res)
             {
-                if constexpr (requires(ConnectionHandle& c, std::string_view n) {
-                                  c.release_savepoint(n);
-                                  c.rollback_to_savepoint(n);
-                              })
-                {
-                    auto rel_res = conn_->release_savepoint(range_sp_name);
-                    if (!rel_res)
-                    {
-                        (void)conn_->rollback_to_savepoint(range_sp_name);
-                        return std::unexpected<Core::DbError>{ rel_res.error() };
-                    }
-                }
+                return std::unexpected<Core::DbError>{ commit_res.error() };
             }
-            else if (started_tx)
+
+            if (is_tracking_enabled())
             {
-                if constexpr (requires(ConnectionHandle& c) { c.commit(); })
+                for (const auto& r : results)
                 {
-                    auto commit_res = conn_->commit();
-                    if (!commit_res)
-                    {
-                        if constexpr (requires(ConnectionHandle& c) {
-                                          c.in_transaction();
-                                          c.rollback();
-                                      })
-                        {
-                            if (conn_->in_transaction())
-                            {
-                                (void)conn_->rollback();
-                            }
-                        }
-                        return std::unexpected<Core::DbError>{ commit_res.error() };
-                    }
+                    record_snapshot(r);
                 }
             }
             return results;
         }
 
-        // Inserts multiple entities into the database table (or stages if deferred)
+        // Inserts multiple entities atomically into the database table (or stages if deferred)
         [[nodiscard]] std::expected<void, Core::DbError> add_range(const std::vector<Domain>& items)
         {
             if (should_defer())
             {
                 return stage_add_range(items);
             }
+            if (items.empty())
+            {
+                return {};
+            }
+            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn_);
+            if (auto begin_res = tx_guard.begin(); !begin_res)
+            {
+                return std::unexpected<Core::DbError>{ begin_res.error() };
+            }
             auto res = repo_->insert_many(items);
-            if (res && is_tracking_enabled())
+            if (!res)
+            {
+                return res;
+            }
+            if (auto commit_res = tx_guard.commit(); !commit_res)
+            {
+                return commit_res;
+            }
+            if (is_tracking_enabled())
             {
                 if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
                 {
@@ -1794,7 +1867,7 @@ export namespace DAL
                     }
                 }
             }
-            return res;
+            return {};
         }
 
         // Updates an existing entity (or stages if deferred)
@@ -1823,7 +1896,8 @@ export namespace DAL
             return repo_->delete_by_id(id);
         }
 
-        // Atomic upsert (insert or replace) for a single entity (Phase 13.1)
+        // Upserts a single entity: uses SQLite ON CONFLICT DO UPDATE for assigned/composite keys,
+        // or a transaction/savepoint-guarded exists+update/insert for auto-increment keys.
         [[nodiscard]] std::expected<void, Core::DbError> upsert(const Domain& item)
         {
             if (should_defer())
@@ -1833,7 +1907,9 @@ export namespace DAL
             return upsert_immediate(item);
         }
 
-        // Atomic batch upsert (insert or replace) for multiple entities (Phase 13.1)
+        // Atomic batch upsert: wraps the entire range (both assigned-key and auto-increment paths)
+        // in a transaction or savepoint so any mid-batch failure rolls back all earlier rows,
+        // updating tracker state only after commit.
         [[nodiscard]] std::expected<void, Core::DbError> upsert_range(const std::vector<Domain>& items)
         {
             if (should_defer())
@@ -2636,14 +2712,64 @@ export namespace DAL
             return Core::DbError::map_from_message(msg);
         }
 
+        [[nodiscard]] std::expected<Domain, Core::DbError> add_returning_impl(const Domain& item, bool record_tracking)
+        {
+            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn_);
+            if (auto begin_res = tx_guard.begin(); !begin_res)
+            {
+                return std::unexpected<Core::DbError>{ begin_res.error() };
+            }
+
+            auto ins_res = repo_->insert_one(item);
+            if (!ins_res)
+            {
+                return std::unexpected<Core::DbError>{ ins_res.error() };
+            }
+
+            Domain result = item;
+            if constexpr (Schema::SinglePrimaryKey<DTO> && Schema::has_auto_incr_primary_key<DTO>())
+            {
+                if (!conn_)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+                }
+                if constexpr (requires(const ConnectionHandle& c) { c.try_last_insert_rowid(); })
+                {
+                    auto rowid_res = conn_->try_last_insert_rowid();
+                    if (!rowid_res)
+                    {
+                        return std::unexpected<Core::DbError>{ rowid_res.error() };
+                    }
+                    auto hydrated = DAL::Mappers::MapperTraits<Domain, DTO>::try_with_primary_key(item, *rowid_res);
+                    if (!hydrated)
+                    {
+                        return std::unexpected<Core::DbError>{ hydrated.error() };
+                    }
+                    result = std::move(*hydrated);
+                }
+            }
+
+            if (auto commit_res = tx_guard.commit(); !commit_res)
+            {
+                return std::unexpected<Core::DbError>{ commit_res.error() };
+            }
+
+            if (record_tracking && is_tracking_enabled())
+            {
+                record_snapshot(result);
+            }
+            return result;
+        }
+
         static std::expected<void, Core::DbError> upsert_immediate_with(
             const std::shared_ptr<RepoType>& repo,
             const std::shared_ptr<ConnectionHandle>& conn,
             const UpsertTrackedFn& upsert_fn,
             const std::function<bool()>& tracking_fn,
-            const Domain& item)
+            const Domain& item,
+            bool record_tracking = true)
         {
-            const bool tracking = tracking_fn && tracking_fn();
+            const bool tracking = record_tracking && tracking_fn && tracking_fn();
             if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
             {
                 if (conn)
@@ -2665,13 +2791,26 @@ export namespace DAL
                 }
             }
 
+            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn);
+            if (auto begin_res = tx_guard.begin(); !begin_res)
+            {
+                return begin_res;
+            }
             const auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(item);
             auto res = repo->exists_by_id(key) ? repo->update_one(item) : repo->insert_one(item);
-            if (res && tracking)
+            if (!res)
+            {
+                return res;
+            }
+            if (auto commit_res = tx_guard.commit(); !commit_res)
+            {
+                return commit_res;
+            }
+            if (tracking)
             {
                 record_snapshot_with(repo, upsert_fn, item);
             }
-            return res;
+            return {};
         }
 
         static std::expected<void, Core::DbError> upsert_many_immediate_with(
@@ -2687,6 +2826,13 @@ export namespace DAL
             }
 
             const bool tracking = tracking_fn && tracking_fn();
+            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn);
+            if (auto begin_res = tx_guard.begin(); !begin_res)
+            {
+                return begin_res;
+            }
+
+            bool executed_bulk = false;
             if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
             {
                 if (conn)
@@ -2704,24 +2850,33 @@ export namespace DAL
                         {
                             return std::unexpected<Core::DbError>{ map_conn_error(conn, res.error().what()) };
                         }
-                        if (tracking)
-                        {
-                            for (const auto& item : items)
-                            {
-                                record_snapshot_with(repo, upsert_fn, item);
-                            }
-                        }
-                        return {};
+                        executed_bulk = true;
                     }
                 }
             }
 
-            for (const auto& item : items)
+            if (!executed_bulk)
             {
-                auto res = upsert_immediate_with(repo, conn, upsert_fn, tracking_fn, item);
-                if (!res)
+                for (const auto& item : items)
                 {
-                    return res;
+                    auto res = upsert_immediate_with(repo, conn, upsert_fn, tracking_fn, item, false);
+                    if (!res)
+                    {
+                        return res;
+                    }
+                }
+            }
+
+            if (auto commit_res = tx_guard.commit(); !commit_res)
+            {
+                return commit_res;
+            }
+
+            if (tracking)
+            {
+                for (const auto& item : items)
+                {
+                    record_snapshot_with(repo, upsert_fn, item);
                 }
             }
             return {};

@@ -1205,4 +1205,161 @@ namespace
         EXPECT_FALSE(conn->try_fetch_all<DAL::Schema::PersonDTO>().has_value());
     }
 
+    // =========================================================================
+    // Phase 49 (P0): Write & Batch Atomicity Regressions
+    // =========================================================================
+
+    struct AssignedUniqueRowDTO
+    {
+        static constexpr const char* tablename = "AssignedUniqueRows";
+        sqlgen::PrimaryKey<std::int32_t, false> id{ 0 };
+        sqlgen::Unique<std::string> slug{};
+    };
+
+    struct ThrowingCopyEntity
+    {
+        static inline int copies_before_throw = -1;
+        std::int32_t id = 0;
+        std::string label;
+
+        ThrowingCopyEntity() = default;
+        ThrowingCopyEntity(std::int32_t i, std::string l)
+            : id(i)
+            , label(std::move(l))
+        {
+        }
+        ThrowingCopyEntity(const ThrowingCopyEntity& other)
+            : id(other.id)
+            , label(other.label)
+        {
+            if (copies_before_throw == 0)
+            {
+                throw std::runtime_error("injected copy failure");
+            }
+            if (copies_before_throw > 0)
+            {
+                --copies_before_throw;
+            }
+        }
+        ThrowingCopyEntity(ThrowingCopyEntity&&) noexcept = default;
+        ThrowingCopyEntity& operator=(const ThrowingCopyEntity&) = default;
+        ThrowingCopyEntity& operator=(ThrowingCopyEntity&&) noexcept = default;
+    };
+
+    struct ThrowingCopyRowDTO
+    {
+        static constexpr const char* tablename = "ThrowingCopyRows";
+        sqlgen::PrimaryKey<std::int32_t, true> id{ 0 };
+        std::string label{};
+    };
+
+    TEST(WriteBatchAtomicityHardeningTest, AddReturningRollsBackInsertAndTriggerSideEffectsOnOverflow)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Seed", "Person")).has_value());
+
+        ASSERT_TRUE(conn->execute_raw(
+                            "CREATE TABLE PersonAudit (id INTEGER PRIMARY KEY AUTOINCREMENT, inserted_name TEXT NOT NULL);"
+                            "CREATE TRIGGER trg_person_audit AFTER INSERT ON Person "
+                            "BEGIN INSERT INTO PersonAudit (inserted_name) VALUES (NEW.first_name); END;")
+                        .has_value());
+        ASSERT_TRUE(conn->execute_raw("UPDATE sqlite_sequence SET seq = 2147483647 WHERE name = 'Person';").has_value());
+
+        auto res = db.people.add_returning(Core::Person(Core::PersonId{ 0 }, "OverflowTrigger", "Person"));
+        ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(db.people.count(), 1u);
+
+        auto auditRows = conn->query_rows("SELECT COUNT(*) FROM PersonAudit;");
+        ASSERT_TRUE(auditRows.has_value());
+        EXPECT_EQ(std::get<std::int64_t>(auditRows->rows[0].cells[0]), 0);
+    }
+
+    TEST(WriteBatchAtomicityHardeningTest, AddRangeReturningRollsBackOnMidBatchException)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<ThrowingCopyRowDTO>().has_value());
+
+        DAL::DbSet<ThrowingCopyEntity, ThrowingCopyRowDTO, DAL::SQLiteConnection> set(conn);
+        std::vector<ThrowingCopyEntity> batch;
+        batch.emplace_back(0, "First");
+        batch.emplace_back(0, "Second");
+
+        // Allow copies for first item (add_returning_impl copies item -> result), then throw on second item.
+        ThrowingCopyEntity::copies_before_throw = 1;
+        EXPECT_THROW((void)set.add_range_returning(batch), std::runtime_error);
+        ThrowingCopyEntity::copies_before_throw = -1;
+
+        EXPECT_FALSE(conn->in_transaction());
+        auto cnt = conn->try_count<ThrowingCopyRowDTO>();
+        ASSERT_TRUE(cnt.has_value());
+        EXPECT_EQ(*cnt, 0u);
+    }
+
+    TEST(WriteBatchAtomicityHardeningTest, AssignedKeyUpsertRangeRollsBackAllRowsOnPartialFailure)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        struct UniqueCtx : DAL::DbContextBase<DAL::SQLiteConnection>
+        {
+            Set<AssignedUniqueRowDTO> rows{ this };
+            explicit UniqueCtx(std::shared_ptr<DAL::SQLiteConnection> c)
+                : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+            {
+            }
+        };
+
+        UniqueCtx db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.rows.add(AssignedUniqueRowDTO{ .id = 100, .slug = "taken" }).has_value());
+        db.enable_change_tracking();
+
+        // Row 1 is valid, row 2 violates UNIQUE(slug) with a different PK.
+        std::vector<AssignedUniqueRowDTO> batch{ AssignedUniqueRowDTO{ .id = 1, .slug = "fresh" },
+                                                 AssignedUniqueRowDTO{ .id = 2, .slug = "taken" } };
+        auto res = db.rows.upsert_range(batch);
+        ASSERT_FALSE(res.has_value());
+        EXPECT_FALSE(conn->in_transaction());
+
+        // Row 1 MUST have been rolled back and MUST NOT be tracked; only the original seed row remains.
+        EXPECT_EQ(db.tracked_entities_count(), 0u);
+        auto all = db.rows.try_to_vector();
+        ASSERT_TRUE(all.has_value());
+        ASSERT_EQ(all->size(), 1u);
+        EXPECT_EQ(all->front().id.value(), 100);
+    }
+
+    TEST(WriteBatchAtomicityHardeningTest, AutoIncrementUpsertRangeRollsBackAllRowsOnPartialFailure)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        db.enable_change_tracking();
+
+        ASSERT_TRUE(conn->execute_raw(
+                            "CREATE TRIGGER trg_fail_boom BEFORE INSERT ON Person WHEN NEW.first_name = 'Boom' "
+                            "BEGIN SELECT RAISE(ABORT, 'injected boom'); END;")
+                        .has_value());
+
+        std::vector<Core::Person> batch{ Core::Person(Core::PersonId{ 0 }, "ValidFirst", "User"),
+                                         Core::Person(Core::PersonId{ 0 }, "Boom", "User") };
+        auto res = db.people.upsert_range(batch);
+        ASSERT_FALSE(res.has_value());
+        EXPECT_FALSE(conn->in_transaction());
+
+        auto all = db.people.try_to_vector();
+        ASSERT_TRUE(all.has_value());
+        EXPECT_TRUE(all->empty());
+        EXPECT_EQ(db.tracked_entities_count(), 0u);
+    }
+
 } // namespace
