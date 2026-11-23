@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
@@ -10,7 +12,6 @@ env:
 
 jobs:
   format-check:
-    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'run tests'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -27,7 +28,6 @@ jobs:
             | xargs -0 clang-format --dry-run -Werror
 
   build-and-test:
-    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'run tests'
     runs-on: ubuntu-24.04
     container:
       image: archlinux:latest
@@ -61,7 +61,6 @@ jobs:
         run: ctest --preset test-${{ matrix.preset }} --output-on-failure
 
   contracts-and-packaging:
-    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'run tests'
     runs-on: ubuntu-24.04
     container: archlinux:latest
     steps:
@@ -91,7 +90,7 @@ jobs:
           cmake --install build-install
           mkdir -p /tmp/cf_consumer
           cat <<'EOF' > /tmp/cf_consumer/CMakeLists.txt
-          cmake_minimum_required(VERSION 4.0)
+          cmake_minimum_required(VERSION 4.5)
           project(consumer LANGUAGES CXX)
           set(CMAKE_CXX_STANDARD 26)
           set(CMAKE_CXX_MODULE_STD ON)
@@ -118,7 +117,7 @@ jobs:
         run: |
           mkdir -p /tmp/cf_subdir_consumer
           cat <<EOF > /tmp/cf_subdir_consumer/CMakeLists.txt
-          cmake_minimum_required(VERSION 4.0)
+          cmake_minimum_required(VERSION 4.5)
           project(subdir_consumer LANGUAGES CXX)
           set(CMAKE_CXX_STANDARD 26)
           set(CMAKE_CXX_STANDARD_REQUIRED ON)

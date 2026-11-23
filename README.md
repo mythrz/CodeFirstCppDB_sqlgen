@@ -4,9 +4,9 @@ A C++26 module-based, reflection-driven Code-First ORM and Unit-of-Work library 
 
 ## Requirements
 
-- **Compiler:** **GCC 16.1+** (required for C++26 reflection `-freflection`, `std::meta::define_aggregate`, `std::meta::parameters_of`, `import std`, and C++26 modules).
-- **Build System:** CMake 4.0+ and Ninja.
-- **Dependencies:** SQLite3 development headers/libraries (submodules `extern/reflect-cpp`, `extern/sqlgen`, and `extern/googletest` are included).
+- **Compiler:** **GCC 16.1+** (verified on GCC 16.2+; required for C++26 reflection `-freflection`, `std::meta::define_aggregate`, `std::meta::parameters_of`, `import std`, and C++26 modules).
+- **Build System:** **CMake 4.5+** and Ninja.
+- **Dependencies:** SQLite3 development headers/libraries (or an injected CMake target via `-DCODEFIRST_SQLITE_TARGET=...`). Submodules `extern/reflect-cpp`, `extern/sqlgen`, and `extern/googletest` are included.
 
 ## Quick Start
 
@@ -83,7 +83,7 @@ For encapsulated domain entities with strong IDs, separate DTOs, and repository 
 ### Option 1: `FetchContent`
 
 ```cmake
-cmake_minimum_required(VERSION 4.0)
+cmake_minimum_required(VERSION 4.5)
 project(my_app LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 26)
@@ -96,10 +96,11 @@ include(FetchContent)
 FetchContent_Declare(
     CodeFirstCppDB
     GIT_REPOSITORY https://github.com/mythrz/CodeFirstCppDB_sqlgen.git
-    GIT_TAG        main
+    GIT_TAG        <pinned-commit-or-tag> # Pin a tested commit SHA or release tag
 )
 FetchContent_MakeAvailable(CodeFirstCppDB)
 
+add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
 ```
 
@@ -130,9 +131,10 @@ target_link_libraries(my_app PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
 
 ## C++26 Features & Contracts
 
-- **P2996 / P3394 Static Reflection & Annotations:** Compile-time schema synthesis (`AnnotatedDto`), topological FK sorting, constructor hydration (`MapperTraits` with P3096 `parameters_of`), and domain-to-column query pushdown (`where_equal<"fieldName">`) with zero runtime RTTI or JSON round-trips.
+- **P2996 / P3394 Static Reflection & Annotations:** Compile-time schema synthesis (`AnnotatedDto`, supporting composed `[[=references]]` + `[[=unique]]` and `[[=references]]` + `[[=primary_key{ false }]]`), topological FK sorting, constructor hydration (`MapperTraits` with P3096 `parameters_of`), and domain-to-column query pushdown (`where_equal<"fieldName">`) with zero JSON round-trips. (The runtime `ChangeTracker` identity map keys entity types using `std::type_index`.)
+- **Schema Versioning:** `DbContextBase::ensure_created()` is transactional, and `try_user_version()` / `set_user_version()` / `migrate_to(target_version, fn)` provide atomic `PRAGMA user_version` upgrades.
 - **P2900 Contracts:** Pass `-DCODEFIRST_ENABLE_CONTRACTS=ON` to enable compiler-checked `-fcontracts` preconditions on `DbSet`, `DbQuery`, and `GenericRepository` invariants.
-- **P2988 `std::optional<T&>`:** `DbSet::find_tracked_ref(...)` returns a non-owning `std::optional<Domain&>` directly into the change tracker.
+- **P2988 `std::optional<T&>`:** `DbSet::find_tracked_ref(...)` returns a non-owning `std::optional<Domain&>` directly into the active change tracker (or `std::nullopt` if the owning `DbContext` has expired).
 
 ## Thread Safety
 

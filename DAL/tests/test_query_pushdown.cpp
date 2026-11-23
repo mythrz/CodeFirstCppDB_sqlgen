@@ -627,4 +627,29 @@ namespace
         EXPECT_EQ((*groupedRes)[2].second.size(), 0u);
     }
 
+    TEST(Phase50DbSetTryCountTest, DbSetTryCountForwarderReturnsCountAndPropagatesErrors)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        auto emptyCount = db.people.try_count();
+        ASSERT_TRUE(emptyCount.has_value()) << emptyCount.error().to_string();
+        EXPECT_EQ(*emptyCount, 0u);
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Ada", "Lovelace")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Alan", "Turing")).has_value());
+
+        auto twoCount = db.people.try_count();
+        ASSERT_TRUE(twoCount.has_value()) << twoCount.error().to_string();
+        EXPECT_EQ(*twoCount, 2u);
+
+        conn->close();
+        auto closedCount = db.people.try_count();
+        ASSERT_FALSE(closedCount.has_value());
+        EXPECT_EQ(closedCount.error().code, Core::DbErrorCode::ConnectionError);
+    }
+
 } // namespace

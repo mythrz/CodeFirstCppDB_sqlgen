@@ -1,11 +1,11 @@
 # CodeFirstCppDB_sqlgen — Architecture, Reusability & Next-Gen Roadmap
 
-> **Document Version:** 16.1 (Post-Review 6, Composite `PRIMARY KEY` DDL, CI & MIT License Finalization)  
-> **Date:** 2026-11-19  
+> **Document Version:** 17.0 (Phases 49–50: Prepared-Statement Typed SQLite Reader, Write/Batch Atomicity, Ownership & Schema Versioning Hardening)  
+> **Date:** 2026-11-23  
 > **Active Branch:** `main`  
-> **Toolchain Baseline:** GCC 16.1+ (`-std=c++26 -freflection`), CMake 4.0+ (verified on 4.5.0; CI pinned to 4.5.1), Ninja, SQLite 3  
+> **Toolchain Baseline:** GCC 16.2+ (`-std=c++26 -freflection`), CMake 4.5+, Ninja, SQLite 3 (CI runs in `archlinux:latest` on `main` pushes/PRs)  
 > **License:** MIT ([LICENSE](LICENSE))  
-> **Status:** Phases 1–48 Completed (`91/91` GoogleTests across `43` suites passing on `gcc-debug` and `gcc-asan`; `14/14` `review6` regression cases & `2/2` ASan lifetime checks passing; all `readme5.md` and `review6` findings resolved and archived/removed)
+> **Status:** Phases 1–50 Completed (`106/106` GoogleTests passing on `gcc-debug`, `gcc-release`, and `gcc-asan`)
 
 ---
 

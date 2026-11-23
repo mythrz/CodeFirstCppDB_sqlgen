@@ -2134,6 +2134,12 @@ export namespace DAL
             return contains(KeyType{ std::forward<Ks>(parts)... });
         }
 
+        // Returns total row count for this entity table with full error propagation
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> try_count() const
+        {
+            return query().try_count();
+        }
+
         // Returns total row count for this entity table
         [[nodiscard]] std::size_t count() const
         {
