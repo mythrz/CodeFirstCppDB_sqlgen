@@ -541,4 +541,113 @@ namespace
         EXPECT_EQ(downgrade.error().code, Core::DbErrorCode::ConstraintViolation);
         EXPECT_EQ(db.try_user_version().value(), 1);
     }
+
+    // =========================================================================
+    // Phase 54 (P1/P2): SQLite Error Fidelity, Float Precision & Escaping
+    // =========================================================================
+
+    struct ExactFloatDTO
+    {
+        static constexpr auto tablename = "ExactFloats";
+        sqlgen::PrimaryKey<std::int32_t, false> id{ 0 };
+        double val = 0.0;
+    };
+
+    struct ApostropheTableDTO
+    {
+        static constexpr auto tablename = "User'sNotes";
+        sqlgen::PrimaryKey<std::int32_t, false> id{ 0 };
+        std::string body;
+    };
+
+    struct Phase54DriverContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<ExactFloatDTO> floats{ this };
+        Set<ApostropheTableDTO> notes{ this };
+
+        explicit Phase54DriverContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(Phase54SqliteDriverFidelityTest, TriggerRaiseMapsToConstraintViolationAndClientErrorIsNotStale)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // 1. Trigger RAISE(ABORT, 'custom rule') has SQLITE_CONSTRAINT_TRIGGER -> MUST map to ConstraintViolation.
+        ASSERT_TRUE(conn->execute_raw(
+                            "CREATE TRIGGER trg_reject_custom BEFORE INSERT ON Person WHEN NEW.first_name = 'Forbidden' "
+                            "BEGIN SELECT RAISE(ABORT, 'custom business rule'); END;")
+                        .has_value());
+        auto trigRes = db.people.add(Core::Person(Core::PersonId{ 1 }, "Forbidden", "User"));
+        ASSERT_FALSE(trigRes.has_value());
+        EXPECT_EQ(trigRes.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_NE(trigRes.error().native_code, 0);
+
+        // 2. Force a DuplicateKey error, then trigger client-side validation errors; stale SQLite errcode MUST NOT leak.
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 10 }, "Alice", "One")).has_value());
+        auto dupRes = db.people.add(Core::Person(Core::PersonId{ 10 }, "Alice", "Dup"));
+        ASSERT_FALSE(dupRes.has_value());
+        EXPECT_EQ(dupRes.error().code, Core::DbErrorCode::DuplicateKey);
+
+        auto negTimeout = conn->set_busy_timeout(std::chrono::milliseconds{ -5 });
+        ASSERT_FALSE(negTimeout.has_value());
+        EXPECT_EQ(negTimeout.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto badDtoRes = conn->try_insert(SecondBadSchemaDTO{ .id = 1, .name = "x" });
+        ASSERT_FALSE(badDtoRes.has_value());
+        EXPECT_EQ(badDtoRes.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(badDtoRes.error().native_code, 0);
+
+        // 3. Missing-row update directly returns NotFound without relying on sticky SQLite errcode.
+        auto missingUpd = db.people.update(Core::Person(Core::PersonId{ 999 }, "Ghost", "User"));
+        ASSERT_FALSE(missingUpd.has_value());
+        EXPECT_EQ(missingUpd.error().code, Core::DbErrorCode::NotFound);
+    }
+
+    TEST(Phase54SqliteDriverFidelityTest, FloatDoubleRoundTripPreservesExactIeee754Precision)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase54DriverContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        const std::vector<double> values{
+            3.1415926535897931, 1.2345678901234567e-12, -9.8765432109876543e15, 0.1 + 0.2, 2.2250738585072014e-308
+        };
+        for (std::size_t i = 0; i < values.size(); ++i)
+        {
+            ASSERT_TRUE(db.floats.add(ExactFloatDTO{ .id = static_cast<std::int32_t>(i + 1), .val = values[i] }).has_value());
+        }
+
+        for (std::size_t i = 0; i < values.size(); ++i)
+        {
+            auto found = db.floats.find(static_cast<std::int32_t>(i + 1));
+            ASSERT_TRUE(found.has_value());
+            EXPECT_EQ(found->val, values[i]) << "Precision lost at index " << i;
+        }
+    }
+
+    TEST(Phase54SqliteDriverFidelityTest, ApostropheQuotedTableWithEmbeddedNulWhereLiteralWorks)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase54DriverContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        const std::string withNul("alpha\0beta", 10);
+        ASSERT_TRUE(db.notes.add(ApostropheTableDTO{ .id = 1, .body = withNul }).has_value());
+        ASSERT_TRUE(db.notes.add(ApostropheTableDTO{ .id = 2, .body = "alpha" }).has_value());
+
+        auto matched = db.notes.where_equal<"body">(withNul).try_to_vector();
+        ASSERT_TRUE(matched.has_value()) << matched.error().to_string();
+        ASSERT_EQ(matched->size(), 1u);
+        EXPECT_EQ(matched->front().id.value(), 1);
+        EXPECT_EQ(matched->front().body, withNul);
+    }
 } // namespace

@@ -168,34 +168,55 @@ export namespace DAL::Repositories
         [[nodiscard]] std::expected<void, Core::DbError> insert_one(const Domain& item) override
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
-            auto res = conn_->insert(dto);
-            if (!res)
+            if constexpr (requires { conn_->try_insert(dto); })
             {
-                return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                return conn_->try_insert(dto);
             }
-            return {};
+            else
+            {
+                auto res = conn_->insert(dto);
+                if (!res)
+                {
+                    return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                }
+                return {};
+            }
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> insert_many(const std::vector<Domain>& items) override
         {
             auto dtos = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto) | std::ranges::to<std::vector>();
-            auto res = conn_->insert_many(dtos);
-            if (!res)
+            if constexpr (requires { conn_->try_insert_many(dtos); })
             {
-                return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                return conn_->try_insert_many(dtos);
             }
-            return {};
+            else
+            {
+                auto res = conn_->insert_many(dtos);
+                if (!res)
+                {
+                    return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                }
+                return {};
+            }
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> update_one(const Domain& item) override
         {
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
-            auto res = conn_->update(dto);
-            if (!res)
+            if constexpr (requires { conn_->try_update(dto); })
             {
-                return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                return conn_->try_update(dto);
             }
-            return {};
+            else
+            {
+                auto res = conn_->update(dto);
+                if (!res)
+                {
+                    return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                }
+                return {};
+            }
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> delete_by_id(KeyType id) override
@@ -203,31 +224,45 @@ export namespace DAL::Repositories
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
                 const auto& [... parts] = id.tuple();
-                auto res = [&]()
+                if constexpr (requires { conn_->template try_delete_by_composite_id<DTO>(unwrap_key_part(parts)...); })
                 {
-                    if constexpr (requires { conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...); })
-                    {
-                        return conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...);
-                    }
-                    else
-                    {
-                        return conn_->delete_by_composite_id(unwrap_key_part(parts)...);
-                    }
-                }();
-                if (!res)
-                {
-                    return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                    return conn_->template try_delete_by_composite_id<DTO>(unwrap_key_part(parts)...);
                 }
-                return {};
+                else
+                {
+                    auto res = [&]()
+                    {
+                        if constexpr (requires { conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...); })
+                        {
+                            return conn_->template delete_by_composite_id<DTO>(unwrap_key_part(parts)...);
+                        }
+                        else
+                        {
+                            return conn_->delete_by_composite_id(unwrap_key_part(parts)...);
+                        }
+                    }();
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                    }
+                    return {};
+                }
             }
             else
             {
-                auto res = conn_->template delete_by_id<DTO>(unwrap_key_part(id));
-                if (!res)
+                if constexpr (requires { conn_->template try_delete_by_id<DTO>(unwrap_key_part(id)); })
                 {
-                    return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                    return conn_->template try_delete_by_id<DTO>(unwrap_key_part(id));
                 }
-                return {};
+                else
+                {
+                    auto res = conn_->template delete_by_id<DTO>(unwrap_key_part(id));
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ map_conn_error(res.error().what()) };
+                    }
+                    return {};
+                }
             }
         }
 

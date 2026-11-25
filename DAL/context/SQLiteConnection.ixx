@@ -578,29 +578,41 @@ export namespace DAL
         }
 
         template<typename DTO>
-        [[nodiscard]] auto insert(const DTO& item)
+        [[nodiscard]] std::expected<void, Core::DbError> try_insert(const DTO& item)
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             const std::span<const DTO> one{ &item, 1 };
-            auto res = execute_insert_batch<DTO>(one, false);
+            return execute_insert_batch<DTO>(one, false);
+        }
+
+        template<typename DTO>
+        [[nodiscard]] auto insert(const DTO& item)
+        {
+            auto res = try_insert(item);
             if (!res)
             {
                 return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(res.error().message) };
             }
             return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ *conn_ };
+        }
+
+        template<typename DTO>
+        [[nodiscard]] std::expected<void, Core::DbError> try_insert_many(const std::vector<DTO>& items)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            return execute_insert_batch<DTO>(std::span<const DTO>{ items }, false);
         }
 
         template<typename DTO>
         [[nodiscard]] auto insert_many(const std::vector<DTO>& items)
         {
-            if (!is_open())
-            {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
-            }
-            auto res = execute_insert_batch<DTO>(std::span<const DTO>{ items }, false);
+            auto res = try_insert_many(items);
             if (!res)
             {
                 return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(res.error().message) };
@@ -609,15 +621,15 @@ export namespace DAL
         }
 
         template<typename DTO>
-        [[nodiscard]] auto update(const DTO& item)
+        [[nodiscard]] std::expected<void, Core::DbError> try_update(const DTO& item)
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             if (auto id_chk = validate_dto_ddl_identifiers<DTO>(); !id_chk)
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(id_chk.error().message) };
+                return id_chk;
             }
 
             static constexpr auto km = DAL::Schema::key_members_of<DTO>();
@@ -643,13 +655,13 @@ export namespace DAL
                     });
                 if (!exists_res)
                 {
-                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(exists_res.error().message) };
+                    return std::unexpected<Core::DbError>{ exists_res.error() };
                 }
                 if (exists_res.value().empty())
                 {
-                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Update failed: item not found") };
+                    return std::unexpected<Core::DbError>{ Core::DbError::not_found("Update failed: item not found") };
                 }
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ *conn_ };
+                return {};
             }
             else
             {
@@ -690,38 +702,55 @@ export namespace DAL
                     });
                 if (!upd_res)
                 {
-                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(upd_res.error().message) };
+                    return upd_res;
                 }
 
                 sqlite3* db = native_sqlite_handle();
                 if (db == nullptr || sqlite3_changes(db) == 0)
                 {
-                    return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Update failed: item not found") };
+                    return std::unexpected<Core::DbError>{ Core::DbError::not_found("Update failed: item not found") };
                 }
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ *conn_ };
+                return {};
             }
         }
 
+        template<typename DTO>
+        [[nodiscard]] auto update(const DTO& item)
+        {
+            auto res = try_update(item);
+            if (!res)
+            {
+                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(res.error().message) };
+            }
+            return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ *conn_ };
+        }
+
         template<typename DTO, typename IdType>
-        [[nodiscard]] auto delete_by_id(const IdType& id)
+        [[nodiscard]] std::expected<void, Core::DbError> try_delete_by_id(const IdType& id)
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             if (auto id_chk = validate_dto_ddl_identifiers<DTO>(); !id_chk)
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(id_chk.error().message) };
+                return id_chk;
             }
             constexpr auto pk_m = DAL::Schema::primary_key_member<DTO>();
             const std::string sql =
                 std::format("DELETE FROM \"{}\" WHERE \"{}\" = ?;", std::string_view{ DTO::tablename }, std::meta::identifier_of(pk_m));
-            auto del_res = execute_dml_bound(
+            return execute_dml_bound(
                 sql,
                 [&](sqlite3* db, sqlite3_stmt* stmt) -> std::expected<void, Core::DbError>
                 {
                     return bind_typed_field(db, stmt, 1, id, false);
                 });
+        }
+
+        template<typename DTO, typename IdType>
+        [[nodiscard]] auto delete_by_id(const IdType& id)
+        {
+            auto del_res = try_delete_by_id<DTO>(id);
             if (!del_res)
             {
                 return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(del_res.error().message) };
@@ -730,24 +759,30 @@ export namespace DAL
         }
 
         template<typename DTO, typename... Parts>
-        [[nodiscard]] auto delete_by_composite_id(const Parts&... parts)
+        [[nodiscard]] std::expected<void, Core::DbError> try_delete_by_composite_id(const Parts&... parts)
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             if (auto id_chk = validate_dto_ddl_identifiers<DTO>(); !id_chk)
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(id_chk.error().message) };
+                return id_chk;
             }
             const std::string sql =
                 std::format("DELETE FROM \"{}\" WHERE {};", std::string_view{ DTO::tablename }, build_key_where_sql<DTO>());
-            auto del_res = execute_dml_bound(
+            return execute_dml_bound(
                 sql,
                 [&](sqlite3* db, sqlite3_stmt* stmt) -> std::expected<void, Core::DbError>
                 {
                     return bind_variadic_fields(db, stmt, 1, parts...);
                 });
+        }
+
+        template<typename DTO, typename... Parts>
+        [[nodiscard]] auto delete_by_composite_id(const Parts&... parts)
+        {
+            auto del_res = try_delete_by_composite_id<DTO>(parts...);
             if (!del_res)
             {
                 return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(del_res.error().message) };
@@ -922,14 +957,21 @@ export namespace DAL
 
         template<typename DTO>
             requires DAL::Schema::RelationalEntity<DTO>
-        [[nodiscard]] auto upsert(const DTO& item)
+        [[nodiscard]] std::expected<void, Core::DbError> try_upsert(const DTO& item)
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             const std::span<const DTO> one{ &item, 1 };
-            auto res = execute_insert_batch<DTO>(one, true);
+            return execute_insert_batch<DTO>(one, true);
+        }
+
+        template<typename DTO>
+            requires DAL::Schema::RelationalEntity<DTO>
+        [[nodiscard]] auto upsert(const DTO& item)
+        {
+            auto res = try_upsert(item);
             if (!res)
             {
                 return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(res.error().message) };
@@ -939,13 +981,20 @@ export namespace DAL
 
         template<typename DTO>
             requires DAL::Schema::RelationalEntity<DTO>
-        [[nodiscard]] auto upsert_many(const std::vector<DTO>& items)
+        [[nodiscard]] std::expected<void, Core::DbError> try_upsert_many(const std::vector<DTO>& items)
         {
             if (!is_open())
             {
-                return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error("Database connection is closed") };
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto res = execute_insert_batch<DTO>(std::span<const DTO>{ items }, true);
+            return execute_insert_batch<DTO>(std::span<const DTO>{ items }, true);
+        }
+
+        template<typename DTO>
+            requires DAL::Schema::RelationalEntity<DTO>
+        [[nodiscard]] auto upsert_many(const std::vector<DTO>& items)
+        {
+            auto res = try_upsert_many(items);
             if (!res)
             {
                 return sqlgen::Result<sqlgen::Ref<sqlgen::sqlite::Connection>>{ sqlgen::error(res.error().message) };
@@ -1062,10 +1111,19 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto res = (*conn_)->execute(std::format("PRAGMA busy_timeout = {};", timeout.count()));
-            if (!res)
+            if (timeout.count() < 0 || timeout.count() > std::numeric_limits<int>::max())
             {
-                return std::unexpected<Core::DbError>{ map_sqlite_error(res.error().what()) };
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    "SQLite busy_timeout must be between 0 and INT_MAX milliseconds") };
+            }
+            sqlite3* db = native_sqlite_handle();
+            if (db == nullptr)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Native SQLite handle is unavailable") };
+            }
+            if (sqlite3_busy_timeout(db, static_cast<int>(timeout.count())) != SQLITE_OK)
+            {
+                return std::unexpected<Core::DbError>{ map_sqlite_error(sqlite3_errmsg(db)) };
             }
             return {};
         }
@@ -1678,7 +1736,8 @@ export namespace DAL
         }
 
         // Rewrites embedded NUL bytes inside single-quoted string literals emitted by sqlgen::sqlite::to_sql
-        // into SQLite `'...' || char(0) || '...'` expressions while rejecting NUL bytes outside string literals.
+        // into SQLite `'...' || char(0) || '...'` expressions while tracking double-quoted identifiers
+        // and rejecting NUL bytes outside string literals.
         [[nodiscard]] static std::expected<std::string, Core::DbError> encode_sqlgen_embedded_nuls(std::string_view sql)
         {
             if (sql.find('\0') == std::string_view::npos)
@@ -1688,10 +1747,32 @@ export namespace DAL
             std::string out;
             out.reserve(sql.size() + 32);
             bool in_string = false;
+            bool in_double_quote = false;
             for (std::size_t i = 0; i < sql.size(); ++i)
             {
                 const char ch = sql[i];
-                if (!in_string)
+                if (in_double_quote)
+                {
+                    if (ch == '\0')
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            "SQL identifier contains embedded NUL") };
+                    }
+                    out.push_back(ch);
+                    if (ch == '"')
+                    {
+                        if ((i + 1) < sql.size() && sql[i + 1] == '"')
+                        {
+                            out.push_back('"');
+                            ++i;
+                        }
+                        else
+                        {
+                            in_double_quote = false;
+                        }
+                    }
+                }
+                else if (!in_string)
                 {
                     if (ch == '\0')
                     {
@@ -1701,6 +1782,10 @@ export namespace DAL
                     if (ch == '\'')
                     {
                         in_string = true;
+                    }
+                    else if (ch == '"')
+                    {
+                        in_double_quote = true;
                     }
                     out.push_back(ch);
                 }
@@ -2160,10 +2245,22 @@ export namespace DAL
                 row.reserve(static_cast<std::size_t>(col_count));
                 for (int c = 0; c < col_count; ++c)
                 {
-                    if (sqlite3_column_type(raw_stmt, c) == SQLITE_NULL)
+                    const int col_type = sqlite3_column_type(raw_stmt, c);
+                    if (col_type == SQLITE_NULL)
                     {
                         row.emplace_back(std::nullopt);
                         continue;
+                    }
+                    if (col_type == SQLITE_FLOAT)
+                    {
+                        const double d = sqlite3_column_double(raw_stmt, c);
+                        char buf[64];
+                        const auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), d);
+                        if (ec == std::errc{})
+                        {
+                            row.emplace_back(std::in_place, buf, static_cast<std::size_t>(ptr - buf));
+                            continue;
+                        }
                     }
                     const auto* txt = reinterpret_cast<const char*>(sqlite3_column_text(raw_stmt, c));
                     const int len = sqlite3_column_bytes(raw_stmt, c);
@@ -2211,7 +2308,7 @@ export namespace DAL
                 auto parsed = sqlgen::internal::from_str_vec<RowT>(row);
                 if (!parsed)
                 {
-                    return std::unexpected<Core::DbError>{ map_sqlite_error(parsed.error().what()) };
+                    return std::unexpected<Core::DbError>{ Core::DbError::unknown(parsed.error().what()) };
                 }
                 result.push_back(std::move(*parsed));
             }
@@ -2311,34 +2408,34 @@ export namespace DAL
                 if (ext_code != SQLITE_OK && ext_code != SQLITE_ROW && ext_code != SQLITE_DONE)
                 {
                     Core::DbError err = Core::DbError::unknown(std::string(msg));
-                    switch (ext_code)
+                    if (ext_code == SQLITE_CONSTRAINT_UNIQUE || ext_code == SQLITE_CONSTRAINT_PRIMARYKEY)
                     {
-                    case SQLITE_CONSTRAINT_UNIQUE:
-                    case SQLITE_CONSTRAINT_PRIMARYKEY:
                         err = Core::DbError::duplicate_key(std::string(msg));
-                        break;
-                    case SQLITE_CONSTRAINT_FOREIGNKEY:
-                    case SQLITE_CONSTRAINT_CHECK:
-                    case SQLITE_CONSTRAINT_NOTNULL:
-                        err = Core::DbError::constraint_violation(std::string(msg));
-                        break;
-                    case SQLITE_BUSY:
-                    case SQLITE_LOCKED:
-                    case SQLITE_CANTOPEN:
-                        err = Core::DbError::connection_error(std::string(msg));
-                        break;
-                    default:
-                        err = Core::DbError::map_from_message(msg);
-                        err.trace = Core::DbError::capture_debug_trace();
-                        break;
+                    }
+                    else
+                    {
+                        const int primary_code = ext_code & 0xFF;
+                        switch (primary_code)
+                        {
+                        case SQLITE_CONSTRAINT:
+                            err = Core::DbError::constraint_violation(std::string(msg));
+                            break;
+                        case SQLITE_BUSY:
+                        case SQLITE_LOCKED:
+                        case SQLITE_CANTOPEN:
+                        case SQLITE_IOERR:
+                            err = Core::DbError::connection_error(std::string(msg));
+                            break;
+                        default:
+                            err = Core::DbError::map_from_message(msg);
+                            break;
+                        }
                     }
                     err.native_code = ext_code;
                     return err;
                 }
             }
-            auto err = Core::DbError::map_from_message(msg);
-            err.trace = Core::DbError::capture_debug_trace();
-            return err;
+            return Core::DbError::map_from_message(msg);
         }
 
         std::optional<sqlgen::Ref<sqlgen::sqlite::Connection>> conn_;

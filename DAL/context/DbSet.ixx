@@ -1620,6 +1620,10 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
+            if (!conn_->is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
             if (limit_.has_value() || offset_.has_value())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
@@ -3061,7 +3065,30 @@ export namespace DAL
 
             if (conn)
             {
-                if constexpr (requires(ConnectionHandle& c, const DTO& d) { c.upsert(d); })
+                if constexpr (requires(ConnectionHandle& c, const DTO& d) { c.try_upsert(d); })
+                {
+                    auto res = conn->try_upsert(dto);
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ res.error() };
+                    }
+                    if constexpr (
+                        Schema::SinglePrimaryKey<DTO> && Schema::has_auto_incr_primary_key<DTO>() &&
+                        requires(const ConnectionHandle& c) { c.try_last_insert_rowid(); })
+                    {
+                        if (needs_rowid)
+                        {
+                            auto rowid_res = conn->try_last_insert_rowid();
+                            if (!rowid_res)
+                            {
+                                return std::unexpected<Core::DbError>{ rowid_res.error() };
+                            }
+                            return DAL::Mappers::MapperTraits<Domain, DTO>::try_with_primary_key(item, *rowid_res);
+                        }
+                    }
+                    return item;
+                }
+                else if constexpr (requires(ConnectionHandle& c, const DTO& d) { c.upsert(d); })
                 {
                     auto res = conn->upsert(dto);
                     if (!res)
@@ -3179,7 +3206,22 @@ export namespace DAL
             bool executed_bulk = false;
             if (!needs_per_item_hydration && conn)
             {
-                if constexpr (requires(ConnectionHandle& c, const std::vector<DTO>& dtos) { c.upsert_many(dtos); })
+                if constexpr (requires(ConnectionHandle& c, const std::vector<DTO>& dtos) { c.try_upsert_many(dtos); })
+                {
+                    std::vector<DTO> dtos;
+                    dtos.reserve(items.size());
+                    for (const auto& item : items)
+                    {
+                        dtos.push_back(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item));
+                    }
+                    auto res = conn->try_upsert_many(dtos);
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ res.error() };
+                    }
+                    executed_bulk = true;
+                }
+                else if constexpr (requires(ConnectionHandle& c, const std::vector<DTO>& dtos) { c.upsert_many(dtos); })
                 {
                     std::vector<DTO> dtos;
                     dtos.reserve(items.size());

@@ -121,7 +121,7 @@ target_link_libraries(my_app PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
 
 - **Primary Fallible API (`[[nodiscard]] std::expected<T, Core::DbError>`):** All connection, DDL, mutation, transaction, and `try_*` read methods return `std::expected<T, Core::DbError>` (`SQLiteConnection::connect`, `ensure_created`, `add`, `add_returning`, `update`, `remove`, `upsert`, `try_find`, `try_to_vector`, `try_first_or_default`, `try_count`, `try_any`, `try_avg`, `save_changes`, `transaction`, etc.).
 - **Convenience Query Wrappers:** Unprefixed read helpers (`find`, `to_vector`, `first_or_default`, `count`, `any`) return safe defaults (`std::nullopt`, `{}`, `0`, `false`) if an underlying error occurs. Prefer `try_*` whenever errors must be inspected or propagated.
-- **Debug Diagnostics:** In Debug builds (`#ifndef NDEBUG`), `Core::DbError` captures up to 8 frames via `std::stacktrace::current(...)` and formats them in `err.to_string()`.
+- **Error Diagnostics & Bound Queries:** In Debug builds (`#ifndef NDEBUG`), `Core::DbError` captures up to 8 frames via `std::stacktrace::current(...)` and formats them in `err.to_string()`. Core CRUD and `upsert` operations use parameterized `sqlite3_stmt` bindings directly; for `WHERE` or `SET` predicates involving subnormal/high-precision or non-finite floating-point values, prefer `query_rows` / `execute_prepared` with bound `DAL::DynamicCell` parameters (as upstream `sqlgen`'s SQL literal serializer uses `std::to_string`).
 
 ## Identity Strategy Guide
 
