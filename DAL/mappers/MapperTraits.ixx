@@ -645,40 +645,105 @@ export namespace DAL::Mappers
     // =========================================================================
 
     template<typename Domain, typename DTO, rfl::internal::StringLiteral ColOrField>
-    consteval bool is_valid_query_column()
+    consteval std::optional<std::meta::info> try_resolve_dto_member()
     {
         constexpr std::string_view name = ColOrField.string_view();
-        constexpr auto& dto_members = DAL::Schema::members_v<DTO>;
+        static constexpr auto& dto_members = DAL::Schema::members_v<DTO>;
 
-        for (auto m : dto_members)
+        // Tier 1: exact DTO column name match.
         {
-            if (std::meta::identifier_of(m) == name)
+            std::optional<std::meta::info> hit;
+            int count = 0;
+            for (auto m : dto_members)
             {
-                return true;
-            }
-        }
-
-        for (auto m : dto_members)
-        {
-            if (detail::matches_snake_to_camel(std::meta::identifier_of(m), name))
-            {
-                return true;
-            }
-        }
-
-        if constexpr (!std::is_same_v<Domain, DTO>)
-        {
-            constexpr auto& dom_members = DAL::Schema::unchecked_members_v<Domain>;
-            for (auto dm : dom_members)
-            {
-                std::string_view d_name = std::meta::identifier_of(dm);
-                if (d_name == name || detail::strip_member_affixes(d_name) == detail::strip_member_affixes(name))
+                if (std::meta::identifier_of(m) == name)
                 {
-                    return true;
+                    hit = m;
+                    ++count;
                 }
             }
+            if (count == 1)
+            {
+                return hit;
+            }
+            if (count > 1)
+            {
+                return std::nullopt;
+            }
         }
-        return false;
+
+        // Tier 2: snake_case DTO column matched by camelCase/affixed query name.
+        {
+            std::optional<std::meta::info> hit;
+            int count = 0;
+            for (auto m : dto_members)
+            {
+                if (detail::matches_snake_to_camel(std::meta::identifier_of(m), name))
+                {
+                    hit = m;
+                    ++count;
+                }
+            }
+            if (count == 1)
+            {
+                return hit;
+            }
+            if (count > 1)
+            {
+                return std::nullopt;
+            }
+        }
+
+        // Tier 3: Domain field name (exact or affix-stripped) resolved through MapperTraits (supports [[=column]]).
+        if constexpr (!std::is_same_v<Domain, DTO>)
+        {
+            static constexpr auto& dom_members = DAL::Schema::unchecked_members_v<Domain>;
+            std::optional<std::meta::info> exact_dom;
+            int exact_count = 0;
+            for (auto dm : dom_members)
+            {
+                if (std::meta::identifier_of(dm) == name)
+                {
+                    exact_dom = dm;
+                    ++exact_count;
+                }
+            }
+            if (exact_count == 1)
+            {
+                return detail::find_matching_dto_member(*exact_dom, dto_members);
+            }
+            if (exact_count > 1)
+            {
+                return std::nullopt;
+            }
+
+            std::optional<std::meta::info> affix_dom;
+            int affix_count = 0;
+            const std::string_view stripped = detail::strip_member_affixes(name);
+            for (auto dm : dom_members)
+            {
+                if (detail::strip_member_affixes(std::meta::identifier_of(dm)) == stripped)
+                {
+                    affix_dom = dm;
+                    ++affix_count;
+                }
+            }
+            if (affix_count == 1)
+            {
+                return detail::find_matching_dto_member(*affix_dom, dto_members);
+            }
+            if (affix_count > 1)
+            {
+                return std::nullopt;
+            }
+        }
+        return std::nullopt;
+    }
+
+    template<typename Domain, typename DTO, rfl::internal::StringLiteral ColOrField>
+    consteval bool is_valid_query_column()
+    {
+        return try_resolve_dto_member<Domain, DTO, ColOrField>().has_value();
     }
 
     template<typename Domain, typename DTO, rfl::internal::StringLiteral ColOrField>
@@ -688,38 +753,11 @@ export namespace DAL::Mappers
         requires ValidQueryColumn<Domain, DTO, ColOrField>
     consteval std::meta::info resolve_dto_member()
     {
-        constexpr std::string_view name = ColOrField.string_view();
-        static constexpr auto& dto_members = DAL::Schema::members_v<DTO>;
-
-        for (auto m : dto_members)
+        if (auto resolved = try_resolve_dto_member<Domain, DTO, ColOrField>())
         {
-            if (std::meta::identifier_of(m) == name)
-            {
-                return m;
-            }
+            return *resolved;
         }
-
-        for (auto m : dto_members)
-        {
-            if (detail::matches_snake_to_camel(std::meta::identifier_of(m), name))
-            {
-                return m;
-            }
-        }
-
-        if constexpr (!std::is_same_v<Domain, DTO>)
-        {
-            static constexpr auto& dom_members = DAL::Schema::unchecked_members_v<Domain>;
-            for (auto dm : dom_members)
-            {
-                std::string_view d_name = std::meta::identifier_of(dm);
-                if (d_name == name || detail::strip_member_affixes(d_name) == detail::strip_member_affixes(name))
-                {
-                    return detail::find_matching_dto_member(dm, dto_members);
-                }
-            }
-        }
-        throw std::invalid_argument("Invalid query column or domain field name");
+        throw std::invalid_argument("Invalid or ambiguous query column or domain field name");
     }
 
 } // namespace DAL::Mappers

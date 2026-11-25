@@ -391,6 +391,12 @@ export namespace DAL
             static constexpr auto dbset_members = dbset_members_of<DerivedType>();
             static constexpr auto order = Schema::reverse_index_array(topological_dbset_order<DerivedType>());
 
+            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(self.conn_);
+            if (auto begin_res = tx_guard.begin(); !begin_res)
+            {
+                return begin_res;
+            }
+
             std::expected<void, Core::DbError> result{};
             template for (constexpr std::size_t idx : order)
             {
@@ -403,7 +409,11 @@ export namespace DAL
                 }
             }
 
-            return result;
+            if (!result)
+            {
+                return result;
+            }
+            return tx_guard.commit();
         }
 
         template<typename... Domains>
@@ -423,6 +433,12 @@ export namespace DAL
                 }...
             };
 
+            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn_);
+            if (auto begin_res = tx_guard.begin(); !begin_res)
+            {
+                return begin_res;
+            }
+
             for (std::size_t idx : order)
             {
                 auto res = droppers[idx]();
@@ -432,7 +448,7 @@ export namespace DAL
                 }
             }
 
-            return {};
+            return tx_guard.commit();
         }
 
         // =====================================================================
@@ -1538,6 +1554,19 @@ export namespace DAL
                         pushed_pending_base_ = false;
                     }
                 };
+                if (ctx_->pending_changes_count() > saved_pending_size_)
+                {
+                    auto flush_res = ctx_->flush_pending_since(saved_pending_size_);
+                    if (!flush_res)
+                    {
+                        (void)ctx_->rollback_to_savepoint(savepoint_name_);
+                        ctx_->release_savepoint_depth();
+                        ctx_->restore_checkpoint_baselines(scope_checkpoint_);
+                        pop_base();
+                        rolled_back_ = true;
+                        return flush_res;
+                    }
+                }
                 (void)ctx_->detect_changes();
                 if (ctx_->pending_changes_count() > saved_pending_size_)
                 {

@@ -760,4 +760,32 @@ namespace
         EXPECT_EQ(pagedAgg.error().code, Core::DbErrorCode::ConstraintViolation);
     }
 
+    TEST(Phase53QueryProjectionTest, SelectAndSelectDistinctHandleNullableColumnWithNullRows)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.somethings.add(Core::Something(Core::SomethingId{ 0 }, "Item1", "CatA", std::nullopt)).has_value());
+        ASSERT_TRUE(db.somethings.add(Core::Something(Core::SomethingId{ 0 }, "Item2", "CatA", "HasDesc")).has_value());
+        ASSERT_TRUE(db.somethings.add(Core::Something(Core::SomethingId{ 0 }, "Item3", "CatA", std::nullopt)).has_value());
+        ASSERT_TRUE(db.somethings.add(Core::Something(Core::SomethingId{ 0 }, "Item4", "CatA", "HasDesc")).has_value());
+
+        // Single-column select on std::optional<std::string> MUST return std::nullopt instead of throwing bad_optional_access.
+        auto allDescs = db.somethings.order_by<"id">(false).try_select<"description">();
+        ASSERT_TRUE(allDescs.has_value()) << allDescs.error().to_string();
+        ASSERT_EQ(allDescs->size(), 4u);
+        EXPECT_FALSE((*allDescs)[0].has_value());
+        EXPECT_EQ((*allDescs)[1], std::optional<std::string>{ "HasDesc" });
+        EXPECT_FALSE((*allDescs)[2].has_value());
+        EXPECT_EQ((*allDescs)[3], std::optional<std::string>{ "HasDesc" });
+
+        auto distinctDescs = db.somethings.order_by<"description">(false).try_select_distinct<"description">();
+        ASSERT_TRUE(distinctDescs.has_value()) << distinctDescs.error().to_string();
+        ASSERT_EQ(distinctDescs->size(), 2u);
+        EXPECT_FALSE((*distinctDescs)[0].has_value());
+        EXPECT_EQ((*distinctDescs)[1], std::optional<std::string>{ "HasDesc" });
+    }
+
 } // namespace

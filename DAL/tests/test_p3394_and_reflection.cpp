@@ -527,4 +527,20 @@ namespace
         ASSERT_TRUE(found.has_value());
         EXPECT_EQ(found->getDisplayName(), "Grace Hopper");
     }
+
+    struct AmbiguousQueryColsDTO
+    {
+        static constexpr auto tablename = "AmbiguousQueryCols";
+        sqlgen::PrimaryKey<std::int32_t, false> user_id{ 0 };
+        std::int32_t userid = 0;
+    };
+
+    TEST(Phase53ReflectionAmbiguityTest, ValidQueryColumnRejectsAmbiguousMatches)
+    {
+        static_assert(DAL::Mappers::ValidQueryColumn<AmbiguousQueryColsDTO, AmbiguousQueryColsDTO, "user_id">);
+        static_assert(DAL::Mappers::ValidQueryColumn<AmbiguousQueryColsDTO, AmbiguousQueryColsDTO, "userid">);
+        // "userId" matches both `user_id` and `userid` via snake_to_camel -> MUST be rejected as ambiguous.
+        static_assert(!DAL::Mappers::ValidQueryColumn<AmbiguousQueryColsDTO, AmbiguousQueryColsDTO, "userId">);
+        SUCCEED();
+    }
 } // namespace

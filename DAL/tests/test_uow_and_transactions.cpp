@@ -1743,4 +1743,139 @@ namespace
         EXPECT_EQ(countUpdates(), 1);
     }
 
+    // =========================================================================
+    // Phase 53 (P1): Tracker Coherence, Nested TransactionScope & Atomic Drop
+    // =========================================================================
+
+    TEST(Phase53UoWAndTrackerCoherenceTest, ExplicitUpdateAndUpsertSyncTrackedInstanceWithoutReverting)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Alice", "Initial")).has_value());
+
+        db.enable_change_tracking();
+        auto originalPtr = db.people.find_tracked(1);
+        ASSERT_NE(originalPtr, nullptr);
+        EXPECT_EQ(originalPtr->getFirstName(), "Alice");
+
+        // 1. Explicit value update with a separate Person object MUST NOT be reverted on save_changes().
+        ASSERT_TRUE(db.people.update(Core::Person(Core::PersonId{ 1 }, "Bob", "Updated")).has_value());
+        ASSERT_TRUE(db.save_changes().has_value());
+        auto afterSave = db.people.find(1);
+        ASSERT_TRUE(afterSave.has_value());
+        EXPECT_EQ(afterSave->getFirstName(), "Bob");
+
+        auto trackedNow = db.people.find_tracked(1);
+        ASSERT_NE(trackedNow, nullptr);
+        EXPECT_EQ(trackedNow->getFirstName(), "Bob");
+
+        // 2. Mutating the active tracked pointer and calling update(*trackedNow) preserves pointer tracking.
+        trackedNow->setFirstName("Carol");
+        ASSERT_TRUE(db.people.update(*trackedNow).has_value());
+        trackedNow->setFirstName("CarolV2");
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "CarolV2");
+
+        // 3. Explicit update inside a rolled-back transaction restores the prior tracked instance & baseline.
+        auto txRes = db.transaction(
+            [&]() -> std::expected<void, Core::DbError>
+            {
+                auto r = db.people.update(Core::Person(Core::PersonId{ 1 }, "Transient", "RolledBack"));
+                if (!r)
+                {
+                    return r;
+                }
+                EXPECT_EQ(db.people.find_tracked(1)->getFirstName(), "Transient");
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("abort update") };
+            });
+        ASSERT_FALSE(txRes.has_value());
+        EXPECT_EQ(db.people.find_tracked(1).get(), trackedNow.get());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "CarolV2");
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "CarolV2");
+    }
+
+    TEST(Phase53UoWAndTrackerCoherenceTest, NestedTransactionScopeFlushesStagedOpsBeforeDetectChanges)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(conn->execute_raw("CREATE TABLE txscope_updates (n INTEGER NOT NULL);").has_value());
+        ASSERT_TRUE(conn->execute_raw(
+                            "CREATE TRIGGER trg_txscope_updates AFTER UPDATE ON Person "
+                            "BEGIN INSERT INTO txscope_updates(n) VALUES (1); END;")
+                        .has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Ada", "Initial")).has_value());
+
+        db.enable_change_tracking();
+        db.defer_changes(true);
+        auto tracked = db.people.find_tracked(1);
+        ASSERT_NE(tracked, nullptr);
+
+        {
+            DAL::TransactionScope outer(db);
+            ASSERT_TRUE(outer.begin_result().has_value());
+            {
+                DAL::TransactionScope inner(db);
+                ASSERT_TRUE(inner.begin_result().has_value());
+                tracked->setFirstName("AdaScoped");
+                ASSERT_TRUE(db.people.update(*tracked).has_value());
+                ASSERT_TRUE(inner.commit().has_value());
+            }
+            ASSERT_TRUE(outer.commit().has_value());
+        }
+
+        auto rows = conn->query_rows("SELECT COUNT(*) FROM txscope_updates;");
+        ASSERT_TRUE(rows.has_value());
+        EXPECT_EQ(std::get<std::int64_t>(rows->rows[0].cells[0]), 1);
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "AdaScoped");
+    }
+
+    struct AtomicDropGoodDTO
+    {
+        static constexpr auto tablename = "AtomicDropGood";
+        sqlgen::PrimaryKey<std::int32_t, true> id{ 0 };
+        std::string label;
+    };
+
+    struct AtomicDropBadDTO
+    {
+        static constexpr auto tablename = "Bad\"DropTable";
+        sqlgen::PrimaryKey<std::int32_t, true> id{ 0 };
+        std::string label;
+    };
+
+    struct AtomicDropContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<AtomicDropGoodDTO> good{ this };
+        Set<AtomicDropBadDTO> bad{ this };
+
+        explicit AtomicDropContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(Phase53UoWAndTrackerCoherenceTest, EnsureDeletedIsTransactionalAndRollsBackOnFailure)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<AtomicDropGoodDTO>().has_value());
+
+        AtomicDropContext db(conn);
+        auto dropRes = db.ensure_deleted();
+        ASSERT_FALSE(dropRes.has_value());
+        EXPECT_FALSE(db.in_transaction());
+
+        // AtomicDropGood MUST still exist because ensure_deleted() rolled back when AtomicDropBad failed.
+        auto tablesRes = db.list_tables();
+        ASSERT_TRUE(tablesRes.has_value());
+        EXPECT_TRUE(std::ranges::contains(*tablesRes, std::string_view{ "AtomicDropGood" }));
+    }
+
 } // namespace

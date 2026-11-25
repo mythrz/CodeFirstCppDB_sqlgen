@@ -77,6 +77,37 @@ export namespace DAL
             std::optional<typename UnwrapColumnScalar<std::remove_cvref_t<RawFieldT>>::type>,
             typename UnwrapColumnScalar<std::remove_cvref_t<RawFieldT>>::type>;
 
+        template<typename T>
+        [[nodiscard]] auto unwrap_projected_value(T&& val)
+        {
+            using CleanT = std::remove_cvref_t<T>;
+            if constexpr (Schema::detail::is_optional_v<CleanT>)
+            {
+                using InnerT = typename CleanT::value_type;
+                if constexpr (requires { typename InnerT::ReflectionType; } && requires(const InnerT& x) { x.value(); })
+                {
+                    using UnwrappedInnerT = std::remove_cvref_t<decltype(unwrap_projected_value(std::declval<InnerT>()))>;
+                    if (!val.has_value())
+                    {
+                        return std::optional<UnwrappedInnerT>{ std::nullopt };
+                    }
+                    return std::optional<UnwrappedInnerT>{ unwrap_projected_value(std::move(*val)) };
+                }
+                else
+                {
+                    return std::forward<T>(val);
+                }
+            }
+            else if constexpr (requires { typename CleanT::ReflectionType; } && requires { val.value(); })
+            {
+                return unwrap_projected_value(val.value());
+            }
+            else
+            {
+                return std::forward<T>(val);
+            }
+        }
+
         inline constexpr std::size_t kSqliteUnboundedLimit = static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
 
         template<typename OrderByVariant, typename NewAscCol, typename NewDescCol>
@@ -314,10 +345,7 @@ export namespace DAL
                     });
                 for (const auto& [k, entry] : cp.saved_entries)
                 {
-                    if (!tracked_entries_.contains(k))
-                    {
-                        tracked_entries_.emplace(k, entry);
-                    }
+                    tracked_entries_.insert_or_assign(k, entry);
                 }
                 for (const auto& [k, snap] : cp.baselines)
                 {
@@ -1166,14 +1194,7 @@ export namespace DAL
             result.reserve(rows_res->size());
             for (auto& r : *rows_res)
             {
-                if constexpr (requires { r.val.value(); })
-                {
-                    result.push_back(r.val.value());
-                }
-                else
-                {
-                    result.push_back(std::move(r.val));
-                }
+                result.push_back(detail::unwrap_projected_value(std::move(r.val)));
             }
             return std::expected<std::vector<ColValueT>, Core::DbError>{ std::move(result) };
         }
@@ -1280,14 +1301,7 @@ export namespace DAL
             result.reserve(rows_res->size());
             for (auto& r : *rows_res)
             {
-                if constexpr (requires { r.val.value(); })
-                {
-                    result.push_back(r.val.value());
-                }
-                else
-                {
-                    result.push_back(std::move(r.val));
-                }
+                result.push_back(detail::unwrap_projected_value(std::move(r.val)));
             }
             return std::expected<std::vector<ColValueT>, Core::DbError>{ std::move(result) };
         }
@@ -2083,7 +2097,7 @@ export namespace DAL
             auto res = repo_->update_one(item);
             if (res && is_tracking_enabled())
             {
-                record_snapshot(item);
+                record_write_snapshot(item);
             }
             return res;
         }
@@ -2135,9 +2149,14 @@ export namespace DAL
                     "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
             if (!enqueue_op_fn_(
-                    [repo = repo_, conn = conn_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, item]()
+                    [repo = repo_,
+                     conn = conn_,
+                     upsert_fn = upsert_tracked_fn_,
+                     find_fn = find_tracked_fn_,
+                     tracking_fn = is_tracking_enabled_fn_,
+                     item]()
                     {
-                        return upsert_immediate_with(repo, conn, upsert_fn, tracking_fn, item);
+                        return upsert_immediate_with(repo, conn, upsert_fn, find_fn, tracking_fn, item);
                     }))
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
@@ -2154,9 +2173,14 @@ export namespace DAL
                     "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
             if (!enqueue_op_fn_(
-                    [repo = repo_, conn = conn_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, items]()
+                    [repo = repo_,
+                     conn = conn_,
+                     upsert_fn = upsert_tracked_fn_,
+                     find_fn = find_tracked_fn_,
+                     tracking_fn = is_tracking_enabled_fn_,
+                     items]()
                     {
-                        return upsert_many_immediate_with(repo, conn, upsert_fn, tracking_fn, items);
+                        return upsert_many_immediate_with(repo, conn, upsert_fn, find_fn, tracking_fn, items);
                     }))
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
@@ -2228,12 +2252,16 @@ export namespace DAL
                     "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
             if (!enqueue_op_fn_(
-                    [repo = repo_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, item]()
+                    [repo = repo_,
+                     upsert_fn = upsert_tracked_fn_,
+                     find_fn = find_tracked_fn_,
+                     tracking_fn = is_tracking_enabled_fn_,
+                     item]()
                     {
                         auto res = repo->update_one(item);
                         if (res && tracking_fn && tracking_fn())
                         {
-                            record_snapshot_with(repo, upsert_fn, item);
+                            record_write_snapshot_with(repo, upsert_fn, find_fn, item);
                         }
                         return res;
                     }))
@@ -2928,12 +2956,12 @@ export namespace DAL
 
         std::expected<void, Core::DbError> upsert_immediate(const Domain& item)
         {
-            return upsert_immediate_with(repo_, conn_, upsert_tracked_fn_, is_tracking_enabled_fn_, item);
+            return upsert_immediate_with(repo_, conn_, upsert_tracked_fn_, find_tracked_fn_, is_tracking_enabled_fn_, item);
         }
 
         std::expected<void, Core::DbError> upsert_many_immediate(const std::vector<Domain>& items)
         {
-            return upsert_many_immediate_with(repo_, conn_, upsert_tracked_fn_, is_tracking_enabled_fn_, items);
+            return upsert_many_immediate_with(repo_, conn_, upsert_tracked_fn_, find_tracked_fn_, is_tracking_enabled_fn_, items);
         }
 
         [[nodiscard]] static Core::DbError map_conn_error(const std::shared_ptr<ConnectionHandle>& conn, std::string_view msg)
@@ -3085,6 +3113,7 @@ export namespace DAL
             const std::shared_ptr<RepoType>& repo,
             const std::shared_ptr<ConnectionHandle>& conn,
             const UpsertTrackedFn& upsert_fn,
+            const std::function<std::shared_ptr<void>(std::type_index, const std::string&)>& find_fn,
             const std::function<bool()>& tracking_fn,
             const Domain& item,
             bool record_tracking = true)
@@ -3108,7 +3137,7 @@ export namespace DAL
             }
             if (tracking)
             {
-                record_snapshot_with(repo, upsert_fn, *hydrated);
+                record_write_snapshot_with(repo, upsert_fn, find_fn, *hydrated);
             }
             return {};
         }
@@ -3117,6 +3146,7 @@ export namespace DAL
             const std::shared_ptr<RepoType>& repo,
             const std::shared_ptr<ConnectionHandle>& conn,
             const UpsertTrackedFn& upsert_fn,
+            const std::function<std::shared_ptr<void>(std::type_index, const std::string&)>& find_fn,
             const std::function<bool()>& tracking_fn,
             const std::vector<Domain>& items)
         {
@@ -3196,7 +3226,7 @@ export namespace DAL
                 const auto& to_track = executed_bulk ? items : hydrated_to_track;
                 for (const auto& item : to_track)
                 {
-                    record_snapshot_with(repo, upsert_fn, item);
+                    record_write_snapshot_with(repo, upsert_fn, find_fn, item);
                 }
             }
             return {};
@@ -3276,6 +3306,11 @@ export namespace DAL
             record_snapshot_with(repo_, upsert_tracked_fn_, entity);
         }
 
+        void record_write_snapshot(const Domain& entity) const
+        {
+            record_write_snapshot_with(repo_, upsert_tracked_fn_, find_tracked_fn_, entity);
+        }
+
         static void record_snapshot_with(
             const std::shared_ptr<RepoType>& repo, const UpsertTrackedFn& upsert_tracked_fn, const Domain& entity)
         {
@@ -3286,6 +3321,35 @@ export namespace DAL
             auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
             auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity));
             upsert_snapshot_entry(upsert_tracked_fn, format_key(key), true, nullptr, repo, std::move(baseline));
+        }
+
+        static void record_write_snapshot_with(
+            const std::shared_ptr<RepoType>& repo,
+            const UpsertTrackedFn& upsert_tracked_fn,
+            const std::function<std::shared_ptr<void>(std::type_index, const std::string&)>& find_tracked_fn,
+            const Domain& entity)
+        {
+            if (!upsert_tracked_fn)
+            {
+                return;
+            }
+            auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(entity);
+            const std::string key_repr = format_key(key);
+            auto baseline = std::make_shared<DTO>(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(entity));
+            std::shared_ptr<Domain> replacement_owned{};
+            if (find_tracked_fn)
+            {
+                if (auto existing_void = find_tracked_fn(std::type_index(typeid(Domain)), key_repr))
+                {
+                    const Domain* existing_ptr = static_cast<const Domain*>(existing_void.get());
+                    const DTO existing_dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(*existing_ptr);
+                    if (!DAL::Schema::dto_equals(existing_dto, *baseline))
+                    {
+                        replacement_owned = std::make_shared<Domain>(entity);
+                    }
+                }
+            }
+            upsert_snapshot_entry(upsert_tracked_fn, key_repr, true, std::move(replacement_owned), repo, std::move(baseline));
         }
 
         std::shared_ptr<RepoType> repo_;
