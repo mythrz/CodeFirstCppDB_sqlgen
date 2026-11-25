@@ -59,7 +59,12 @@ export namespace DAL::Mappers
             auto col_anns = std::meta::annotations_of_with_type(m, ^^DAL::Schema::column);
             if (!col_anns.empty())
             {
-                return std::meta::extract<DAL::Schema::column>(col_anns[0]).name;
+                const char* raw = std::meta::extract<DAL::Schema::column>(col_anns[0]).name;
+                if (raw == nullptr)
+                {
+                    throw std::invalid_argument("MapperTraits: [[=DAL::Schema::column]] name cannot be null");
+                }
+                return std::string_view{ raw };
             }
             return std::nullopt;
         }
@@ -393,7 +398,8 @@ export namespace DAL::Mappers
                     constexpr auto dom_m = detail::find_matching_domain_member(dto_m, domain_members);
                     using TargetT = std::remove_cvref_t<decltype(dto.[:dto_m:])>;
                     const auto& src = domain.[:dom_m:];
-                    if constexpr (requires { src.get(); })
+                    using SrcT = std::remove_cvref_t<decltype(src)>;
+                    if constexpr (Core::StrongIdType<SrcT> || Core::SingleKeyType<SrcT>)
                     {
                         dto.[:dto_m:] = static_cast<TargetT>(src.get());
                     }
@@ -419,9 +425,14 @@ export namespace DAL::Mappers
             {
                 using CleanTargetT = std::remove_cvref_t<TargetScalarT>;
                 using CleanSrcT = std::remove_cvref_t<PkVal>;
-                if constexpr (
-                    std::is_integral_v<CleanTargetT> && std::is_integral_v<CleanSrcT> && !std::is_same_v<CleanTargetT, bool> &&
-                    !std::is_same_v<CleanSrcT, bool>)
+                constexpr bool is_target_int = std::is_integral_v<CleanTargetT> && !std::is_same_v<CleanTargetT, bool> &&
+                    !std::is_same_v<CleanTargetT, char> && !std::is_same_v<CleanTargetT, wchar_t> &&
+                    !std::is_same_v<CleanTargetT, char8_t> && !std::is_same_v<CleanTargetT, char16_t> &&
+                    !std::is_same_v<CleanTargetT, char32_t>;
+                constexpr bool is_src_int = std::is_integral_v<CleanSrcT> && !std::is_same_v<CleanSrcT, bool> &&
+                    !std::is_same_v<CleanSrcT, char> && !std::is_same_v<CleanSrcT, wchar_t> && !std::is_same_v<CleanSrcT, char8_t> &&
+                    !std::is_same_v<CleanSrcT, char16_t> && !std::is_same_v<CleanSrcT, char32_t>;
+                if constexpr (is_target_int && is_src_int)
                 {
                     if (!std::in_range<CleanTargetT>(new_pk_val))
                     {
@@ -435,7 +446,7 @@ export namespace DAL::Mappers
             if constexpr (DAL::Schema::SqlgenPrimaryKeyField<CleanPkT>)
             {
                 using InnerT = typename CleanPkT::ReflectionType;
-                if constexpr (requires { typename InnerT::value_type; })
+                if constexpr (Core::StrongIdType<InnerT>)
                 {
                     if (auto chk = check_integral_range.template operator()<typename InnerT::value_type>(); !chk)
                     {
@@ -452,7 +463,7 @@ export namespace DAL::Mappers
                     dto.[:pk_m:] = CleanPkT{ static_cast<InnerT>(new_pk_val) };
                 }
             }
-            else if constexpr (requires { typename CleanPkT::value_type; })
+            else if constexpr (Core::StrongIdType<CleanPkT>)
             {
                 if (auto chk = check_integral_range.template operator()<typename CleanPkT::value_type>(); !chk)
                 {

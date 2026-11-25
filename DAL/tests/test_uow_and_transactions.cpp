@@ -209,7 +209,7 @@ namespace
         EXPECT_FALSE(db.in_transaction());
         EXPECT_EQ(db.people.count(), 0u);
 
-        // 2. Scope with explicit commit() -> persists changes
+        // 2. Scope with explicit commit() -> persists changes with explicit non-zero PK
         {
             DAL::TransactionScope scope(db);
             ASSERT_TRUE(scope.begin_result().has_value());
@@ -219,7 +219,7 @@ namespace
         }
         EXPECT_FALSE(db.in_transaction());
         EXPECT_EQ(db.people.count(), 1u);
-        auto persisted = db.people.find(1);
+        auto persisted = db.people.find(2);
         ASSERT_TRUE(persisted.has_value());
         EXPECT_EQ(persisted->getFirstName(), "Committed");
     }
@@ -1321,21 +1321,137 @@ namespace
         UniqueCtx db(conn);
         ASSERT_TRUE(db.ensure_created().has_value());
         ASSERT_TRUE(db.rows.add(AssignedUniqueRowDTO{ .id = 100, .slug = "taken" }).has_value());
+
+        // Positive upsert & upsert_range on a table with BOTH PrimaryKey and Unique constraints
+        // must target ON CONFLICT ("id") cleanly (insert new + update existing).
+        ASSERT_TRUE(db.rows.upsert(AssignedUniqueRowDTO{ .id = 100, .slug = "taken" }).has_value());
+        ASSERT_TRUE(db.rows.upsert(AssignedUniqueRowDTO{ .id = 101, .slug = "seed-101" }).has_value());
+        ASSERT_TRUE(db.rows.upsert(AssignedUniqueRowDTO{ .id = 101, .slug = "updated-101" }).has_value());
+        auto updated101 = db.rows.find(101);
+        ASSERT_TRUE(updated101.has_value());
+        EXPECT_EQ(updated101->slug.value(), "updated-101");
+        ASSERT_TRUE(db.rows.remove(101).has_value());
+
+        // Attach an AFTER INSERT trigger to prove row 1 genuinely executed and was rolled back
+        // (not rejected at sqlite3_prepare_v2 before row 1 ran).
+        ASSERT_TRUE(conn->execute_raw(
+                            "CREATE TABLE UniqueAudit (inserted_id INTEGER NOT NULL);"
+                            "CREATE TRIGGER trg_unique_audit AFTER INSERT ON AssignedUniqueRows "
+                            "BEGIN INSERT INTO UniqueAudit (inserted_id) VALUES (NEW.id); END;")
+                        .has_value());
+
         db.enable_change_tracking();
 
-        // Row 1 is valid, row 2 violates UNIQUE(slug) with a different PK.
+        // Row 1 is valid and triggers AFTER INSERT, row 2 violates UNIQUE(slug) with a different PK.
         std::vector<AssignedUniqueRowDTO> batch{ AssignedUniqueRowDTO{ .id = 1, .slug = "fresh" },
                                                  AssignedUniqueRowDTO{ .id = 2, .slug = "taken" } };
         auto res = db.rows.upsert_range(batch);
         ASSERT_FALSE(res.has_value());
+        EXPECT_EQ(res.error().code, Core::DbErrorCode::DuplicateKey);
         EXPECT_FALSE(conn->in_transaction());
 
-        // Row 1 MUST have been rolled back and MUST NOT be tracked; only the original seed row remains.
+        // Row 1 and its trigger audit row MUST have been rolled back and MUST NOT be tracked.
         EXPECT_EQ(db.tracked_entities_count(), 0u);
+        auto auditCnt = conn->query_rows("SELECT COUNT(*) FROM UniqueAudit;");
+        ASSERT_TRUE(auditCnt.has_value());
+        EXPECT_EQ(std::get<std::int64_t>(auditCnt->rows[0].cells[0]), 0);
         auto all = db.rows.try_to_vector();
         ASSERT_TRUE(all.has_value());
         ASSERT_EQ(all->size(), 1u);
         EXPECT_EQ(all->front().id.value(), 100);
+    }
+
+    TEST(WriteBatchAtomicityHardeningTest, ExplicitAndAutoIncrementKeysInAddUpsertAndUpsertRange)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        db.enable_change_tracking();
+
+        // Explicit non-zero PK on auto_incr table is honored on add() and upsert().
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 50 }, "Explicit", "Id")).has_value());
+        auto found50 = db.people.find(50);
+        ASSERT_TRUE(found50.has_value());
+        EXPECT_EQ(found50->getFirstName(), "Explicit");
+
+        ASSERT_TRUE(db.people.upsert(Core::Person(Core::PersonId{ 42 }, "FortyTwo", "V1")).has_value());
+        ASSERT_TRUE(db.people.upsert(Core::Person(Core::PersonId{ 42 }, "FortyTwo", "V2")).has_value());
+        EXPECT_EQ(db.people.count(), 2u);
+        auto found42 = db.people.find(42);
+        ASSERT_TRUE(found42.has_value());
+        EXPECT_EQ(found42->getLastName(), "V2");
+
+        // Auto-increment placeholder (id = 0) in upsert_range hydrates generated IDs in ChangeTracker.
+        db.clear_change_tracker();
+        std::vector<Core::Person> autoBatch{ Core::Person(Core::PersonId{ 0 }, "AutoA", "Gen"),
+                                             Core::Person(Core::PersonId{ 0 }, "AutoB", "Gen") };
+        ASSERT_TRUE(db.people.upsert_range(autoBatch).has_value());
+        EXPECT_EQ(db.people.count(), 4u);
+        EXPECT_EQ(db.tracked_entities_count(), 2u);
+        auto found51 = db.people.find_tracked(51);
+        auto found52 = db.people.find_tracked(52);
+        ASSERT_NE(found51, nullptr);
+        ASSERT_NE(found52, nullptr);
+        EXPECT_EQ(found51->getFirstName(), "AutoA");
+        EXPECT_EQ(found52->getFirstName(), "AutoB");
+    }
+
+    struct NulKeyDoc
+    {
+        static constexpr auto tablename = "NulKeyDocs";
+        sqlgen::PrimaryKey<std::string, false> slug{};
+        std::string body{};
+    };
+
+    struct NulDocCtx : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<NulKeyDoc> docs{ this };
+        explicit NulDocCtx(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(TypedSqliteReaderHardeningTest, EmbeddedNulRoundTripsAcrossUpdateWhereDeleteAndRejectsRawSql)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        NulDocCtx db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        const std::string keyWithNul("k\0a", 3);
+        const std::string bodyV1("v1\0tail", 7);
+        const std::string bodyV2("v2\0\0end", 7);
+
+        ASSERT_TRUE(db.docs.add(NulKeyDoc{ .slug = keyWithNul, .body = bodyV1 }).has_value());
+        auto found1 = db.docs.try_find(keyWithNul);
+        ASSERT_TRUE(found1.has_value() && found1->has_value());
+        EXPECT_EQ((*found1)->body, bodyV1);
+
+        // Parameterized update with embedded NUL in both PK and updated column
+        ASSERT_TRUE(db.docs.update(NulKeyDoc{ .slug = keyWithNul, .body = bodyV2 }).has_value());
+        auto found2 = db.docs.try_find(keyWithNul);
+        ASSERT_TRUE(found2.has_value() && found2->has_value());
+        EXPECT_EQ((*found2)->body, bodyV2);
+
+        // DbQuery where_equal with embedded NUL string literal
+        auto byBody = db.docs.where_equal<"body">(bodyV2).try_to_vector();
+        ASSERT_TRUE(byBody.has_value()) << byBody.error().to_string();
+        ASSERT_EQ(byBody->size(), 1u);
+        EXPECT_EQ(byBody->front().slug.value(), keyWithNul);
+
+        // Parameterized remove with embedded NUL in string PK
+        ASSERT_TRUE(db.docs.remove(keyWithNul).has_value());
+        EXPECT_EQ(db.docs.count(), 0u);
+
+        // Raw execute_raw must reject embedded NUL instead of silently truncating at .c_str()
+        const std::string rawWithNul("SELECT 1;\0DROP TABLE NulKeyDocs;", 32);
+        auto rawRes = conn->execute_raw(rawWithNul);
+        ASSERT_FALSE(rawRes.has_value());
+        EXPECT_EQ(rawRes.error().code, Core::DbErrorCode::ConstraintViolation);
     }
 
     TEST(WriteBatchAtomicityHardeningTest, AutoIncrementUpsertRangeRollsBackAllRowsOnPartialFailure)

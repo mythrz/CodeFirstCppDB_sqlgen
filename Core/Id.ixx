@@ -36,6 +36,22 @@ export namespace Core
         constexpr auto operator<=>(const Id&) const noexcept = default;
     };
 
+    template<typename T>
+    struct is_strong_id : std::false_type
+    {
+    };
+
+    template<typename Tag, typename ValueType>
+    struct is_strong_id<Id<Tag, ValueType>> : std::true_type
+    {
+    };
+
+    template<typename T>
+    inline constexpr bool is_strong_id_v = is_strong_id<std::remove_cvref_t<T>>::value;
+
+    template<typename T>
+    concept StrongIdType = is_strong_id_v<T>;
+
 } // namespace Core
 
 // std::formatter specialisation — allows Id<Tag, ValueType> to be used directly

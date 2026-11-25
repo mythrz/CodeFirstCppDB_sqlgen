@@ -22,7 +22,7 @@ export namespace DAL
             {
                 return normalize_query_val(val.value);
             }
-            else if constexpr (requires { val.get(); })
+            else if constexpr (Core::StrongIdType<T>)
             {
                 return val.get();
             }
@@ -1809,12 +1809,9 @@ export namespace DAL
                 return stage_add(item);
             }
             auto res = repo_->insert_one(item);
-            if (res && is_tracking_enabled())
+            if (res && is_tracking_enabled() && !has_unset_auto_incr_key(item))
             {
-                if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
-                {
-                    record_snapshot(item);
-                }
+                record_snapshot(item);
             }
             return res;
         }
@@ -1897,9 +1894,9 @@ export namespace DAL
             }
             if (is_tracking_enabled())
             {
-                if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
+                for (const auto& item : items)
                 {
-                    for (const auto& item : items)
+                    if (!has_unset_auto_incr_key(item))
                     {
                         record_snapshot(item);
                     }
@@ -2811,6 +2808,90 @@ export namespace DAL
             return result;
         }
 
+        [[nodiscard]] static bool has_unset_auto_incr_key(const Domain& item)
+        {
+            if constexpr (Schema::SinglePrimaryKey<DTO> && Schema::has_auto_incr_primary_key<DTO>())
+            {
+                const DTO dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
+                return dto_has_unset_auto_incr_key(dto);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        [[nodiscard]] static bool dto_has_unset_auto_incr_key(const DTO& dto)
+        {
+            if constexpr (Schema::SinglePrimaryKey<DTO> && Schema::has_auto_incr_primary_key<DTO>())
+            {
+                constexpr auto pk_m = Schema::primary_key_member<DTO>();
+                const auto val = Schema::unwrap_field(dto.[:pk_m:]);
+                using ValT = std::remove_cvref_t<decltype(val)>;
+                if constexpr (std::is_integral_v<ValT> && !std::is_same_v<ValT, bool>)
+                {
+                    return val == 0;
+                }
+            }
+            return false;
+        }
+
+        static std::expected<Domain, Core::DbError> upsert_single_returning_hydrated(
+            const std::shared_ptr<RepoType>& repo, const std::shared_ptr<ConnectionHandle>& conn, const Domain& item)
+        {
+            const DTO dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
+            const bool needs_rowid = dto_has_unset_auto_incr_key(dto);
+
+            if (conn)
+            {
+                if constexpr (requires(ConnectionHandle& c, const DTO& d) { c.upsert(d); })
+                {
+                    auto res = conn->upsert(dto);
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ map_conn_error(conn, res.error().what()) };
+                    }
+                    if constexpr (
+                        Schema::SinglePrimaryKey<DTO> && Schema::has_auto_incr_primary_key<DTO>() &&
+                        requires(const ConnectionHandle& c) { c.try_last_insert_rowid(); })
+                    {
+                        if (needs_rowid)
+                        {
+                            auto rowid_res = conn->try_last_insert_rowid();
+                            if (!rowid_res)
+                            {
+                                return std::unexpected<Core::DbError>{ rowid_res.error() };
+                            }
+                            return DAL::Mappers::MapperTraits<Domain, DTO>::try_with_primary_key(item, *rowid_res);
+                        }
+                    }
+                    return item;
+                }
+            }
+
+            const auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(item);
+            auto res = (!needs_rowid && repo->exists_by_id(key)) ? repo->update_one(item) : repo->insert_one(item);
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ res.error() };
+            }
+            if constexpr (Schema::SinglePrimaryKey<DTO> && Schema::has_auto_incr_primary_key<DTO>() && requires(const ConnectionHandle& c) {
+                              c.try_last_insert_rowid();
+                          })
+            {
+                if (needs_rowid && conn)
+                {
+                    auto rowid_res = conn->try_last_insert_rowid();
+                    if (!rowid_res)
+                    {
+                        return std::unexpected<Core::DbError>{ rowid_res.error() };
+                    }
+                    return DAL::Mappers::MapperTraits<Domain, DTO>::try_with_primary_key(item, *rowid_res);
+                }
+            }
+            return item;
+        }
+
         static std::expected<void, Core::DbError> upsert_immediate_with(
             const std::shared_ptr<RepoType>& repo,
             const std::shared_ptr<ConnectionHandle>& conn,
@@ -2820,45 +2901,25 @@ export namespace DAL
             bool record_tracking = true)
         {
             const bool tracking = record_tracking && tracking_fn && tracking_fn();
-            if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
-            {
-                if (conn)
-                {
-                    if constexpr (requires(ConnectionHandle& c, const DTO& dto) { c.upsert(dto); })
-                    {
-                        const DTO dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
-                        auto res = conn->upsert(dto);
-                        if (!res)
-                        {
-                            return std::unexpected<Core::DbError>{ map_conn_error(conn, res.error().what()) };
-                        }
-                        if (tracking)
-                        {
-                            record_snapshot_with(repo, upsert_fn, item);
-                        }
-                        return {};
-                    }
-                }
-            }
-
             detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn);
             if (auto begin_res = tx_guard.begin(); !begin_res)
             {
                 return begin_res;
             }
-            const auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(item);
-            auto res = repo->exists_by_id(key) ? repo->update_one(item) : repo->insert_one(item);
-            if (!res)
+
+            auto hydrated = upsert_single_returning_hydrated(repo, conn, item);
+            if (!hydrated)
             {
-                return res;
+                return std::unexpected<Core::DbError>{ hydrated.error() };
             }
+
             if (auto commit_res = tx_guard.commit(); !commit_res)
             {
                 return commit_res;
             }
             if (tracking)
             {
-                record_snapshot_with(repo, upsert_fn, item);
+                record_snapshot_with(repo, upsert_fn, *hydrated);
             }
             return {};
         }
@@ -2882,37 +2943,56 @@ export namespace DAL
                 return begin_res;
             }
 
-            bool executed_bulk = false;
-            if constexpr (!Schema::has_auto_incr_primary_key<DTO>())
+            bool needs_per_item_hydration = false;
+            if (tracking && Schema::has_auto_incr_primary_key<DTO>())
             {
-                if (conn)
+                for (const auto& item : items)
                 {
-                    if constexpr (requires(ConnectionHandle& c, const std::vector<DTO>& dtos) { c.upsert_many(dtos); })
+                    if (has_unset_auto_incr_key(item))
                     {
-                        std::vector<DTO> dtos;
-                        dtos.reserve(items.size());
-                        for (const auto& item : items)
-                        {
-                            dtos.push_back(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item));
-                        }
-                        auto res = conn->upsert_many(dtos);
-                        if (!res)
-                        {
-                            return std::unexpected<Core::DbError>{ map_conn_error(conn, res.error().what()) };
-                        }
-                        executed_bulk = true;
+                        needs_per_item_hydration = true;
+                        break;
                     }
+                }
+            }
+
+            std::vector<Domain> hydrated_to_track;
+            bool executed_bulk = false;
+            if (!needs_per_item_hydration && conn)
+            {
+                if constexpr (requires(ConnectionHandle& c, const std::vector<DTO>& dtos) { c.upsert_many(dtos); })
+                {
+                    std::vector<DTO> dtos;
+                    dtos.reserve(items.size());
+                    for (const auto& item : items)
+                    {
+                        dtos.push_back(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item));
+                    }
+                    auto res = conn->upsert_many(dtos);
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ map_conn_error(conn, res.error().what()) };
+                    }
+                    executed_bulk = true;
                 }
             }
 
             if (!executed_bulk)
             {
+                if (tracking)
+                {
+                    hydrated_to_track.reserve(items.size());
+                }
                 for (const auto& item : items)
                 {
-                    auto res = upsert_immediate_with(repo, conn, upsert_fn, tracking_fn, item, false);
-                    if (!res)
+                    auto hydrated = upsert_single_returning_hydrated(repo, conn, item);
+                    if (!hydrated)
                     {
-                        return res;
+                        return std::unexpected<Core::DbError>{ hydrated.error() };
+                    }
+                    if (tracking)
+                    {
+                        hydrated_to_track.push_back(std::move(*hydrated));
                     }
                 }
             }
@@ -2924,7 +3004,8 @@ export namespace DAL
 
             if (tracking)
             {
-                for (const auto& item : items)
+                const auto& to_track = executed_bulk ? items : hydrated_to_track;
+                for (const auto& item : to_track)
                 {
                     record_snapshot_with(repo, upsert_fn, item);
                 }

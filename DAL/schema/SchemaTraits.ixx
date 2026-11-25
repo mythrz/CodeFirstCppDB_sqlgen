@@ -171,7 +171,25 @@ export namespace DAL::Schema
     consteval std::string_view annotated_table_name()
     {
         auto anns = std::meta::annotations_of_with_type(^^T, ^^table);
-        return std::meta::extract<table>(anns[0]).name;
+        if (anns.size() > 1)
+        {
+            throw std::invalid_argument("Entity cannot have multiple [[=DAL::Schema::table]] annotations");
+        }
+        const char* raw_name = std::meta::extract<table>(anns[0]).name;
+        if (raw_name == nullptr)
+        {
+            throw std::invalid_argument("[[=DAL::Schema::table]] name cannot be null");
+        }
+        std::string_view sv{ raw_name };
+        if (sv.empty())
+        {
+            throw std::invalid_argument("[[=DAL::Schema::table]] name cannot be empty");
+        }
+        if (sv.find('"') != std::string_view::npos)
+        {
+            throw std::invalid_argument("[[=DAL::Schema::table]] name cannot contain double quotes");
+        }
+        return sv;
     }
 
     template<typename Domain>
@@ -279,10 +297,23 @@ export namespace DAL::Schema
                     ++fk_count;
                     using AnnT = [:ann_type:];
                     using ParentDomain = [:std::meta::template_arguments_of(ann_type)[0]:];
-                    constexpr auto ref_lit = to_string_literal<[]() consteval
-                                                               {
-                                                                   return std::string_view{ std::meta::extract<AnnT>(ann).col };
-                                                               }>();
+                    constexpr auto ref_lit =
+                        to_string_literal<[]() consteval
+                                          {
+                                              const char* raw_col = std::meta::extract<AnnT>(ann).col;
+                                              if (raw_col == nullptr)
+                                              {
+                                                  throw std::invalid_argument("[[=DAL::Schema::references]] column cannot be null");
+                                              }
+                                              std::string_view sv{ raw_col };
+                                              if (sv.empty() || sv.find('"') != std::string_view::npos)
+                                              {
+                                                  throw std::invalid_argument(
+                                                      "[[=DAL::Schema::references]] column must be non-empty and "
+                                                      "contain no double quotes");
+                                              }
+                                              return sv;
+                                          }>();
                     using FieldT = [:field_type:];
                     fk_target_type = ^^sqlgen::ForeignKey<FieldT, SchemaOf_t<ParentDomain>, ref_lit>;
                 }
@@ -347,7 +378,16 @@ export namespace DAL::Schema
             constexpr auto col_anns = std::define_static_array(std::meta::annotations_of_with_type(m, ^^column));
             if constexpr (!col_anns.empty())
             {
-                col_name = std::meta::extract<column>(col_anns[0]).name;
+                const char* raw_col = std::meta::extract<column>(col_anns[0]).name;
+                if (raw_col == nullptr)
+                {
+                    throw std::invalid_argument("[[=DAL::Schema::column]] name cannot be null");
+                }
+                col_name = std::string_view{ raw_col };
+                if (col_name.empty() || col_name.find('"') != std::string_view::npos)
+                {
+                    throw std::invalid_argument("[[=DAL::Schema::column]] name must be non-empty and contain no double quotes");
+                }
             }
             else
             {

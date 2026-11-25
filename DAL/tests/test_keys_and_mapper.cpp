@@ -966,6 +966,44 @@ namespace
         EXPECT_EQ(roundtrip.M_count, 42);
     }
 
+    struct SharedPtrDomain
+    {
+        std::int32_t id = 0;
+        std::shared_ptr<int> payload{};
+    };
+
+    struct SharedPtrDTO
+    {
+        static constexpr auto tablename = "SharedPtrItems";
+        sqlgen::PrimaryKey<std::int32_t, false> id{ 0 };
+        std::shared_ptr<int> payload{};
+    };
+
+    TEST(MapperTraitsTest, SharedPtrFieldsPreserveRefCountAndNullCStringKeyEncodingIsSafe)
+    {
+        auto sharedVal = std::make_shared<int>(12345);
+        SharedPtrDomain domain{ .id = 7, .payload = sharedVal };
+        EXPECT_EQ(sharedVal.use_count(), 2);
+
+        {
+            auto dto = DAL::Mappers::MapperTraits<SharedPtrDomain, SharedPtrDTO>::to_dto(domain);
+            EXPECT_EQ(dto.id.value(), 7);
+            ASSERT_NE(dto.payload, nullptr);
+            EXPECT_EQ(*dto.payload, 12345);
+            // Must share ownership (refcount 3) rather than constructing a second owning shared_ptr from .get().
+            EXPECT_EQ(sharedVal.use_count(), 3);
+        }
+        EXPECT_EQ(sharedVal.use_count(), 2);
+
+        // Null const char* in CompositeKey must not UB/segfault in format() or encode_key().
+        const char* nullStr = nullptr;
+        const char* emptyStr = "";
+        const Core::CompositeKey<const char*, int> nullKey{ nullStr, 1 };
+        const Core::CompositeKey<const char*, int> emptyKey{ emptyStr, 1 };
+        EXPECT_EQ(std::format("{}", nullKey), "CompositeKey(null, 1)");
+        EXPECT_NE(Core::encode_key(nullKey), Core::encode_key(emptyKey));
+    }
+
     TEST(DbErrorDiagnosticsTest, DebugBuildCapturesStacktrace)
     {
         auto err = Core::DbError::connection_error("Diagnostic trace check");

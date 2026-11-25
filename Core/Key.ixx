@@ -205,11 +205,19 @@ export namespace Core
         {
             if constexpr (is_string_key_part_v<Part>)
             {
+                if constexpr (std::is_same_v<std::remove_cvref_t<Part>, const char*> || std::is_same_v<std::remove_cvref_t<Part>, char*>)
+                {
+                    if (part == nullptr)
+                    {
+                        return "null";
+                    }
+                }
                 const std::string_view sv(part);
                 std::string out = "\"";
                 out.reserve(sv.size() + 2);
-                for (unsigned char ch : sv)
+                for (const char raw_ch : sv)
                 {
+                    const unsigned char ch = static_cast<unsigned char>(raw_ch);
                     if (ch == '\\')
                     {
                         out += "\\\\";
@@ -249,6 +257,13 @@ export namespace Core
         {
             if constexpr (is_string_key_part_v<Part>)
             {
+                if constexpr (std::is_same_v<std::remove_cvref_t<Part>, const char*> || std::is_same_v<std::remove_cvref_t<Part>, char*>)
+                {
+                    if (part == nullptr)
+                    {
+                        return "N:0;";
+                    }
+                }
                 const std::string_view sv(part);
                 return std::format("{}:{};", sv.size(), sv);
             }

@@ -272,11 +272,12 @@ export namespace DAL::Repositories
         template<typename Part>
         [[nodiscard]] static constexpr decltype(auto) unwrap_key_part(const Part& part) noexcept
         {
-            if constexpr (Core::SingleKeyType<std::remove_cvref_t<Part>>)
+            using CleanPart = std::remove_cvref_t<Part>;
+            if constexpr (Core::SingleKeyType<CleanPart>)
             {
                 return unwrap_key_part(part.get());
             }
-            else if constexpr (requires { part.get(); })
+            else if constexpr (Core::StrongIdType<CleanPart>)
             {
                 return part.get();
             }
