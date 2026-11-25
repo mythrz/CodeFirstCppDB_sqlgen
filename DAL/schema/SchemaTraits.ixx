@@ -272,6 +272,8 @@ export namespace DAL::Schema
 
         std::vector<std::meta::info> specs;
         specs.reserve(dom_members.size());
+        std::vector<std::string> seen_col_names;
+        seen_col_names.reserve(dom_members.size());
 
         template for (constexpr auto m : dom_members)
         {
@@ -285,6 +287,10 @@ export namespace DAL::Schema
             if constexpr (pk_anns.size() > 1)
             {
                 throw std::invalid_argument("Field cannot have multiple [[=DAL::Schema::primary_key]] annotations");
+            }
+            if constexpr (uniq_anns.size() > 1)
+            {
+                throw std::invalid_argument("Field cannot have multiple [[=DAL::Schema::unique]] annotations");
             }
 
             std::meta::info fk_target_type{};
@@ -376,6 +382,10 @@ export namespace DAL::Schema
 
             std::string_view col_name = std::meta::identifier_of(m);
             constexpr auto col_anns = std::define_static_array(std::meta::annotations_of_with_type(m, ^^column));
+            if constexpr (col_anns.size() > 1)
+            {
+                throw std::invalid_argument("Field cannot have multiple [[=DAL::Schema::column]] annotations");
+            }
             if constexpr (!col_anns.empty())
             {
                 const char* raw_col = std::meta::extract<column>(col_anns[0]).name;
@@ -405,6 +415,15 @@ export namespace DAL::Schema
             safe_col_name.reserve(col_name.size());
             std::ranges::copy(col_name, std::back_inserter(safe_col_name));
 
+            for (const auto& prev : seen_col_names)
+            {
+                if (prev == safe_col_name)
+                {
+                    throw std::invalid_argument("Annotated entity has duplicate synthesized column name");
+                }
+            }
+            seen_col_names.push_back(safe_col_name);
+
             specs.push_back(std::meta::data_member_spec(target_type, { .name = std::move(safe_col_name) }));
         }
 
@@ -428,6 +447,7 @@ export namespace DAL::Schema
     {
         using source_domain_type = Domain;
         static constexpr auto tablename = std::define_static_string(annotated_table_name<Domain>());
+        static constexpr bool composite_primary_key = has_explicit_composite_key<Domain>();
         static constexpr auto pk_field_flags = annotated_pk_flags<Domain>();
         static constexpr auto unique_field_flags = annotated_unique_flags<Domain>();
     };
@@ -782,12 +802,45 @@ export namespace DAL::Schema
     // Phase 11: Native C++26 Reflection DTO Equality (Zero-JSON)
     // =========================================================================
 
+    namespace detail
+    {
+        template<typename T>
+        [[nodiscard]] constexpr bool field_values_equal(const T& lhs, const T& rhs)
+        {
+            using CleanT = std::remove_cvref_t<T>;
+            if constexpr (is_optional_v<CleanT>)
+            {
+                if (lhs.has_value() != rhs.has_value())
+                {
+                    return false;
+                }
+                if (!lhs.has_value())
+                {
+                    return true;
+                }
+                return field_values_equal(*lhs, *rhs);
+            }
+            else if constexpr (std::floating_point<CleanT>)
+            {
+                if (std::isnan(lhs) && std::isnan(rhs))
+                {
+                    return true;
+                }
+                return lhs == rhs;
+            }
+            else
+            {
+                return lhs == rhs;
+            }
+        }
+    } // namespace detail
+
     template<typename DTO>
     [[nodiscard]] constexpr bool dto_equals(const DTO& a, const DTO& b)
     {
         template for (constexpr auto m : members_v<DTO>)
         {
-            if (unwrap_field(a.[:m:]) != unwrap_field(b.[:m:]))
+            if (!detail::field_values_equal(unwrap_field(a.[:m:]), unwrap_field(b.[:m:])))
             {
                 return false;
             }

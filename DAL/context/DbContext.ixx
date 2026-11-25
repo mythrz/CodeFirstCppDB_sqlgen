@@ -1009,12 +1009,51 @@ export namespace DAL
 
             const std::size_t base_idx = state_->current_pending_base();
             const auto save_cp = state_->capture_checkpoint();
-            (void)detect_changes();
-
-            if (state_->pending_ops_.size() <= base_idx)
+            const bool had_staged_ops = (state_->pending_ops_.size() > base_idx);
+            if (!had_staged_ops)
             {
-                return {};
+                (void)detect_changes();
+                if (state_->pending_ops_.size() <= base_idx)
+                {
+                    return {};
+                }
             }
+
+            auto run_pending_range = [&](std::size_t from_idx) -> std::expected<void, Core::DbError>
+            {
+                for (std::size_t i = from_idx; i < state_->pending_ops_.size(); ++i)
+                {
+                    auto& op = state_->pending_ops_[i];
+                    if (!op)
+                    {
+                        continue;
+                    }
+                    auto op_res = op();
+                    if (!op_res)
+                    {
+                        return op_res;
+                    }
+                }
+                return {};
+            };
+
+            auto run_all_ops = [&]() -> std::expected<void, Core::DbError>
+            {
+                if (auto res = run_pending_range(base_idx); !res)
+                {
+                    return res;
+                }
+                if (had_staged_ops)
+                {
+                    const std::size_t after_staged_idx = state_->pending_ops_.size();
+                    (void)detect_changes();
+                    if (auto res = run_pending_range(after_staged_idx); !res)
+                    {
+                        return res;
+                    }
+                }
+                return {};
+            };
 
             const bool started_tx = !in_transaction();
             if (started_tx)
@@ -1029,24 +1068,15 @@ export namespace DAL
 
                 try
                 {
-                    for (std::size_t i = base_idx; i < state_->pending_ops_.size(); ++i)
+                    if (auto op_res = run_all_ops(); !op_res)
                     {
-                        auto& op = state_->pending_ops_[i];
-                        if (!op)
+                        if (in_transaction())
                         {
-                            continue;
+                            (void)rollback();
                         }
-                        auto op_res = op();
-                        if (!op_res)
-                        {
-                            if (in_transaction())
-                            {
-                                (void)rollback();
-                            }
-                            state_->restore_baselines(save_cp);
-                            truncate_pending_changes(base_idx);
-                            return op_res;
-                        }
+                        state_->restore_baselines(save_cp);
+                        truncate_pending_changes(base_idx);
+                        return op_res;
                     }
 
                     truncate_pending_changes(base_idx);
@@ -1089,23 +1119,13 @@ export namespace DAL
 
             try
             {
-                for (std::size_t i = base_idx; i < state_->pending_ops_.size(); ++i)
+                if (auto op_res = run_all_ops(); !op_res)
                 {
-                    auto& op = state_->pending_ops_[i];
-                    if (!op)
-                    {
-                        continue;
-                    }
-                    auto op_res = op();
-                    if (!op_res)
-                    {
-                        (void)rollback_to_savepoint(sp_name);
-                        (void)release_savepoint(sp_name);
-                        release_savepoint_depth();
-                        state_->restore_baselines(save_cp);
-                        truncate_pending_changes(base_idx);
-                        return op_res;
-                    }
+                    (void)rollback_to_savepoint(sp_name);
+                    release_savepoint_depth();
+                    state_->restore_baselines(save_cp);
+                    truncate_pending_changes(base_idx);
+                    return op_res;
                 }
 
                 truncate_pending_changes(base_idx);
@@ -1113,7 +1133,6 @@ export namespace DAL
                 if (!rel_res)
                 {
                     (void)rollback_to_savepoint(sp_name);
-                    (void)release_savepoint(sp_name);
                     release_savepoint_depth();
                     state_->restore_baselines(save_cp);
                     return rel_res;
@@ -1123,7 +1142,6 @@ export namespace DAL
             } catch (...)
             {
                 (void)rollback_to_savepoint(sp_name);
-                (void)release_savepoint(sp_name);
                 release_savepoint_depth();
                 state_->restore_baselines(save_cp);
                 truncate_pending_changes(base_idx);
@@ -1215,7 +1233,8 @@ export namespace DAL
 
         [[nodiscard]] std::expected<std::string, Core::DbError> acquire_savepoint()
         {
-            const std::string sp_name = std::format("_codefirst_sp_{}", ++savepoint_depth_);
+            const std::string sp_name = std::format("_codefirst_sp_{}", ++detail::g_context_sp_counter);
+            ++savepoint_depth_;
             auto res = savepoint(sp_name);
             if (!res)
             {
@@ -1264,7 +1283,8 @@ export namespace DAL
                 if constexpr (supports_savepoints())
                 {
                     const auto sp_cp = state_->capture_checkpoint();
-                    const std::string sp_name = std::format("_codefirst_sp_{}", ++savepoint_depth_);
+                    const std::string sp_name = std::format("_codefirst_sp_{}", ++detail::g_context_sp_counter);
+                    ++savepoint_depth_;
                     const std::size_t saved_pending_size = sp_cp.saved_pending_size;
                     auto sp_res = conn_->savepoint(sp_name);
                     if (!sp_res)
@@ -1297,10 +1317,21 @@ export namespace DAL
                             {
                                 truncate_pending_changes(saved_pending_size);
                                 (void)conn_->rollback_to_savepoint(sp_name);
-                                (void)conn_->release_savepoint(sp_name);
                                 --savepoint_depth_;
                                 state_->restore_baselines(sp_cp);
                                 return fn_res;
+                            }
+                        }
+
+                        if (state_->pending_ops_.size() > saved_pending_size)
+                        {
+                            auto flush_res = flush_pending_since(saved_pending_size);
+                            if (!flush_res)
+                            {
+                                (void)conn_->rollback_to_savepoint(sp_name);
+                                --savepoint_depth_;
+                                state_->restore_baselines(sp_cp);
+                                return flush_res;
                             }
                         }
 
@@ -1311,7 +1342,6 @@ export namespace DAL
                             if (!flush_res)
                             {
                                 (void)conn_->rollback_to_savepoint(sp_name);
-                                (void)conn_->release_savepoint(sp_name);
                                 --savepoint_depth_;
                                 state_->restore_baselines(sp_cp);
                                 return flush_res;
@@ -1322,7 +1352,6 @@ export namespace DAL
                         if (!rel_res)
                         {
                             (void)conn_->rollback_to_savepoint(sp_name);
-                            (void)conn_->release_savepoint(sp_name);
                             --savepoint_depth_;
                             state_->restore_baselines(sp_cp);
                             return rel_res;
@@ -1333,7 +1362,6 @@ export namespace DAL
                     {
                         truncate_pending_changes(saved_pending_size);
                         (void)conn_->rollback_to_savepoint(sp_name);
-                        (void)conn_->release_savepoint(sp_name);
                         --savepoint_depth_;
                         state_->restore_baselines(sp_cp);
                         throw;
@@ -1365,7 +1393,7 @@ export namespace DAL
                             (void)rollback();
                         }
                         state_->restore_baselines(tx_cp);
-                        state_->pending_ops_.clear();
+                        truncate_pending_changes(tx_cp.saved_pending_size);
                         return fn_res;
                     }
                 }
@@ -1378,7 +1406,7 @@ export namespace DAL
                         (void)rollback();
                     }
                     state_->restore_baselines(tx_cp);
-                    state_->pending_ops_.clear();
+                    truncate_pending_changes(tx_cp.saved_pending_size);
                     return sc_res;
                 }
 
@@ -1392,7 +1420,7 @@ export namespace DAL
                             (void)rollback();
                         }
                         state_->restore_baselines(tx_cp);
-                        state_->pending_ops_.clear();
+                        truncate_pending_changes(tx_cp.saved_pending_size);
                         return commit_res;
                     }
                 }
@@ -1404,7 +1432,7 @@ export namespace DAL
                     (void)rollback();
                 }
                 state_->restore_baselines(tx_cp);
-                state_->pending_ops_.clear();
+                truncate_pending_changes(tx_cp.saved_pending_size);
                 throw;
             }
         }
@@ -1456,7 +1484,6 @@ export namespace DAL
                 if (is_savepoint_)
                 {
                     (void)ctx_->rollback_to_savepoint(savepoint_name_);
-                    (void)ctx_->release_savepoint(savepoint_name_);
                     ctx_->release_savepoint_depth();
                 }
                 else
@@ -1518,7 +1545,6 @@ export namespace DAL
                     if (!flush_res)
                     {
                         (void)ctx_->rollback_to_savepoint(savepoint_name_);
-                        (void)ctx_->release_savepoint(savepoint_name_);
                         ctx_->release_savepoint_depth();
                         ctx_->restore_checkpoint_baselines(scope_checkpoint_);
                         pop_base();
@@ -1530,7 +1556,6 @@ export namespace DAL
                 if (!rel_res)
                 {
                     (void)ctx_->rollback_to_savepoint(savepoint_name_);
-                    (void)ctx_->release_savepoint(savepoint_name_);
                     ctx_->release_savepoint_depth();
                     ctx_->restore_checkpoint_baselines(scope_checkpoint_);
                     pop_base();
@@ -1593,7 +1618,6 @@ export namespace DAL
                 if (is_savepoint_)
                 {
                     res = ctx_->rollback_to_savepoint(savepoint_name_);
-                    (void)ctx_->release_savepoint(savepoint_name_);
                     ctx_->release_savepoint_depth();
                 }
                 else

@@ -1619,4 +1619,133 @@ namespace
         EXPECT_EQ(all->front().getFirstName(), "OuterKept");
     }
 
+    // =========================================================================
+    // Phase 52 (P1): UoW Ghost Eviction, Cross-Context Savepoints & Baseline Sync
+    // =========================================================================
+
+    TEST(Phase52UoWAndSavepointHardeningTest, RollbackEvictsGhostEntitiesCreatedAfterCheckpoint)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Original", "User")).has_value());
+
+        db.enable_change_tracking();
+        auto existing = db.people.find_tracked(1);
+        ASSERT_NE(existing, nullptr);
+        EXPECT_EQ(db.tracked_entities_count(), 1u);
+
+        auto txRes = db.transaction(
+            [&]() -> std::expected<void, Core::DbError>
+            {
+                auto created = db.people.add_returning(Core::Person(Core::PersonId{ 0 }, "Ghost", "Entity"));
+                if (!created)
+                {
+                    return std::unexpected<Core::DbError>{ created.error() };
+                }
+                auto ghost = db.people.find_tracked(created->getId().get());
+                EXPECT_NE(ghost, nullptr);
+                EXPECT_EQ(db.tracked_entities_count(), 2u);
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("abort transaction") };
+            });
+        ASSERT_FALSE(txRes.has_value());
+
+        // Ghost entity created inside the rolled-back transaction MUST be evicted from the tracker.
+        EXPECT_EQ(db.tracked_entities_count(), 1u);
+        EXPECT_EQ(db.people.find_tracked(2), nullptr);
+        ASSERT_TRUE(db.save_changes().has_value());
+
+        // Existing entity tracked prior to the transaction remains tracked and updatable.
+        existing->setFirstName("UpdatedOriginal");
+        ASSERT_TRUE(db.save_changes().has_value());
+        auto reloaded = db.people.find(1);
+        ASSERT_TRUE(reloaded.has_value());
+        EXPECT_EQ(reloaded->getFirstName(), "UpdatedOriginal");
+    }
+
+    TEST(Phase52UoWAndSavepointHardeningTest, SharedConnectionSavepointsAcrossTwoDbContextsAreIsolated)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext dbA(conn);
+        Phase30DbContext dbB(conn);
+        ASSERT_TRUE(dbA.ensure_created().has_value());
+
+        ASSERT_TRUE(dbA.begin_transaction().has_value());
+
+        auto outerRes = dbA.transaction(
+            [&]() -> std::expected<void, Core::DbError>
+            {
+                auto rA = dbA.people.add(Core::Person(Core::PersonId{ 0 }, "FromA", "User"));
+                if (!rA)
+                {
+                    return rA;
+                }
+
+                // dbB shares the same SQLiteConnection; its savepoint name MUST NOT collide with dbA's.
+                auto innerRes = dbB.transaction(
+                    [&]() -> std::expected<void, Core::DbError>
+                    {
+                        auto rB = dbB.people.add(Core::Person(Core::PersonId{ 0 }, "FromB", "User"));
+                        if (!rB)
+                        {
+                            return rB;
+                        }
+                        return std::unexpected<Core::DbError>{ Core::DbError::unknown("rollback dbB only") };
+                    });
+                EXPECT_FALSE(innerRes.has_value());
+                return {};
+            });
+        ASSERT_TRUE(outerRes.has_value()) << outerRes.error().to_string();
+        ASSERT_TRUE(dbA.commit().has_value());
+
+        auto all = dbA.people.try_to_vector();
+        ASSERT_TRUE(all.has_value());
+        ASSERT_EQ(all->size(), 1u);
+        EXPECT_EQ(all->front().getFirstName(), "FromA");
+    }
+
+    TEST(Phase52UoWAndSavepointHardeningTest, DeferredStageUpdateRefreshesTrackerBaseline)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(conn->execute_raw("CREATE TABLE update_audit (n INTEGER NOT NULL);").has_value());
+        ASSERT_TRUE(conn->execute_raw(
+                            "CREATE TRIGGER trg_count_person_updates AFTER UPDATE ON Person "
+                            "BEGIN INSERT INTO update_audit(n) VALUES (1); END;")
+                        .has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 0 }, "Alice", "Initial")).has_value());
+
+        db.enable_change_tracking();
+        db.defer_changes(true);
+
+        auto tracked = db.people.find_tracked(1);
+        ASSERT_NE(tracked, nullptr);
+        tracked->setFirstName("AliceUpdated");
+
+        // Explicitly stage the update and flush via save_changes().
+        ASSERT_TRUE(db.people.update(*tracked).has_value());
+        ASSERT_TRUE(db.save_changes().has_value());
+
+        auto countUpdates = [&]() -> std::int64_t
+        {
+            auto rows = conn->query_rows("SELECT COUNT(*) FROM update_audit;");
+            EXPECT_TRUE(rows.has_value());
+            return std::get<std::int64_t>(rows->rows[0].cells[0]);
+        };
+        const std::int64_t updatesAfterFirstFlush = countUpdates();
+        EXPECT_EQ(updatesAfterFirstFlush, 1);
+
+        // A second save_changes() MUST see refreshed baseline and emit 0 redundant UPDATEs.
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(countUpdates(), 1);
+    }
+
 } // namespace

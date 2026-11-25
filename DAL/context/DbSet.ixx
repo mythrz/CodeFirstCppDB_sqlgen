@@ -99,6 +99,7 @@ export namespace DAL
         };
 
         inline std::atomic<std::uint64_t> g_write_guard_sp_counter{ 0 };
+        inline std::atomic<std::uint64_t> g_context_sp_counter{ 0 };
 
         // RAII transaction/savepoint guard for atomic single- and multi-row write operations.
         // Begins a transaction when not already in one, or acquires a uniquely named savepoint
@@ -176,7 +177,6 @@ export namespace DAL
                         if (!rel_res)
                         {
                             (void)conn_->rollback_to_savepoint(sp_name_);
-                            (void)conn_->release_savepoint(sp_name_);
                             active_ = false;
                             return rel_res;
                         }
@@ -215,15 +215,11 @@ export namespace DAL
                 active_ = false;
                 if (started_sp_)
                 {
-                    if constexpr (requires(ConnectionHandle& c, std::string_view n) {
-                                      c.rollback_to_savepoint(n);
-                                      c.release_savepoint(n);
-                                  })
+                    if constexpr (requires(ConnectionHandle& c, std::string_view n) { c.rollback_to_savepoint(n); })
                     {
                         try
                         {
                             (void)conn_->rollback_to_savepoint(sp_name_);
-                            (void)conn_->release_savepoint(sp_name_);
                         } catch (...)
                         {
                         }
@@ -308,6 +304,14 @@ export namespace DAL
 
             void restore_baselines(const BaselineCheckpoint& cp)
             {
+                // Evict entries that did not exist when the checkpoint was captured so rows
+                // inserted and tracked inside a rolled-back transaction/savepoint never linger.
+                std::erase_if(
+                    tracked_entries_,
+                    [&cp](const auto& kv)
+                    {
+                        return !cp.saved_entries.contains(kv.first);
+                    });
                 for (const auto& [k, entry] : cp.saved_entries)
                 {
                     if (!tracked_entries_.contains(k))
@@ -387,10 +391,6 @@ export namespace DAL
                 auto it = tracked_entries_.find(map_key);
                 if (it == tracked_entries_.end())
                 {
-                    if (outer_tx_checkpoint_.has_value() && snapshot_baseline_fn && !outer_tx_checkpoint_->baselines.contains(map_key))
-                    {
-                        outer_tx_checkpoint_->baselines.emplace(map_key, snapshot_baseline_fn());
-                    }
                     tracked_entries_.emplace(
                         std::move(map_key),
                         TrackedEntityEntry{
@@ -1833,23 +1833,33 @@ export namespace DAL
                                   c.clear_change_tracker();
                               })
                 {
+                    is_tracker_alive_fn_ = []() noexcept
+                    {
+                        return true;
+                    };
                     is_tracking_enabled_fn_ = [ctx]()
                     {
                         return ctx->is_change_tracking_enabled();
                     };
-                    upsert_tracked_fn_ = [ctx](
-                                             std::type_index type,
-                                             std::string key_repr,
-                                             bool refresh_baseline,
-                                             std::shared_ptr<void> owned,
-                                             const void* borrowed,
-                                             std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(
-                                                 const std::shared_ptr<void>&, const void*)> detect_fn,
-                                             std::function<std::shared_ptr<void>()>,
-                                             std::function<void(const std::shared_ptr<void>&)>)
+                    upsert_tracked_fn_ =
+                        [ctx](
+                            std::type_index type,
+                            std::string key_repr,
+                            bool refresh_baseline,
+                            std::shared_ptr<void> owned,
+                            std::function<std::optional<std::function<std::expected<void, Core::DbError>()>>(const std::shared_ptr<void>&)>
+                                detect_fn,
+                            std::function<std::shared_ptr<void>()> snap_fn,
+                            std::function<void(const std::shared_ptr<void>&)> restore_fn)
                     {
                         ctx->upsert_tracked_entry(
-                            type, std::move(key_repr), refresh_baseline, std::move(owned), borrowed, std::move(detect_fn));
+                            type,
+                            std::move(key_repr),
+                            refresh_baseline,
+                            std::move(owned),
+                            std::move(detect_fn),
+                            std::move(snap_fn),
+                            std::move(restore_fn));
                     };
                     untrack_fn_ = [ctx](std::type_index type, const std::string& key_repr)
                     {
@@ -2164,9 +2174,14 @@ export namespace DAL
                     "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
             if (!enqueue_op_fn_(
-                    [repo = repo_, item]()
+                    [repo = repo_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, item]()
                     {
-                        return repo->insert_one(item);
+                        auto res = repo->insert_one(item);
+                        if (res && tracking_fn && tracking_fn() && !has_unset_auto_incr_key(item))
+                        {
+                            record_snapshot_with(repo, upsert_fn, item);
+                        }
+                        return res;
                     }))
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
@@ -2183,9 +2198,20 @@ export namespace DAL
                     "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
             if (!enqueue_op_fn_(
-                    [repo = repo_, items]()
+                    [repo = repo_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, items]()
                     {
-                        return repo->insert_many(items);
+                        auto res = repo->insert_many(items);
+                        if (res && tracking_fn && tracking_fn())
+                        {
+                            for (const auto& item : items)
+                            {
+                                if (!has_unset_auto_incr_key(item))
+                                {
+                                    record_snapshot_with(repo, upsert_fn, item);
+                                }
+                            }
+                        }
+                        return res;
                     }))
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
@@ -2202,9 +2228,14 @@ export namespace DAL
                     "Cannot stage operation: DbSet is not bound to a DbContext") };
             }
             if (!enqueue_op_fn_(
-                    [repo = repo_, item]()
+                    [repo = repo_, upsert_fn = upsert_tracked_fn_, tracking_fn = is_tracking_enabled_fn_, item]()
                     {
-                        return repo->update_one(item);
+                        auto res = repo->update_one(item);
+                        if (res && tracking_fn && tracking_fn())
+                        {
+                            record_snapshot_with(repo, upsert_fn, item);
+                        }
+                        return res;
                     }))
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
