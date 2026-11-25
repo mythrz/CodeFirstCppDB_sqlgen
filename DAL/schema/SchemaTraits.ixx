@@ -175,12 +175,9 @@ export namespace DAL::Schema
         {
             throw std::invalid_argument("Entity cannot have multiple [[=DAL::Schema::table]] annotations");
         }
-        const char* raw_name = std::meta::extract<table>(anns[0]).name;
-        if (raw_name == nullptr)
-        {
-            throw std::invalid_argument("[[=DAL::Schema::table]] name cannot be null");
-        }
-        std::string_view sv{ raw_name };
+        // Constructing string_view in consteval directly rejects nullptr via char_traits::length
+        // without pointer-to-null comparisons that GCC 16 -fsanitize=address rejects on static strings.
+        std::string_view sv{ std::meta::extract<table>(anns[0]).name };
         if (sv.empty())
         {
             throw std::invalid_argument("[[=DAL::Schema::table]] name cannot be empty");
@@ -303,23 +300,17 @@ export namespace DAL::Schema
                     ++fk_count;
                     using AnnT = [:ann_type:];
                     using ParentDomain = [:std::meta::template_arguments_of(ann_type)[0]:];
-                    constexpr auto ref_lit =
-                        to_string_literal<[]() consteval
-                                          {
-                                              const char* raw_col = std::meta::extract<AnnT>(ann).col;
-                                              if (raw_col == nullptr)
-                                              {
-                                                  throw std::invalid_argument("[[=DAL::Schema::references]] column cannot be null");
-                                              }
-                                              std::string_view sv{ raw_col };
-                                              if (sv.empty() || sv.find('"') != std::string_view::npos)
-                                              {
-                                                  throw std::invalid_argument(
-                                                      "[[=DAL::Schema::references]] column must be non-empty and "
-                                                      "contain no double quotes");
-                                              }
-                                              return sv;
-                                          }>();
+                    constexpr auto ref_lit = to_string_literal<[]() consteval
+                                                               {
+                                                                   std::string_view sv{ std::meta::extract<AnnT>(ann).col };
+                                                                   if (sv.empty() || sv.find('"') != std::string_view::npos)
+                                                                   {
+                                                                       throw std::invalid_argument(
+                                                                           "[[=DAL::Schema::references]] column must be non-empty and "
+                                                                           "contain no double quotes");
+                                                                   }
+                                                                   return sv;
+                                                               }>();
                     using FieldT = [:field_type:];
                     fk_target_type = ^^sqlgen::ForeignKey<FieldT, SchemaOf_t<ParentDomain>, ref_lit>;
                 }
@@ -388,12 +379,7 @@ export namespace DAL::Schema
             }
             if constexpr (!col_anns.empty())
             {
-                const char* raw_col = std::meta::extract<column>(col_anns[0]).name;
-                if (raw_col == nullptr)
-                {
-                    throw std::invalid_argument("[[=DAL::Schema::column]] name cannot be null");
-                }
-                col_name = std::string_view{ raw_col };
+                col_name = std::string_view{ std::meta::extract<column>(col_anns[0]).name };
                 if (col_name.empty() || col_name.find('"') != std::string_view::npos)
                 {
                     throw std::invalid_argument("[[=DAL::Schema::column]] name must be non-empty and contain no double quotes");

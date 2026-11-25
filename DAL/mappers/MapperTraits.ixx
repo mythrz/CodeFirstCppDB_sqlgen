@@ -63,12 +63,7 @@ export namespace DAL::Mappers
             }
             if (!col_anns.empty())
             {
-                const char* raw = std::meta::extract<DAL::Schema::column>(col_anns[0]).name;
-                if (raw == nullptr)
-                {
-                    throw std::invalid_argument("MapperTraits: [[=DAL::Schema::column]] name cannot be null");
-                }
-                std::string_view sv{ raw };
+                std::string_view sv{ std::meta::extract<DAL::Schema::column>(col_anns[0]).name };
                 if (sv.empty() || sv.find('"') != std::string_view::npos)
                 {
                     throw std::invalid_argument(
