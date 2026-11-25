@@ -652,4 +652,112 @@ namespace
         EXPECT_EQ(closedCount.error().code, Core::DbErrorCode::ConnectionError);
     }
 
+    TEST(Phase51DbQueryHardeningTest, OffsetWithoutLimitAndUnwrappedSelectColumns)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Ada", "Lovelace")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Bob", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 3 }, "Charlie", "Adams")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 4 }, "Diana", "Prince")).has_value());
+        ASSERT_TRUE(db.somethings.add(Core::Something(Core::SomethingId{ 10 }, "Engine", "Tech")).has_value());
+        ASSERT_TRUE(db.personSomethings.add(Core::Person_Something(Core::PersonId{ 1 }, Core::SomethingId{ 10 }, "Owner")).has_value());
+
+        // offset() without limit() must emit valid SQLite LIMIT <max> OFFSET N
+        auto skipped = db.people.order_by<"id">(false).offset(2).try_to_vector();
+        ASSERT_TRUE(skipped.has_value()) << skipped.error().to_string();
+        ASSERT_EQ(skipped->size(), 2u);
+        EXPECT_EQ((*skipped)[0].getId().get(), 3);
+        EXPECT_EQ((*skipped)[1].getId().get(), 4);
+
+        auto skippedNames = db.people.order_by<"id">(false).offset(2).try_select<"firstName">();
+        ASSERT_TRUE(skippedNames.has_value()) << skippedNames.error().to_string();
+        ASSERT_EQ(skippedNames->size(), 2u);
+        EXPECT_EQ((*skippedNames)[0], "Charlie");
+        EXPECT_EQ((*skippedNames)[1], "Diana");
+
+        // select_columns / select_distinct_columns must unwrap sqlgen::PrimaryKey / ForeignKey to plain scalars
+        auto idNameRows = db.people.order_by<"id">(false).offset(2).try_select_columns<"id", "firstName">();
+        ASSERT_TRUE(idNameRows.has_value()) << idNameRows.error().to_string();
+        static_assert(std::same_as<decltype(idNameRows)::value_type, std::vector<std::tuple<std::int32_t, std::string>>>);
+        ASSERT_EQ(idNameRows->size(), 2u);
+        const auto& [id0, name0] = (*idNameRows)[0];
+        EXPECT_EQ(id0, 3);
+        EXPECT_EQ(name0, "Charlie");
+
+        auto fkRows = db.personSomethings.try_select_distinct_columns<"person_id", "something_id", "association_type">();
+        ASSERT_TRUE(fkRows.has_value()) << fkRows.error().to_string();
+        static_assert(std::same_as<decltype(fkRows)::value_type, std::vector<std::tuple<std::int32_t, std::int32_t, std::string>>>);
+        ASSERT_EQ(fkRows->size(), 1u);
+        const auto& [pid, sid, assoc] = (*fkRows)[0];
+        EXPECT_EQ(pid, 1);
+        EXPECT_EQ(sid, 10);
+        EXPECT_EQ(assoc, "Owner");
+    }
+
+    TEST(Phase51DbQueryHardeningTest, OrderByLimitRemoveWherePreservesUnrelatedTrackedAndIsAtomic)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Alice", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Bob", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 3 }, "Charlie", "Smith")).has_value());
+        ASSERT_TRUE(db.somethings.add(Core::Something(Core::SomethingId{ 1 }, "Laptop", "Tech")).has_value());
+        // FK link references Person 3 so deleting Person 3 fails with ConstraintViolation.
+        ASSERT_TRUE(db.personSomethings.add(Core::Person_Something(Core::PersonId{ 3 }, Core::SomethingId{ 1 }, "Owner")).has_value());
+
+        db.enable_change_tracking();
+        auto t1 = db.people.find_tracked(1);
+        auto t2 = db.people.find_tracked(2);
+        ASSERT_NE(t1, nullptr);
+        ASSERT_NE(t2, nullptr);
+        t2->setFirstName("BobMutated");
+
+        // order_by() must preserve untrack_key_fn_ so only id=1 is evicted and t2 remains tracked.
+        auto delOne = db.people.where_equal<"lastName">("Smith").order_by<"id">(false).limit(1).remove_where();
+        ASSERT_TRUE(delOne.has_value()) << delOne.error().to_string();
+        EXPECT_EQ(db.tracked_entities_count(), 1u);
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.find(2)->getFirstName(), "BobMutated");
+
+        // Atomic rollback on limited remove_where(): deleting id=2 succeeds, id=3 fails FK -> id=2 must roll back!
+        auto delTwoFail = db.people.where_equal<"lastName">("Smith").order_by<"id">(false).limit(2).remove_where();
+        ASSERT_FALSE(delTwoFail.has_value());
+        EXPECT_EQ(delTwoFail.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(db.people.count(), 2u);
+        EXPECT_TRUE(db.people.contains(2));
+        EXPECT_TRUE(db.people.contains(3));
+    }
+
+    TEST(Phase51DbQueryHardeningTest, PaginatedCountDoesNotTrackAndAggregatesRejectPagination)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Ada", "Lovelace")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Bob", "Smith")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 3 }, "Charlie", "Adams")).has_value());
+
+        db.enable_change_tracking();
+        db.clear_change_tracker();
+        EXPECT_EQ(db.tracked_entities_count(), 0u);
+
+        auto pagedCnt = db.people.order_by<"id">(false).page(2, 1).try_count();
+        ASSERT_TRUE(pagedCnt.has_value()) << pagedCnt.error().to_string();
+        EXPECT_EQ(*pagedCnt, 2u);
+        EXPECT_EQ(db.tracked_entities_count(), 0u);
+
+        auto pagedAgg = db.people.query().limit(2).try_max<"id">();
+        ASSERT_FALSE(pagedAgg.has_value());
+        EXPECT_EQ(pagedAgg.error().code, Core::DbErrorCode::ConstraintViolation);
+    }
+
 } // namespace

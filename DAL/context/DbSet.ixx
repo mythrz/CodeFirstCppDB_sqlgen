@@ -71,6 +71,14 @@ export namespace DAL
         {
         };
 
+        template<typename RawFieldT>
+        using ProjectedColumn_t = std::conditional_t<
+            IsOptionalField<std::remove_cvref_t<RawFieldT>>::value,
+            std::optional<typename UnwrapColumnScalar<std::remove_cvref_t<RawFieldT>>::type>,
+            typename UnwrapColumnScalar<std::remove_cvref_t<RawFieldT>>::type>;
+
+        inline constexpr std::size_t kSqliteUnboundedLimit = static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
+
         template<typename OrderByVariant, typename NewAscCol, typename NewDescCol>
         struct AppendOrderByVariant;
 
@@ -787,7 +795,7 @@ export namespace DAL
             using VarT = std::variant<AscT, DescT>;
             VarT ob = desc ? VarT{ DescT{} } : VarT{ AscT{} };
             return DbQuery<Domain, DTO, ConnectionHandle, KeyType, WhereCondT, VarT>(
-                repo_, conn_, where_cond_, std::move(ob), limit_, offset_, track_fn_, clear_track_fn_);
+                repo_, conn_, where_cond_, std::move(ob), limit_, offset_, track_fn_, clear_track_fn_, untrack_key_fn_);
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -841,6 +849,14 @@ export namespace DAL
             if (!conn_)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
+            if (!conn_->is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return std::vector<Domain>{};
             }
 
             if constexpr (requires(const ConnectionHandle& c) { c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>); })
@@ -912,6 +928,18 @@ export namespace DAL
 
         [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_first_or_default() const
         {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
+            if (!conn_->is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return std::optional<Domain>{ std::nullopt };
+            }
             auto res = limit(1).try_to_vector();
             if (!res)
             {
@@ -935,6 +963,14 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
+            if (!conn_->is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return 0u;
+            }
 
             if (!limit_.has_value() && !offset_.has_value())
             {
@@ -954,12 +990,41 @@ export namespace DAL
                 }
             }
 
-            auto res = try_to_vector();
-            if (!res)
+            if constexpr (requires(const ConnectionHandle& c) { c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>); })
             {
-                return std::unexpected<Core::DbError>{ res.error() };
+                auto dto_res = execute_query(*conn_);
+                if (!dto_res)
+                {
+                    return std::unexpected<Core::DbError>{ dto_res.error() };
+                }
+                return dto_res->size();
             }
-            return res.value().size();
+            else
+            {
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing> || !std::same_as<OrderByT, rfl::Nothing>)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                        "Connection adapter does not support server-side WHERE or ORDER BY queries") };
+                }
+                else
+                {
+                    auto all_res = repo_->try_get_all();
+                    if (!all_res)
+                    {
+                        return std::unexpected<Core::DbError>{ all_res.error() };
+                    }
+                    std::size_t count_val = all_res->size();
+                    if (offset_.has_value())
+                    {
+                        count_val = (*offset_ >= count_val) ? 0u : (count_val - *offset_);
+                    }
+                    if (limit_.has_value() && count_val > *limit_)
+                    {
+                        count_val = *limit_;
+                    }
+                    return count_val;
+                }
+            }
         }
 
         [[nodiscard]] std::size_t count() const
@@ -1047,6 +1112,15 @@ export namespace DAL
             {
                 return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
                     Core::DbError::connection_error("Database connection is null") } };
+            }
+            if (!conn_->is_open())
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed") } };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::vector<ColValueT>{} };
             }
 
             struct ProjRow
@@ -1152,6 +1226,15 @@ export namespace DAL
                 return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
                     Core::DbError::connection_error("Database connection is null") } };
             }
+            if (!conn_->is_open())
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed") } };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::vector<ColValueT>{} };
+            }
 
             struct ProjRow
             {
@@ -1226,13 +1309,22 @@ export namespace DAL
             requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto try_select_columns() const
         {
-            using RowTuple = std::tuple<std::remove_cvref_t<
+            using RowTuple = std::tuple<detail::ProjectedColumn_t<
                 decltype(std::declval<const DTO&>().[:DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>():])>...>;
 
             if (!conn_)
             {
                 return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
                     Core::DbError::connection_error("Database connection is null") } };
+            }
+            if (!conn_->is_open())
+            {
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed") } };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::vector<RowTuple>{} };
             }
 
             auto with_where = [&]()
@@ -1280,13 +1372,22 @@ export namespace DAL
             requires(sizeof...(ColLiterals) >= 2) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] auto try_select_distinct_columns() const
         {
-            using RowTuple = std::tuple<std::remove_cvref_t<
+            using RowTuple = std::tuple<detail::ProjectedColumn_t<
                 decltype(std::declval<const DTO&>().[:DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>():])>...>;
 
             if (!conn_)
             {
                 return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
                     Core::DbError::connection_error("Database connection is null") } };
+            }
+            if (!conn_->is_open())
+            {
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Database connection is closed") } };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::vector<RowTuple>{} };
             }
 
             auto with_group = [&]()
@@ -1365,6 +1466,14 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
+            if (!conn_->is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return false;
+            }
             if (!limit_.has_value() && !offset_.has_value())
             {
                 auto cnt_res = try_count();
@@ -1385,12 +1494,12 @@ export namespace DAL
             }
             else
             {
-                auto vec_res = try_to_vector();
-                if (!vec_res)
+                auto cnt_res = try_count();
+                if (!cnt_res)
                 {
-                    return std::unexpected<Core::DbError>{ vec_res.error() };
+                    return std::unexpected<Core::DbError>{ cnt_res.error() };
                 }
-                return !vec_res->empty();
+                return *cnt_res > 0;
             }
         }
 
@@ -1406,6 +1515,14 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
+            if (!conn_->is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return {};
+            }
 
             if (!limit_.has_value() && !offset_.has_value())
             {
@@ -1420,25 +1537,60 @@ export namespace DAL
                 }
             }
 
-            auto res = try_to_vector();
-            if (!res)
+            // Collect keys without hydrating Domain or polluting ChangeTracker, then delete atomically.
+            std::vector<KeyType> keys_to_delete;
+            if constexpr (requires(const ConnectionHandle& c) { c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>); })
             {
-                return std::unexpected<Core::DbError>{ res.error() };
+                auto dto_res = execute_query(*conn_);
+                if (!dto_res)
+                {
+                    return std::unexpected<Core::DbError>{ dto_res.error() };
+                }
+                keys_to_delete.reserve(dto_res->size());
+                for (const auto& dto : *dto_res)
+                {
+                    keys_to_delete.push_back(Schema::EntityMetadata<Domain, DTO>::extract_dto_key(dto));
+                }
             }
-            for (const auto& item : res.value())
+            else
             {
-                auto key = Schema::EntityMetadata<Domain, DTO>::extract_key(item);
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                    "Connection adapter does not support server-side WHERE queries") };
+            }
+
+            if (keys_to_delete.empty())
+            {
+                return {};
+            }
+
+            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn_);
+            if (auto begin_res = tx_guard.begin(); !begin_res)
+            {
+                return begin_res;
+            }
+
+            for (const auto& key : keys_to_delete)
+            {
                 auto del_res = repo_->delete_by_id(key);
                 if (!del_res)
                 {
                     return del_res;
                 }
-                if (untrack_key_fn_)
+            }
+
+            if (auto commit_res = tx_guard.commit(); !commit_res)
+            {
+                return commit_res;
+            }
+
+            if (untrack_key_fn_)
+            {
+                for (const auto& key : keys_to_delete)
                 {
                     untrack_key_fn_(key);
                 }
             }
-            if (!untrack_key_fn_ && clear_track_fn_)
+            else if (clear_track_fn_)
             {
                 clear_track_fn_();
             }
@@ -1498,7 +1650,7 @@ export namespace DAL
             }
             if (offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::offset(*offset_);
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_);
                 return conn.template try_execute_tuple_read<RowTuple>(std::move(q));
             }
             return conn.template try_execute_tuple_read<RowTuple>(std::forward<BaseQuery>(base_query));
@@ -1521,7 +1673,8 @@ export namespace DAL
             }
             if (offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::offset(*offset_) | sqlgen::to<std::vector<OutRowT>>;
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_) |
+                    sqlgen::to<std::vector<OutRowT>>;
                 return conn.template try_execute_read<OutRowT>(std::move(q));
             }
             auto q = std::forward<BaseQuery>(base_query) | sqlgen::to<std::vector<OutRowT>>;
@@ -1534,6 +1687,11 @@ export namespace DAL
             if (!conn_)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
+            if (limit_.has_value() || offset_.has_value())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    "Aggregate queries do not support limit or offset pagination") };
             }
             if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
             {
@@ -1561,7 +1719,7 @@ export namespace DAL
             }
             if (offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::offset(*offset_);
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_);
                 return conn.template try_execute_read<DTO>(std::move(q));
             }
             return conn.template try_execute_read<DTO>(std::forward<BaseQuery>(base_query));
