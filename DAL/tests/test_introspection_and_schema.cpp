@@ -357,9 +357,8 @@ namespace
 
     TEST(Phase43ReopenForeignKeyTest, ReopeningExistingDbWithoutEnsureCreatedEnforcesForeignKeys)
     {
-        const auto tempDir = std::filesystem::temp_directory_path();
-        const auto dbPath = (tempDir / "codefirst_phase43_fk_reopen.db").string();
-        std::filesystem::remove(dbPath);
+        const auto dbPath = make_unique_temp_db_path("codefirst_phase43_fk_reopen");
+        const ScopedTempDbCleanup cleanup{ dbPath };
 
         {
             auto connRes = DAL::SQLiteConnection::connect(dbPath);
@@ -390,8 +389,6 @@ namespace
 
             reopened.close();
         }
-
-        std::filesystem::remove(dbPath);
     }
 
     // =========================================================================
@@ -413,6 +410,15 @@ namespace
         std::string name;
     };
 
+    struct SecondReservedSqliteSchemaDTO
+    {
+        // Valid identifier that passes client-side validation and triggers a genuine SQLite DDL error
+        // ("object name reserved for internal use: sqlite_reserved_ddl_fail").
+        static constexpr auto tablename = "sqlite_reserved_ddl_fail";
+        sqlgen::PrimaryKey<std::int32_t, true> id{ 0 };
+        std::string name;
+    };
+
     struct PartialFailSchemaContext : DAL::DbContextBase<DAL::SQLiteConnection>
     {
         Set<FirstGoodSchemaDTO> first{ this };
@@ -424,20 +430,48 @@ namespace
         }
     };
 
+    struct SqliteLevelFailSchemaContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<FirstGoodSchemaDTO> first{ this };
+        Set<SecondReservedSqliteSchemaDTO> second{ this };
+
+        explicit SqliteLevelFailSchemaContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
     TEST(Phase50SchemaVersioningTest, EnsureCreatedIsTransactionalAndRollsBackEarlierTablesOnFailure)
     {
-        auto connRes = DAL::SQLiteConnection::connect(":memory:");
-        ASSERT_TRUE(connRes.has_value());
-        PartialFailSchemaContext db(connRes.value());
+        // 1. Client-side identifier validation failure rolls back earlier tables.
+        {
+            auto connRes = DAL::SQLiteConnection::connect(":memory:");
+            ASSERT_TRUE(connRes.has_value());
+            PartialFailSchemaContext db(connRes.value());
 
-        auto res = db.ensure_created();
-        ASSERT_FALSE(res.has_value());
-        EXPECT_FALSE(db.in_transaction());
+            auto res = db.ensure_created();
+            ASSERT_FALSE(res.has_value());
+            EXPECT_FALSE(db.in_transaction());
 
-        // FirstGoodSchema MUST NOT be left behind after SecondBadSchema failed!
-        auto tablesRes = db.list_tables();
-        ASSERT_TRUE(tablesRes.has_value());
-        EXPECT_FALSE(std::ranges::contains(*tablesRes, std::string_view{ "FirstGoodSchema" }));
+            auto tablesRes = db.list_tables();
+            ASSERT_TRUE(tablesRes.has_value());
+            EXPECT_FALSE(std::ranges::contains(*tablesRes, std::string_view{ "FirstGoodSchema" }));
+        }
+
+        // 2. Genuine SQLite-level DDL execution failure also rolls back earlier created tables.
+        {
+            auto connRes = DAL::SQLiteConnection::connect(":memory:");
+            ASSERT_TRUE(connRes.has_value());
+            SqliteLevelFailSchemaContext db(connRes.value());
+
+            auto res = db.ensure_created();
+            ASSERT_FALSE(res.has_value());
+            EXPECT_FALSE(db.in_transaction());
+
+            auto tablesRes = db.list_tables();
+            ASSERT_TRUE(tablesRes.has_value());
+            EXPECT_FALSE(std::ranges::contains(*tablesRes, std::string_view{ "FirstGoodSchema" }));
+        }
     }
 
     TEST(Phase50SchemaVersioningTest, UserVersionAndTransactionalMigrateToHook)

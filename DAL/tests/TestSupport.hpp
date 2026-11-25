@@ -2,6 +2,26 @@
 
 namespace
 {
+    inline std::string make_unique_temp_db_path(std::string_view prefix)
+    {
+        static std::atomic<std::uint64_t> counter{ 0 };
+        const auto tick = static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+        const auto seq = ++counter;
+        return (std::filesystem::temp_directory_path() / std::format("{}_{}_{}.db", prefix, tick, seq)).string();
+    }
+
+    struct ScopedTempDbCleanup
+    {
+        std::string path;
+        ~ScopedTempDbCleanup() noexcept
+        {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            std::filesystem::remove(path + "-wal", ec);
+            std::filesystem::remove(path + "-shm", ec);
+        }
+    };
+
     // In-Memory Database Connection mock simulating a database driver satisfying DAL::Repositories::DatabaseConnection concept
     class TestDatabaseConnection
     {
@@ -272,6 +292,41 @@ namespace
         sqlgen::Result<sqlgen::Nothing> insert_many(const std::vector<DTO>& items)
         {
             auto& storage = get_storage<DTO>();
+            auto same_key = [](const DTO& a, const DTO& b) -> bool
+            {
+                if constexpr (requires { a.id; })
+                {
+                    return a.id.value() == b.id.value();
+                }
+                else if constexpr (std::is_same_v<DTO, DAL::Schema::Person_SomethingDTO>)
+                {
+                    return a.person_id.value() == b.person_id.value() && a.something_id.value() == b.something_id.value();
+                }
+                else
+                {
+                    return false;
+                }
+            };
+
+            // Validate atomically before mutating storage (matching transactional SQLite batch semantics).
+            for (std::size_t i = 0; i < items.size(); ++i)
+            {
+                for (const auto& existing : storage)
+                {
+                    if (same_key(existing, items[i]))
+                    {
+                        return sqlgen::error("UNIQUE constraint failed: duplicate primary key in insert_many");
+                    }
+                }
+                for (std::size_t j = 0; j < i; ++j)
+                {
+                    if (same_key(items[j], items[i]))
+                    {
+                        return sqlgen::error("UNIQUE constraint failed: duplicate primary key within insert_many batch");
+                    }
+                }
+            }
+
             storage.insert(storage.end(), items.begin(), items.end());
             return sqlgen::Result<sqlgen::Nothing>{ sqlgen::Nothing{} };
         }

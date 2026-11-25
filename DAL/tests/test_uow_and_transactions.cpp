@@ -1496,10 +1496,8 @@ namespace
         EXPECT_FALSE(memRes.has_value());
 
         // WAL on an on-disk database must succeed and read back "wal".
-        const auto dbPath = (std::filesystem::temp_directory_path() / "codefirst_phase49_wal_check.db").string();
-        std::filesystem::remove(dbPath);
-        std::filesystem::remove(dbPath + "-wal");
-        std::filesystem::remove(dbPath + "-shm");
+        const auto dbPath = make_unique_temp_db_path("codefirst_phase49_wal_check");
+        const ScopedTempDbCleanup cleanup{ dbPath };
 
         {
             auto diskRes = DAL::SQLiteConnection::connect(dbPath, DAL::SQLiteConnectionOptions{ .wal_mode = true });
@@ -1510,9 +1508,6 @@ namespace
             EXPECT_EQ(std::get<std::string>(jmRes->rows[0].cells[0]), "wal");
             (*diskRes)->close();
         }
-        std::filesystem::remove(dbPath);
-        std::filesystem::remove(dbPath + "-wal");
-        std::filesystem::remove(dbPath + "-shm");
     }
 
     TEST(OwnershipAndLifetimeHardeningTest, EscapedDbSetFindTrackedRefReturnsNulloptWhenContextExpired)

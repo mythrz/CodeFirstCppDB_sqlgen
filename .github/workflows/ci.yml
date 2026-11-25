@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -19,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pip
-          sudo python3 -m pip install --break-system-packages --upgrade "clang-format>=21"
+          sudo python3 -m pip install --break-system-packages --upgrade "clang-format==21.*"
           hash -r
           clang-format --version
       - name: Verify C++ formatting
@@ -35,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        preset: [gcc-debug, gcc-asan]
+        preset: [gcc-debug, gcc-release, gcc-asan]
 
     steps:
       - name: Install toolchain (GCC 16.2+, CMake 4.5+, Ninja, SQLite)
@@ -113,7 +117,7 @@ jobs:
           cmake --build /tmp/cf_consumer/build -j 2
           /tmp/cf_consumer/build/consumer
 
-      - name: Verify external add_subdirectory consumer
+      - name: Verify external add_subdirectory multi-module consumer
         run: |
           mkdir -p /tmp/cf_subdir_consumer
           cat <<EOF > /tmp/cf_subdir_consumer/CMakeLists.txt
@@ -125,12 +129,77 @@ jobs:
           set(CMAKE_CXX_SCAN_FOR_MODULES ON)
           set(CMAKE_CXX_MODULE_STD ON)
           add_subdirectory("$GITHUB_WORKSPACE" codefirst_dep)
+          # Non-DAL sibling module verifying CodeFirstCppDB::Core does not leak BMI flags onto unrelated modules.
+          add_library(plain_mod STATIC)
+          target_sources(plain_mod PUBLIC FILE_SET CXX_MODULES FILES plain.ixx)
+          target_link_libraries(plain_mod PUBLIC CodeFirstCppDB::Core)
+          # DAL-consuming module importing both core and dal.
+          add_library(data_mod STATIC)
+          target_sources(data_mod PUBLIC FILE_SET CXX_MODULES FILES data.ixx)
+          target_link_libraries(data_mod PUBLIC CodeFirstCppDB::DAL plain_mod)
           add_executable(subdir_consumer main.cpp)
-          target_link_libraries(subdir_consumer PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
+          target_link_libraries(subdir_consumer PRIVATE plain_mod data_mod)
           EOF
-          cat <<'EOF' > /tmp/cf_subdir_consumer/main.cpp
+          cat <<'EOF' > /tmp/cf_subdir_consumer/plain.ixx
+          export module plain;
           import std;
           import core;
+          export namespace Plain
+          {
+              struct Tag {};
+              using PlainId = Core::Id<Tag, std::int32_t>;
+              inline PlainId make_id(std::int32_t v) noexcept { return PlainId{ v }; }
+          }
+          EOF
+          cat <<'EOF' > /tmp/cf_subdir_consumer/data.ixx
+          export module data;
+          import std;
+          import dal;
+          import plain;
+          export namespace Data
+          {
+              inline bool check_db()
+              {
+                  auto conn = DAL::SQLiteConnection::connect(":memory:");
+                  return conn.has_value() && Plain::make_id(7).get() == 7;
+              }
+          }
+          EOF
+          cat <<'EOF' > /tmp/cf_subdir_consumer/main.cpp
+          import plain;
+          import data;
+          int main()
+          {
+              return Data::check_db() && Plain::make_id(1).get() == 1 ? 0 : 1;
+          }
+          EOF
+          cmake -S /tmp/cf_subdir_consumer -B /tmp/cf_subdir_consumer/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake --build /tmp/cf_subdir_consumer/build -j 2
+          /tmp/cf_subdir_consumer/build/subdir_consumer
+
+      - name: Verify CODEFIRST_SQLITE_TARGET injection consumer
+        run: |
+          mkdir -p /tmp/cf_injected_sqlite
+          cat <<EOF > /tmp/cf_injected_sqlite/CMakeLists.txt
+          cmake_minimum_required(VERSION 4.5)
+          project(injected_sqlite_consumer LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 26)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          set(CMAKE_CXX_EXTENSIONS OFF)
+          set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+          set(CMAKE_CXX_MODULE_STD ON)
+          find_library(SYS_SQLITE3_LIB sqlite3 REQUIRED)
+          find_path(SYS_SQLITE3_INC sqlite3.h REQUIRED)
+          add_library(custom_sqlite INTERFACE)
+          target_include_directories(custom_sqlite INTERFACE "\${SYS_SQLITE3_INC}")
+          target_link_libraries(custom_sqlite INTERFACE "\${SYS_SQLITE3_LIB}")
+          set(CODEFIRST_SQLITE_TARGET custom_sqlite CACHE STRING "" FORCE)
+          add_subdirectory("$GITHUB_WORKSPACE" codefirst_dep)
+          add_executable(injected_app main.cpp)
+          target_link_libraries(injected_app PRIVATE CodeFirstCppDB::DAL)
+          EOF
+          cat <<'EOF' > /tmp/cf_injected_sqlite/main.cpp
+          import std;
           import dal;
           int main()
           {
@@ -138,6 +207,6 @@ jobs:
               return conn ? 0 : 1;
           }
           EOF
-          cmake -S /tmp/cf_subdir_consumer -B /tmp/cf_subdir_consumer/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          cmake --build /tmp/cf_subdir_consumer/build -j 2
-          /tmp/cf_subdir_consumer/build/subdir_consumer
+          cmake -S /tmp/cf_injected_sqlite -B /tmp/cf_injected_sqlite/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake --build /tmp/cf_injected_sqlite/build -j 2
+          /tmp/cf_injected_sqlite/build/injected_app

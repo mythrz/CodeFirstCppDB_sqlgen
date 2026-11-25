@@ -7,6 +7,7 @@ option(CODEFIRST_INCLUDE_SAMPLES "Build CodeFirstCppDB sample entities and repos
 option(CODEFIRST_ENABLE_CONTRACTS "Enable C++26 pre/post contracts on invariant checks" OFF)
 option(CODEFIRST_BUILD_SHARED "Build CodeFirstCppDB libraries and bundled dependencies as shared libraries" OFF)
 option(CODEFIRST_ENABLE_STACKTRACE "Enable Debug std::stacktrace capture in Core::DbError" ON)
+option(CODEFIRST_INSTALL "Enable install() rules and CMake package config generation" OFF)
 
 set(_codefirst_parent_disables_exceptions OFF)
 get_directory_property(_codefirst_dir_compile_options COMPILE_OPTIONS)
@@ -92,7 +93,11 @@ if(CODEFIRST_SQLITE_TARGET)
     endforeach()
 else()
     find_package(SQLite3 REQUIRED)
-    if(NOT TARGET SQLite::SQLite3)
+    if(TARGET SQLite::SQLite3)
+        # CMake 4.5 marks FindSQLite3's legacy SQLite::SQLite3 alias deprecated; clear the
+        # deprecation noise emitted when bundled extern/sqlgen links SQLite::SQLite3.
+        set_target_properties(SQLite::SQLite3 PROPERTIES DEPRECATION "")
+    elseif(TARGET SQLite3::SQLite3)
         add_library(SQLite::SQLite3 INTERFACE IMPORTED)
         target_link_libraries(SQLite::SQLite3 INTERFACE SQLite3::SQLite3)
     endif()
@@ -132,11 +137,8 @@ if(NOT TARGET sqlgen)
     endif()
 endif()
 
-# Enable automatic module dependency scanning and import std for CodeFirstCppDB targets
-set(CMAKE_CXX_SCAN_FOR_MODULES ON)
-set(CMAKE_CXX_MODULE_STD ON)
-
-# googleTest (submodule)
+# googleTest (submodule) — added before enabling module scanning so gtest/gmock
+# do not scan for C++26 modules or synthesize redundant std module BMIs.
 if(CODEFIRST_BUILD_TESTS)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     if(NOT TARGET gtest)
@@ -144,6 +146,10 @@ if(CODEFIRST_BUILD_TESTS)
     endif()
     enable_testing()
 endif()
+
+# Enable automatic module dependency scanning and import std for CodeFirstCppDB targets
+set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+set(CMAKE_CXX_MODULE_STD ON)
 
 # projects
 add_subdirectory(Core)
@@ -155,7 +161,6 @@ if(CODEFIRST_BUILD_EXAMPLES)
     add_subdirectory(Startup)
 endif()
 
-option(CODEFIRST_INSTALL "Enable install() rules and CMake package config generation" OFF)
 if(CODEFIRST_INSTALL)
     include(GNUInstallDirs)
     include(CMakePackageConfigHelpers)
@@ -207,6 +212,12 @@ if(CODEFIRST_INSTALL)
         NAMESPACE CodeFirstCppDB::
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/CodeFirstCppDB"
     )
+
+    if(CODEFIRST_ENABLE_POSTGRES)
+        set(CODEFIRST_POSTGRES_FIND_DEPENDENCY "find_dependency(PostgreSQL)")
+    else()
+        set(CODEFIRST_POSTGRES_FIND_DEPENDENCY "")
+    endif()
 
     configure_package_config_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CodeFirstCppDBConfig.cmake.in"

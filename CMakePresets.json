@@ -66,6 +66,13 @@
       }
     },
     {
+      "name": "test-gcc-release",
+      "configurePreset": "gcc-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
       "name": "test-gcc-asan",
       "configurePreset": "gcc-asan",
       "output": {
