@@ -2027,4 +2027,248 @@ namespace
         }
     }
 
+    // =========================================================================
+    // Phase 57: Tracker Ownership, Exact Bulk Invalidation, Expired Sets,
+    //           Statement-Local INSERT RETURNING & Connection Batch Atomicity
+    // =========================================================================
+
+    TEST(Phase57TrackerAndAtomicityTest, InsertTrackRemoveRollbackDoesNotResurrectGhost)
+    {
+        const auto dbPath = make_unique_temp_db_path("codefirst_phase57_no_ghost");
+        const ScopedTempDbCleanup cleanup{ dbPath };
+
+        {
+            auto connRes = DAL::SQLiteConnection::connect(dbPath);
+            ASSERT_TRUE(connRes.has_value());
+            Phase30DbContext db(connRes.value());
+            ASSERT_TRUE(db.ensure_created().has_value());
+            db.enable_change_tracking();
+
+            ASSERT_TRUE(db.begin_transaction().has_value());
+            auto inserted = db.people.add_returning(Core::Person(Core::PersonId{ 0 }, "Transient", "Ghost"));
+            ASSERT_TRUE(inserted.has_value()) << inserted.error().to_string();
+            auto tracked = db.people.find_tracked(inserted->getId().get());
+            ASSERT_NE(tracked, nullptr);
+            EXPECT_EQ(db.tracked_entities_count(), 1u);
+
+            ASSERT_TRUE(db.people.remove(inserted->getId().get()).has_value());
+            EXPECT_EQ(db.tracked_entities_count(), 0u);
+
+            ASSERT_TRUE(db.rollback().has_value());
+            // Rolling back must NOT resurrect the deleted row that never existed before begin_transaction().
+            EXPECT_EQ(db.tracked_entities_count(), 0u);
+            EXPECT_EQ(db.people.find_tracked(inserted->getId().get()), nullptr);
+            EXPECT_EQ(db.people.count(), 0u);
+            ASSERT_TRUE(db.save_changes().has_value());
+            connRes.value()->close();
+        }
+
+        // Reopen and verify row is absent.
+        {
+            auto connRes = DAL::SQLiteConnection::connect(dbPath);
+            ASSERT_TRUE(connRes.has_value());
+            Phase30DbContext db(connRes.value());
+            EXPECT_EQ(db.people.count(), 0u);
+            connRes.value()->close();
+        }
+    }
+
+    TEST(Phase57TrackerAndAtomicityTest, BulkUpdateWhereAndRemoveWherePreserveUnrelatedDirtyTrackedEntities)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Alice", "Keep")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "Bob", "Target")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 3 }, "Carol", "DeleteMe")).has_value());
+
+        db.enable_change_tracking();
+        auto alice = db.people.find_tracked(1);
+        auto bob = db.people.find_tracked(2);
+        auto carol = db.people.find_tracked(3);
+        ASSERT_NE(alice, nullptr);
+        ASSERT_NE(bob, nullptr);
+        ASSERT_NE(carol, nullptr);
+        EXPECT_EQ(db.tracked_entities_count(), 3u);
+
+        // Mutate Alice in memory (unsaved dirty edit).
+        alice->setFirstName("AliceEdited");
+
+        // 1. 0-row update_where must NOT evict Alice, Bob, or Carol.
+        ASSERT_TRUE(db.people.where_equal<"lastName">("NoSuchMatch").template update_where<"firstName">("Nobody").has_value());
+        EXPECT_EQ(db.tracked_entities_count(), 3u);
+
+        // 2. Partial update_where matching only Bob evicts ONLY Bob, keeping Alice (dirty) and Carol tracked.
+        ASSERT_TRUE(db.people.where_equal<"lastName">("Target").template update_where<"firstName">("BobBulk").has_value());
+        EXPECT_EQ(db.tracked_entities_count(), 2u);
+
+        // 3. 0-row remove_where must NOT evict Alice or Carol.
+        ASSERT_TRUE(db.people.where_equal<"lastName">("StillNoMatch").remove_where().has_value());
+        EXPECT_EQ(db.tracked_entities_count(), 2u);
+
+        // 4. Unpaginated remove_where matching only Carol evicts ONLY Carol, keeping Alice's dirty edit intact.
+        ASSERT_TRUE(db.people.where_equal<"lastName">("DeleteMe").remove_where().has_value());
+        EXPECT_EQ(db.tracked_entities_count(), 1u);
+
+        // 5. save_changes() must persist Alice's unsaved edit without touching Bob's bulk update.
+        ASSERT_TRUE(db.save_changes().has_value());
+        EXPECT_EQ(db.people.count(), 2u);
+        EXPECT_EQ(db.people.find(1)->getFirstName(), "AliceEdited");
+        EXPECT_EQ(db.people.find(2)->getFirstName(), "BobBulk");
+        EXPECT_FALSE(db.people.find(3).has_value());
+    }
+
+    TEST(Phase57TrackerAndAtomicityTest, ExpiredContextBoundDbSetRejectsAllMutationsAndWritesNothing)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        std::optional<decltype(Phase30DbContext::people)> escapedSet;
+        {
+            Phase30DbContext db(conn);
+            ASSERT_TRUE(db.ensure_created().has_value());
+            ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Existing", "Row")).has_value());
+            db.defer_changes(true);
+            escapedSet.emplace(db.people);
+        }
+
+        // Owning DbContext is now destroyed; every mutating call on escapedSet MUST fail with ConnectionError.
+        auto rAdd = escapedSet->add(Core::Person(Core::PersonId{ 2 }, "Ghost", "Add"));
+        ASSERT_FALSE(rAdd.has_value());
+        EXPECT_EQ(rAdd.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rAddRet = escapedSet->add_returning(Core::Person(Core::PersonId{ 0 }, "Ghost", "AddRet"));
+        ASSERT_FALSE(rAddRet.has_value());
+        EXPECT_EQ(rAddRet.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rAddRange = escapedSet->add_range({ Core::Person(Core::PersonId{ 3 }, "Ghost", "Range") });
+        ASSERT_FALSE(rAddRange.has_value());
+        EXPECT_EQ(rAddRange.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rAddRangeRet = escapedSet->add_range_returning({ Core::Person(Core::PersonId{ 0 }, "Ghost", "RangeRet") });
+        ASSERT_FALSE(rAddRangeRet.has_value());
+        EXPECT_EQ(rAddRangeRet.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rUpd = escapedSet->update(Core::Person(Core::PersonId{ 1 }, "Hijacked", "Row"));
+        ASSERT_FALSE(rUpd.has_value());
+        EXPECT_EQ(rUpd.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rRem = escapedSet->remove(1);
+        ASSERT_FALSE(rRem.has_value());
+        EXPECT_EQ(rRem.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rUps = escapedSet->upsert(Core::Person(Core::PersonId{ 1 }, "HijackedUpsert", "Row"));
+        ASSERT_FALSE(rUps.has_value());
+        EXPECT_EQ(rUps.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rUpsRange = escapedSet->upsert_range({ Core::Person(Core::PersonId{ 4 }, "Ghost", "UpsertRange") });
+        ASSERT_FALSE(rUpsRange.has_value());
+        EXPECT_EQ(rUpsRange.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rBulkDel = escapedSet->where_equal<"firstName">("Existing").remove_where();
+        ASSERT_FALSE(rBulkDel.has_value());
+        EXPECT_EQ(rBulkDel.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rBulkUpd = escapedSet->where_equal<"firstName">("Existing").template update_where<"firstName">("HijackedBulk");
+        ASSERT_FALSE(rBulkUpd.has_value());
+        EXPECT_EQ(rBulkUpd.error().code, Core::DbErrorCode::ConnectionError);
+
+        // Verify the database was completely untouched.
+        Phase30DbContext verifyDb(conn);
+        EXPECT_EQ(verifyDb.people.count(), 1u);
+        auto row1 = verifyDb.people.find(1);
+        ASSERT_TRUE(row1.has_value());
+        EXPECT_EQ(row1->getFirstName(), "Existing");
+    }
+
+    TEST(Phase57TrackerAndAtomicityTest, TriggerRaiseIgnoreFailsAddReturningInsteadOfReturningStaleRowId)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        Phase30DbContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // Seed row with explicit id=27 so sqlite3_last_insert_rowid() becomes 27.
+        auto seed = db.people.add_returning(Core::Person(Core::PersonId{ 27 }, "Seed", "Row"));
+        ASSERT_TRUE(seed.has_value());
+        EXPECT_EQ(seed->getId().get(), 27);
+
+        // Install a BEFORE INSERT trigger that silently ignores rows whose first_name is "IGNORED".
+        ASSERT_TRUE(conn->execute_raw(
+                            "CREATE TRIGGER trg_ignore_person BEFORE INSERT ON Person "
+                            "WHEN NEW.first_name = 'IGNORED' "
+                            "BEGIN SELECT RAISE(IGNORE); END;")
+                        .has_value());
+
+        // Single add_returning MUST fail with ConstraintViolation rather than returning stale id 27.
+        auto ignoredRes = db.people.add_returning(Core::Person(Core::PersonId{ 0 }, "IGNORED", "Row"));
+        ASSERT_FALSE(ignoredRes.has_value());
+        EXPECT_EQ(ignoredRes.error().code, Core::DbErrorCode::ConstraintViolation) << ignoredRes.error().to_string();
+
+        // Batch add_range_returning with an ignored second row MUST fail and roll back the first row too.
+        auto rangeRes = db.people.add_range_returning(
+            {
+                Core::Person(Core::PersonId{ 0 }, "ValidBeforeIgnored", "Row"),
+                Core::Person(Core::PersonId{ 0 }, "IGNORED", "Row"),
+            });
+        ASSERT_FALSE(rangeRes.has_value());
+        EXPECT_EQ(rangeRes.error().code, Core::DbErrorCode::ConstraintViolation) << rangeRes.error().to_string();
+        EXPECT_EQ(db.people.count(), 1u);
+    }
+
+    TEST(Phase57TrackerAndAtomicityTest, DirectConnectionAndRepositoryInsertAndUpsertManyAreAtomic)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<PocoUser>().has_value());
+        ASSERT_TRUE(conn->execute_raw("CREATE UNIQUE INDEX ux_poco_user_name ON PocoUsers(username);").has_value());
+
+        // 1. Direct SQLiteConnection::try_insert_many fails on 2nd row (duplicate username): 1st row MUST roll back.
+        auto insRes = conn->try_insert_many<PocoUser>({
+            PocoUser{ .user_id = 1, .username = "unique_name" },
+            PocoUser{ .user_id = 2, .username = "unique_name" },
+        });
+        ASSERT_FALSE(insRes.has_value());
+        EXPECT_EQ(insRes.error().code, Core::DbErrorCode::DuplicateKey) << insRes.error().to_string();
+        EXPECT_EQ(conn->count<PocoUser>(), 0u);
+
+        // 2. Direct SQLiteConnection::try_upsert_many fails on 2nd row (unique username collision on different PK): 1st row MUST roll back.
+        auto upsRes = conn->try_upsert_many<PocoUser>({
+            PocoUser{ .user_id = 10, .username = "dup_upsert" },
+            PocoUser{ .user_id = 11, .username = "dup_upsert" },
+        });
+        ASSERT_FALSE(upsRes.has_value());
+        EXPECT_EQ(upsRes.error().code, Core::DbErrorCode::DuplicateKey) << upsRes.error().to_string();
+        EXPECT_EQ(conn->count<PocoUser>(), 0u);
+
+        // 3. Direct GenericRepository::insert_many fails on 2nd row: 1st row MUST roll back.
+        DAL::Repositories::GenericRepository<PocoUser, PocoUser, DAL::SQLiteConnection> repo(conn);
+        auto repoRes = repo.insert_many(
+            {
+                PocoUser{ .user_id = 20, .username = "repo_dup" },
+                PocoUser{ .user_id = 21, .username = "repo_dup" },
+            });
+        ASSERT_FALSE(repoRes.has_value());
+        EXPECT_EQ(repoRes.error().code, Core::DbErrorCode::DuplicateKey) << repoRes.error().to_string();
+        EXPECT_EQ(conn->count<PocoUser>(), 0u);
+
+        // 4. Nested inside an active transaction, try_insert_many uses a savepoint so outer row survives while failed batch rolls back.
+        ASSERT_TRUE(conn->begin_transaction().has_value());
+        ASSERT_TRUE(conn->try_insert(PocoUser{ .user_id = 100, .username = "outer_row" }).has_value());
+        auto nestedRes = conn->try_insert_many<PocoUser>({
+            PocoUser{ .user_id = 101, .username = "nested_dup" },
+            PocoUser{ .user_id = 102, .username = "nested_dup" },
+        });
+        ASSERT_FALSE(nestedRes.has_value());
+        ASSERT_TRUE(conn->commit().has_value());
+        EXPECT_EQ(conn->count<PocoUser>(), 1u);
+        EXPECT_TRUE(conn->exists<PocoUser>(100));
+        EXPECT_FALSE(conn->exists<PocoUser>(101));
+    }
+
 } // namespace

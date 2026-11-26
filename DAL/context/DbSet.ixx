@@ -231,6 +231,78 @@ export namespace DAL
             }(std::make_index_sequence<sizeof...(Ks)>{});
         }
 
+        template<typename T>
+        struct UnwrapKeyPartScalar
+        {
+            using type = T;
+        };
+
+        template<typename T>
+            requires Core::StrongIdType<T>
+        struct UnwrapKeyPartScalar<T>
+        {
+            using type = typename T::value_type;
+        };
+
+        template<typename KeyType>
+        struct KeyTupleFor;
+
+        template<typename KeyType>
+            requires Core::SingleKeyType<KeyType>
+        struct KeyTupleFor<KeyType>
+        {
+            using type = std::tuple<typename UnwrapKeyPartScalar<typename KeyType::key_type>::type>;
+
+            [[nodiscard]] static KeyType from_tuple(const type& t)
+            {
+                return KeyType{ static_cast<typename KeyType::key_type>(std::get<0>(t)) };
+            }
+        };
+
+        template<typename KeyType>
+            requires Core::CompositeKeyType<KeyType>
+        struct KeyTupleFor<KeyType>
+        {
+            template<typename Seq>
+            struct Impl;
+
+            template<std::size_t... Is>
+            struct Impl<std::index_sequence<Is...>>
+            {
+                using type = std::tuple<typename UnwrapKeyPartScalar<std::tuple_element_t<Is, typename KeyType::tuple_type>>::type...>;
+
+                [[nodiscard]] static KeyType from_tuple(const type& t)
+                {
+                    return KeyType{ static_cast<std::tuple_element_t<Is, typename KeyType::tuple_type>>(std::get<Is>(t))... };
+                }
+            };
+
+            using Helper = Impl<std::make_index_sequence<KeyType::arity>>;
+            using type = typename Helper::type;
+
+            [[nodiscard]] static KeyType from_tuple(const type& t)
+            {
+                return Helper::from_tuple(t);
+            }
+        };
+
+        template<typename KeyType>
+        using KeyTupleFor_t = typename KeyTupleFor<KeyType>::type;
+
+        template<typename DTO, std::meta::info TargetMember>
+        [[nodiscard]] consteval bool is_dto_key_member() noexcept
+        {
+            constexpr auto km = Schema::key_members_of<DTO>();
+            for (const auto m : km)
+            {
+                if (m == TargetMember)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         template<typename OrderByVariant, typename NewAscCol, typename NewDescCol>
         struct AppendOrderByVariant;
 
@@ -481,44 +553,11 @@ export namespace DAL
             void untrack_key(std::type_index type, const std::string& key_repr) noexcept
             {
                 const auto map_key = std::pair<std::type_index, std::string>{ type, key_repr };
-                auto it = tracked_entries_.find(map_key);
-                if (it == tracked_entries_.end())
-                {
-                    return;
-                }
-                if (outer_tx_checkpoint_.has_value())
-                {
-                    if (!outer_tx_checkpoint_->saved_entries.contains(map_key))
-                    {
-                        outer_tx_checkpoint_->saved_entries.emplace(map_key, it->second);
-                    }
-                    if (it->second.snapshot_baseline_fn && !outer_tx_checkpoint_->baselines.contains(map_key))
-                    {
-                        outer_tx_checkpoint_->baselines.emplace(map_key, it->second.snapshot_baseline_fn());
-                    }
-                }
-                tracked_entries_.erase(it);
+                tracked_entries_.erase(map_key);
             }
 
             void untrack_type(std::type_index type) noexcept
             {
-                if (outer_tx_checkpoint_.has_value())
-                {
-                    for (const auto& [k, entry] : tracked_entries_)
-                    {
-                        if (k.first == type)
-                        {
-                            if (!outer_tx_checkpoint_->saved_entries.contains(k))
-                            {
-                                outer_tx_checkpoint_->saved_entries.emplace(k, entry);
-                            }
-                            if (entry.snapshot_baseline_fn && !outer_tx_checkpoint_->baselines.contains(k))
-                            {
-                                outer_tx_checkpoint_->baselines.emplace(k, entry.snapshot_baseline_fn());
-                            }
-                        }
-                    }
-                }
                 std::erase_if(
                     tracked_entries_,
                     [type](const auto& kv)
@@ -545,12 +584,6 @@ export namespace DAL
                         TrackedEntityEntry{
                             std::move(owned), std::move(detect_fn), std::move(snapshot_baseline_fn), std::move(restore_baseline_fn) });
                     return;
-                }
-
-                if (outer_tx_checkpoint_.has_value() && it->second.snapshot_baseline_fn &&
-                    !outer_tx_checkpoint_->baselines.contains(map_key))
-                {
-                    outer_tx_checkpoint_->baselines.emplace(map_key, it->second.snapshot_baseline_fn());
                 }
 
                 if (owned)
@@ -606,6 +639,7 @@ export namespace DAL
         using TrackFn = std::function<void(const Domain&)>;
         using ClearTrackFn = std::function<void()>;
         using UntrackKeyFn = std::function<void(const KeyType&)>;
+        using IsContextAliveFn = std::function<bool()>;
 
         DbQuery(
             std::shared_ptr<RepoType> repo,
@@ -616,7 +650,8 @@ export namespace DAL
             std::optional<std::size_t> offset = std::nullopt,
             TrackFn track_fn = {},
             ClearTrackFn clear_track_fn = {},
-            UntrackKeyFn untrack_key_fn = {})
+            UntrackKeyFn untrack_key_fn = {},
+            IsContextAliveFn is_context_alive_fn = {})
             : repo_(std::move(repo))
             , conn_(std::move(conn))
             , where_cond_(std::move(where_cond))
@@ -626,6 +661,7 @@ export namespace DAL
             , track_fn_(std::move(track_fn))
             , clear_track_fn_(std::move(clear_track_fn))
             , untrack_key_fn_(std::move(untrack_key_fn))
+            , is_context_alive_fn_(std::move(is_context_alive_fn))
         {
         }
 
@@ -635,14 +671,32 @@ export namespace DAL
             if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
             {
                 return DbQuery<Domain, DTO, ConnectionHandle, KeyType, Condition, OrderByT>(
-                    repo_, conn_, std::move(cond), order_by_, limit_, offset_, track_fn_, clear_track_fn_, untrack_key_fn_);
+                    repo_,
+                    conn_,
+                    std::move(cond),
+                    order_by_,
+                    limit_,
+                    offset_,
+                    track_fn_,
+                    clear_track_fn_,
+                    untrack_key_fn_,
+                    is_context_alive_fn_);
             }
             else
             {
                 auto combined = where_cond_ && std::move(cond);
                 using CombinedT = decltype(combined);
                 return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
-                    repo_, conn_, std::move(combined), order_by_, limit_, offset_, track_fn_, clear_track_fn_, untrack_key_fn_);
+                    repo_,
+                    conn_,
+                    std::move(combined),
+                    order_by_,
+                    limit_,
+                    offset_,
+                    track_fn_,
+                    clear_track_fn_,
+                    untrack_key_fn_,
+                    is_context_alive_fn_);
             }
         }
 
@@ -658,7 +712,16 @@ export namespace DAL
                 auto combined = where_cond_ || std::move(cond);
                 using CombinedT = decltype(combined);
                 return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
-                    repo_, conn_, std::move(combined), order_by_, limit_, offset_, track_fn_, clear_track_fn_, untrack_key_fn_);
+                    repo_,
+                    conn_,
+                    std::move(combined),
+                    order_by_,
+                    limit_,
+                    offset_,
+                    track_fn_,
+                    clear_track_fn_,
+                    untrack_key_fn_,
+                    is_context_alive_fn_);
             }
         }
 
@@ -944,7 +1007,16 @@ export namespace DAL
             using VarT = std::variant<AscT, DescT>;
             VarT ob = desc ? VarT{ DescT{} } : VarT{ AscT{} };
             return DbQuery<Domain, DTO, ConnectionHandle, KeyType, WhereCondT, VarT>(
-                repo_, conn_, where_cond_, std::move(ob), limit_, offset_, track_fn_, clear_track_fn_, untrack_key_fn_);
+                repo_,
+                conn_,
+                where_cond_,
+                std::move(ob),
+                limit_,
+                offset_,
+                track_fn_,
+                clear_track_fn_,
+                untrack_key_fn_,
+                is_context_alive_fn_);
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -975,22 +1047,61 @@ export namespace DAL
                 order_by_);
 
             return DbQuery<Domain, DTO, ConnectionHandle, KeyType, WhereCondT, NewVarT>(
-                repo_, conn_, where_cond_, std::move(combined), limit_, offset_, track_fn_, clear_track_fn_, untrack_key_fn_);
+                repo_,
+                conn_,
+                where_cond_,
+                std::move(combined),
+                limit_,
+                offset_,
+                track_fn_,
+                clear_track_fn_,
+                untrack_key_fn_,
+                is_context_alive_fn_);
         }
 
         [[nodiscard]] DbQuery limit(std::size_t limit_count) const pre(limit_count > 0)
         {
-            return DbQuery(repo_, conn_, where_cond_, order_by_, limit_count, offset_, track_fn_, clear_track_fn_, untrack_key_fn_);
+            return DbQuery(
+                repo_,
+                conn_,
+                where_cond_,
+                order_by_,
+                limit_count,
+                offset_,
+                track_fn_,
+                clear_track_fn_,
+                untrack_key_fn_,
+                is_context_alive_fn_);
         }
 
         [[nodiscard]] DbQuery offset(std::size_t offset_count) const
         {
-            return DbQuery(repo_, conn_, where_cond_, order_by_, limit_, offset_count, track_fn_, clear_track_fn_, untrack_key_fn_);
+            return DbQuery(
+                repo_,
+                conn_,
+                where_cond_,
+                order_by_,
+                limit_,
+                offset_count,
+                track_fn_,
+                clear_track_fn_,
+                untrack_key_fn_,
+                is_context_alive_fn_);
         }
 
         [[nodiscard]] DbQuery page(std::size_t limit_count, std::size_t offset_count = 0) const pre(limit_count > 0)
         {
-            return DbQuery(repo_, conn_, where_cond_, order_by_, limit_count, offset_count, track_fn_, clear_track_fn_, untrack_key_fn_);
+            return DbQuery(
+                repo_,
+                conn_,
+                where_cond_,
+                order_by_,
+                limit_count,
+                offset_count,
+                track_fn_,
+                clear_track_fn_,
+                untrack_key_fn_,
+                is_context_alive_fn_);
         }
 
         [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> try_to_vector() const
@@ -1641,6 +1752,11 @@ export namespace DAL
         [[nodiscard]] std::expected<void, Core::DbError> remove_where() const
             requires(!std::same_as<WhereCondT, rfl::Nothing>)
         {
+            if (is_context_alive_fn_ && !is_context_alive_fn_())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot mutate through DbQuery: owning DbContext has expired") };
+            }
             if (!conn_)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
@@ -1656,7 +1772,28 @@ export namespace DAL
 
             if (!limit_.has_value() && !offset_.has_value())
             {
-                if constexpr (requires(ConnectionHandle& c) { c.template delete_where<DTO>(where_cond_); })
+                using KeyTuple = detail::KeyTupleFor_t<KeyType>;
+                if constexpr (requires(ConnectionHandle& c) { c.template delete_where_returning_keys<DTO, KeyTuple>(where_cond_); })
+                {
+                    auto del_res = conn_->template delete_where_returning_keys<DTO, KeyTuple>(where_cond_);
+                    if (!del_res)
+                    {
+                        return std::unexpected<Core::DbError>{ del_res.error() };
+                    }
+                    if (untrack_key_fn_)
+                    {
+                        for (const auto& tuple_key : *del_res)
+                        {
+                            untrack_key_fn_(detail::KeyTupleFor<KeyType>::from_tuple(tuple_key));
+                        }
+                    }
+                    else if (!del_res->empty() && clear_track_fn_)
+                    {
+                        clear_track_fn_();
+                    }
+                    return {};
+                }
+                else if constexpr (requires(ConnectionHandle& c) { c.template delete_where<DTO>(where_cond_); })
                 {
                     auto del_res = conn_->template delete_where<DTO>(where_cond_);
                     if (del_res && clear_track_fn_)
@@ -1732,6 +1869,11 @@ export namespace DAL
             (!std::same_as<WhereCondT, rfl::Nothing>) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
         [[nodiscard]] std::expected<void, Core::DbError> update_where(const Vals&... new_vals) const
         {
+            if (is_context_alive_fn_ && !is_context_alive_fn_())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot mutate through DbQuery: owning DbContext has expired") };
+            }
             if (!conn_)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
@@ -1751,20 +1893,88 @@ export namespace DAL
                 return Schema::col_of<dto_m>.set(detail::normalize_query_val(v));
             };
 
-            std::expected<void, Core::DbError> res{};
+            constexpr bool updates_key_column =
+                (detail::is_dto_key_member<DTO, DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>() || ...);
+            using KeyTuple = detail::KeyTupleFor_t<KeyType>;
+
             if constexpr (sizeof...(ColLiterals) == 1)
             {
-                res = conn_->template update_where<DTO>(make_set_expr.template operator()<ColLiterals>(new_vals)..., where_cond_);
+                auto set_expr = make_set_expr.template operator()<ColLiterals...>(new_vals...);
+                if constexpr (requires(ConnectionHandle& c) {
+                                  c.template update_where_returning_keys<DTO, KeyTuple>(set_expr, where_cond_);
+                              })
+                {
+                    auto upd_res = conn_->template update_where_returning_keys<DTO, KeyTuple>(set_expr, where_cond_);
+                    if (!upd_res)
+                    {
+                        return std::unexpected<Core::DbError>{ upd_res.error() };
+                    }
+                    if (!upd_res->empty())
+                    {
+                        if (!updates_key_column && untrack_key_fn_)
+                        {
+                            for (const auto& tuple_key : *upd_res)
+                            {
+                                untrack_key_fn_(detail::KeyTupleFor<KeyType>::from_tuple(tuple_key));
+                            }
+                        }
+                        else if (clear_track_fn_)
+                        {
+                            clear_track_fn_();
+                        }
+                    }
+                    return {};
+                }
+                else
+                {
+                    auto res = conn_->template update_where<DTO>(set_expr, where_cond_);
+                    if (res && clear_track_fn_)
+                    {
+                        clear_track_fn_();
+                    }
+                    return res;
+                }
             }
             else
             {
-                res = conn_->template update_where_many<DTO>(where_cond_, make_set_expr.template operator()<ColLiterals>(new_vals)...);
+                if constexpr (requires(ConnectionHandle& c) {
+                                  c.template update_where_many_returning_keys<DTO, KeyTuple>(
+                                      where_cond_, make_set_expr.template operator()<ColLiterals>(new_vals)...);
+                              })
+                {
+                    auto upd_res = conn_->template update_where_many_returning_keys<DTO, KeyTuple>(
+                        where_cond_, make_set_expr.template operator()<ColLiterals>(new_vals)...);
+                    if (!upd_res)
+                    {
+                        return std::unexpected<Core::DbError>{ upd_res.error() };
+                    }
+                    if (!upd_res->empty())
+                    {
+                        if (!updates_key_column && untrack_key_fn_)
+                        {
+                            for (const auto& tuple_key : *upd_res)
+                            {
+                                untrack_key_fn_(detail::KeyTupleFor<KeyType>::from_tuple(tuple_key));
+                            }
+                        }
+                        else if (clear_track_fn_)
+                        {
+                            clear_track_fn_();
+                        }
+                    }
+                    return {};
+                }
+                else
+                {
+                    auto res =
+                        conn_->template update_where_many<DTO>(where_cond_, make_set_expr.template operator()<ColLiterals>(new_vals)...);
+                    if (res && clear_track_fn_)
+                    {
+                        clear_track_fn_();
+                    }
+                    return res;
+                }
             }
-            if (res && clear_track_fn_)
-            {
-                clear_track_fn_();
-            }
-            return res;
         }
 
     private:
@@ -1897,6 +2107,7 @@ export namespace DAL
         TrackFn track_fn_{};
         ClearTrackFn clear_track_fn_{};
         UntrackKeyFn untrack_key_fn_{};
+        IsContextAliveFn is_context_alive_fn_{};
     };
     // DbSet<Domain, DTO, ConnectionHandle, KeyType> provides an Entity Framework-style strongly-typed
     // entity set abstraction over a relational table, eliminating manual repository wiring.
@@ -1931,6 +2142,7 @@ export namespace DAL
         explicit DbSet(Ctx* ctx) pre(ctx != nullptr)
             : repo_(std::make_shared<RepoType>(ctx->connection()))
             , conn_(ctx->connection())
+            , bound_to_context_(true)
         {
             if constexpr (requires(Ctx& c) { c.weak_context_state(); })
             {
@@ -2126,6 +2338,10 @@ export namespace DAL
         // Inserts a single entity into the database table (or stages if deferred)
         [[nodiscard]] std::expected<void, Core::DbError> add(const Domain& item)
         {
+            if (auto alive = check_context_alive(); !alive)
+            {
+                return alive;
+            }
             if (should_defer())
             {
                 return stage_add(item);
@@ -2138,11 +2354,15 @@ export namespace DAL
             return res;
         }
 
-        // Inserts a single entity atomically (wrapping insert + rowid lookup + key hydration in a
+        // Inserts a single entity atomically (wrapping insert + key hydration in a
         // transaction or savepoint with RAII rollback) and returns a copy populated with any
         // database-generated auto-increment primary key.
         [[nodiscard]] std::expected<Domain, Core::DbError> add_returning(const Domain& item)
         {
+            if (auto alive = check_context_alive(); !alive)
+            {
+                return std::unexpected<Core::DbError>{ alive.error() };
+            }
             return add_returning_impl(item, true);
         }
 
@@ -2151,6 +2371,10 @@ export namespace DAL
         // only after commit.
         [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> add_range_returning(const std::vector<Domain>& items)
         {
+            if (auto alive = check_context_alive(); !alive)
+            {
+                return std::unexpected<Core::DbError>{ alive.error() };
+            }
             std::vector<Domain> results;
             results.reserve(items.size());
             if (items.empty())
@@ -2192,6 +2416,10 @@ export namespace DAL
         // Inserts multiple entities atomically into the database table (or stages if deferred)
         [[nodiscard]] std::expected<void, Core::DbError> add_range(const std::vector<Domain>& items)
         {
+            if (auto alive = check_context_alive(); !alive)
+            {
+                return alive;
+            }
             if (should_defer())
             {
                 return stage_add_range(items);
@@ -2230,6 +2458,10 @@ export namespace DAL
         // Updates an existing entity (or stages if deferred)
         [[nodiscard]] std::expected<void, Core::DbError> update(const Domain& item)
         {
+            if (auto alive = check_context_alive(); !alive)
+            {
+                return alive;
+            }
             if (should_defer())
             {
                 return stage_update(item);
@@ -2246,6 +2478,10 @@ export namespace DAL
         // Tracker eviction is deferred until SQLite confirms the delete.
         [[nodiscard]] std::expected<void, Core::DbError> remove(const KeyType& id)
         {
+            if (auto alive = check_context_alive(); !alive)
+            {
+                return alive;
+            }
             if (should_defer())
             {
                 return stage_remove(id);
@@ -2262,6 +2498,10 @@ export namespace DAL
         // or a transaction/savepoint-guarded exists+update/insert for auto-increment keys.
         [[nodiscard]] std::expected<void, Core::DbError> upsert(const Domain& item)
         {
+            if (auto alive = check_context_alive(); !alive)
+            {
+                return alive;
+            }
             if (should_defer())
             {
                 return stage_upsert(item);
@@ -2274,6 +2514,10 @@ export namespace DAL
         // updating tracker state only after commit.
         [[nodiscard]] std::expected<void, Core::DbError> upsert_range(const std::vector<Domain>& items)
         {
+            if (auto alive = check_context_alive(); !alive)
+            {
+                return alive;
+            }
             if (should_defer())
             {
                 return stage_upsert_range(items);
@@ -2590,6 +2834,11 @@ export namespace DAL
             std::function<void(const Domain&)> track_cb{};
             std::function<void()> clear_cb{};
             std::function<void(const KeyType&)> untrack_key_cb{};
+            std::function<bool()> is_context_alive_cb{};
+            if (bound_to_context_ && is_tracker_alive_fn_)
+            {
+                is_context_alive_cb = is_tracker_alive_fn_;
+            }
             if (is_tracking_enabled())
             {
                 track_cb = [repo = repo_, upsert_fn = upsert_tracked_fn_](const Domain& entity)
@@ -2620,7 +2869,8 @@ export namespace DAL
                 std::nullopt,
                 std::move(track_cb),
                 std::move(clear_cb),
-                std::move(untrack_key_cb));
+                std::move(untrack_key_cb),
+                std::move(is_context_alive_cb));
         }
 
         template<typename Condition>
@@ -3054,6 +3304,16 @@ export namespace DAL
         }
 
     private:
+        [[nodiscard]] std::expected<void, Core::DbError> check_context_alive() const noexcept
+        {
+            if (bound_to_context_ && is_tracker_alive_fn_ && !is_tracker_alive_fn_())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot mutate through DbSet: owning DbContext has expired") };
+            }
+            return {};
+        }
+
         [[nodiscard]] bool should_defer() const noexcept
         {
             return is_deferred_fn_ && is_deferred_fn_();
@@ -3174,12 +3434,6 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ begin_res.error() };
             }
 
-            auto ins_res = repo_->insert_one(item);
-            if (!ins_res)
-            {
-                return std::unexpected<Core::DbError>{ ins_res.error() };
-            }
-
             Domain result = item;
             if constexpr (Schema::SinglePrimaryKey<DTO> && Schema::has_auto_incr_primary_key<DTO>())
             {
@@ -3187,19 +3441,66 @@ export namespace DAL
                 {
                     return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
                 }
-                if constexpr (requires(const ConnectionHandle& c) { c.try_last_insert_rowid(); })
+                if constexpr (requires(ConnectionHandle& c, const DTO& d) { c.template try_insert_returning_pk<DTO>(d); })
                 {
-                    auto rowid_res = conn_->try_last_insert_rowid();
-                    if (!rowid_res)
+                    const DTO dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
+                    auto pk_res = conn_->template try_insert_returning_pk<DTO>(dto);
+                    if (!pk_res)
                     {
-                        return std::unexpected<Core::DbError>{ rowid_res.error() };
+                        return std::unexpected<Core::DbError>{ pk_res.error() };
                     }
-                    auto hydrated = DAL::Mappers::MapperTraits<Domain, DTO>::try_with_primary_key(item, *rowid_res);
+                    auto hydrated = DAL::Mappers::MapperTraits<Domain, DTO>::try_with_primary_key(item, *pk_res);
                     if (!hydrated)
                     {
                         return std::unexpected<Core::DbError>{ hydrated.error() };
                     }
                     result = std::move(*hydrated);
+                }
+                else
+                {
+                    auto ins_res = repo_->insert_one(item);
+                    if (!ins_res)
+                    {
+                        return std::unexpected<Core::DbError>{ ins_res.error() };
+                    }
+                    if constexpr (requires(const ConnectionHandle& c) { c.try_last_insert_rowid(); })
+                    {
+                        auto rowid_res = conn_->try_last_insert_rowid();
+                        if (!rowid_res)
+                        {
+                            return std::unexpected<Core::DbError>{ rowid_res.error() };
+                        }
+                        auto hydrated = DAL::Mappers::MapperTraits<Domain, DTO>::try_with_primary_key(item, *rowid_res);
+                        if (!hydrated)
+                        {
+                            return std::unexpected<Core::DbError>{ hydrated.error() };
+                        }
+                        result = std::move(*hydrated);
+                    }
+                }
+            }
+            else
+            {
+                if constexpr (requires(ConnectionHandle& c, const DTO& d) { c.template try_insert_exact_one<DTO>(d); })
+                {
+                    if (!conn_)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+                    }
+                    const DTO dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
+                    auto ins_res = conn_->template try_insert_exact_one<DTO>(dto);
+                    if (!ins_res)
+                    {
+                        return std::unexpected<Core::DbError>{ ins_res.error() };
+                    }
+                }
+                else
+                {
+                    auto ins_res = repo_->insert_one(item);
+                    if (!ins_res)
+                    {
+                        return std::unexpected<Core::DbError>{ ins_res.error() };
+                    }
                 }
             }
 
@@ -3251,6 +3552,20 @@ export namespace DAL
 
             if (conn)
             {
+                if constexpr (
+                    Schema::SinglePrimaryKey<DTO> && Schema::has_auto_incr_primary_key<DTO>() &&
+                    requires(ConnectionHandle& c, const DTO& d) { c.template try_upsert_returning_pk<DTO>(d); })
+                {
+                    if (needs_rowid)
+                    {
+                        auto pk_res = conn->template try_upsert_returning_pk<DTO>(dto);
+                        if (!pk_res)
+                        {
+                            return std::unexpected<Core::DbError>{ pk_res.error() };
+                        }
+                        return DAL::Mappers::MapperTraits<Domain, DTO>::try_with_primary_key(item, *pk_res);
+                    }
+                }
                 if constexpr (requires(ConnectionHandle& c, const DTO& d) { c.try_upsert(d); })
                 {
                     auto res = conn->try_upsert(dto);
@@ -3593,6 +3908,7 @@ export namespace DAL
 
         std::shared_ptr<RepoType> repo_;
         std::shared_ptr<ConnectionHandle> conn_;
+        bool bound_to_context_{ false };
         std::shared_ptr<detail::ContextState> local_state_{};
         std::function<bool()> is_deferred_fn_{};
         std::function<bool(std::move_only_function<std::expected<void, Core::DbError>()>)> enqueue_op_fn_{};
