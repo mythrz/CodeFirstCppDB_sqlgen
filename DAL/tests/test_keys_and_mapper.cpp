@@ -1008,12 +1008,16 @@ namespace
     {
         auto err = Core::DbError::connection_error("Diagnostic trace check");
         EXPECT_EQ(err.code, Core::DbErrorCode::ConnectionError);
-#ifndef NDEBUG
-        EXPECT_FALSE(err.trace.empty());
-        EXPECT_NE(err.to_string().find("Stacktrace:"), std::string::npos);
-#else
-        EXPECT_TRUE(err.trace.empty());
-#endif
+        if (Core::DbError::is_stacktrace_enabled())
+        {
+            EXPECT_FALSE(err.trace.empty());
+            EXPECT_NE(err.to_string().find("Stacktrace:"), std::string::npos);
+        }
+        else
+        {
+            EXPECT_TRUE(err.trace.empty());
+            EXPECT_EQ(err.to_string().find("Stacktrace:"), std::string::npos);
+        }
     }
 
 } // namespace

@@ -4,6 +4,15 @@ import std;
 
 namespace Core
 {
+    bool DbError::is_stacktrace_enabled() noexcept
+    {
+#if defined(CODEFIRST_ENABLE_STACKTRACE) && !defined(NDEBUG)
+        return true;
+#else
+        return false;
+#endif
+    }
+
     std::string DbError::capture_debug_trace()
     {
 #if defined(CODEFIRST_ENABLE_STACKTRACE) && !defined(NDEBUG)

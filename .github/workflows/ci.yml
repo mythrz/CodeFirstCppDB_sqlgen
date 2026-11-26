@@ -87,11 +87,30 @@ jobs:
           cmake --build build-contracts -j 2
           ctest --test-dir build-contracts --output-on-failure
 
-      - name: Install and verify find_package consumer
+      - name: Configure, build, and test Debug with CODEFIRST_ENABLE_STACKTRACE=OFF (no libstdc++exp)
+        run: |
+          cmake -S . -B build-no-trace -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCODEFIRST_ENABLE_STACKTRACE=OFF
+          cmake --build build-no-trace -j 2
+          ctest --test-dir build-no-trace --output-on-failure
+          if grep -q "stdc++exp" build-no-trace/build.ninja; then
+            echo "ERROR: libstdc++exp should not be linked when CODEFIRST_ENABLE_STACKTRACE=OFF and CODEFIRST_ENABLE_CONTRACTS=OFF"
+            exit 1
+          fi
+
+      - name: Install, relocate prefix, verify licenses, and test find_package consumer
         run: |
           cmake -S . -B build-install -G Ninja -DCMAKE_BUILD_TYPE=Release -DCODEFIRST_BUILD_TESTS=OFF -DCODEFIRST_BUILD_EXAMPLES=OFF -DCODEFIRST_INCLUDE_SAMPLES=OFF -DCODEFIRST_INSTALL=ON -DCMAKE_INSTALL_PREFIX=/tmp/cf_prefix
           cmake --build build-install -j 2
+          if grep -q "stdc++exp" build-install/build.ninja; then
+            echo "ERROR: libstdc++exp should not be linked in Release builds"
+            exit 1
+          fi
           cmake --install build-install
+          for lic in LICENSE LICENSE.sqlgen LICENSE.reflect-cpp LICENSE.yyjson; do
+            test -f "/tmp/cf_prefix/share/licenses/CodeFirstCppDB/$lic"
+          done
+          rm -rf /tmp/cf_relocated_prefix
+          mv /tmp/cf_prefix /tmp/cf_relocated_prefix
           mkdir -p /tmp/cf_consumer
           cat <<'EOF' > /tmp/cf_consumer/CMakeLists.txt
           cmake_minimum_required(VERSION 4.5)
@@ -105,19 +124,66 @@ jobs:
           EOF
           cat <<'EOF' > /tmp/cf_consumer/main.cpp
           import std;
-          import core;
-          import dal;
+          import codefirst.core;
+          import codefirst.dal;
           int main()
           {
               auto conn = DAL::SQLiteConnection::connect(":memory:");
               return conn ? 0 : 1;
           }
           EOF
-          cmake -S /tmp/cf_consumer -B /tmp/cf_consumer/build -G Ninja -DCMAKE_PREFIX_PATH=/tmp/cf_prefix
+          cmake -S /tmp/cf_consumer -B /tmp/cf_consumer/build -G Ninja -DCMAKE_PREFIX_PATH=/tmp/cf_relocated_prefix
           cmake --build /tmp/cf_consumer/build -j 2
           /tmp/cf_consumer/build/consumer
 
-      - name: Verify external add_subdirectory multi-module consumer
+      - name: Verify CODEFIRST_LEGACY_MODULE_ALIASES=OFF collision-free consumer & CMake isolation
+        run: |
+          mkdir -p /tmp/cf_no_legacy_consumer
+          cat <<EOF > /tmp/cf_no_legacy_consumer/CMakeLists.txt
+          cmake_minimum_required(VERSION 4.5)
+          project(no_legacy_consumer LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 26)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+          set(CMAKE_CXX_EXTENSIONS OFF)
+          set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+          set(CMAKE_CXX_MODULE_STD ON)
+          set(CODEFIRST_LEGACY_MODULE_ALIASES OFF CACHE BOOL "" FORCE)
+          add_subdirectory("$GITHUB_WORKSPACE" codefirst_dep)
+          # Verify vendored reflectcpp_DIR / SQLite3_DIR stubs did not pollute parent CMake cache.
+          get_property(_rfl_cached CACHE reflectcpp_DIR PROPERTY VALUE)
+          get_property(_sql_cached CACHE SQLite3_DIR PROPERTY VALUE)
+          if(_rfl_cached MATCHES "_codefirst_cmake_stubs" OR _sql_cached MATCHES "_codefirst_cmake_stubs")
+              message(FATAL_ERROR "CodeFirstCppDB leaked stub DIR paths into parent CMake cache")
+          endif()
+          # Consumer defines its own 'export module core;' with zero collision!
+          add_library(app_core STATIC)
+          target_sources(app_core PUBLIC FILE_SET CXX_MODULES FILES app_core.ixx)
+          add_executable(no_legacy_app main.cpp)
+          target_link_libraries(no_legacy_app PRIVATE app_core CodeFirstCppDB::DAL)
+          EOF
+          cat <<'EOF' > /tmp/cf_no_legacy_consumer/app_core.ixx
+          export module core;
+          export namespace AppCore
+          {
+              constexpr int magic() noexcept { return 42; }
+          }
+          EOF
+          cat <<'EOF' > /tmp/cf_no_legacy_consumer/main.cpp
+          import std;
+          import core;
+          import codefirst.core;
+          import codefirst.dal;
+          int main()
+          {
+              auto conn = DAL::SQLiteConnection::connect(":memory:");
+              return (conn.has_value() && AppCore::magic() == 42) ? 0 : 1;
+          }
+          EOF
+          cmake -S /tmp/cf_no_legacy_consumer -B /tmp/cf_no_legacy_consumer/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake --build /tmp/cf_no_legacy_consumer/build -j 2
+          /tmp/cf_no_legacy_consumer/build/no_legacy_app
+
+      - name: Verify external add_subdirectory multi-module consumer (legacy aliases ON)
         run: |
           mkdir -p /tmp/cf_subdir_consumer
           cat <<EOF > /tmp/cf_subdir_consumer/CMakeLists.txt

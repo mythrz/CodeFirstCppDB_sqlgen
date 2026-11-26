@@ -1099,12 +1099,17 @@ namespace
         ASSERT_EQ(escapedRes->size(), 1u);
         EXPECT_EQ(escapedRes->front().getFirstName(), "Original");
 
-        // Task 47.3: map_from_message captures Debug stacktraces
+        // Task 47.3: map_from_message captures Debug stacktraces when enabled
         auto mappedErr = Core::DbError::map_from_message("UNIQUE constraint failed");
         EXPECT_EQ(mappedErr.code, Core::DbErrorCode::DuplicateKey);
-#ifndef NDEBUG
-        EXPECT_FALSE(mappedErr.trace.empty());
-#endif
+        if (Core::DbError::is_stacktrace_enabled())
+        {
+            EXPECT_FALSE(mappedErr.trace.empty());
+        }
+        else
+        {
+            EXPECT_TRUE(mappedErr.trace.empty());
+        }
     }
 
     // =========================================================================

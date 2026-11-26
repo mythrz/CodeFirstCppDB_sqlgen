@@ -21,6 +21,7 @@ export namespace Core
         std::string trace{};
 
         [[nodiscard]] static std::string capture_debug_trace();
+        [[nodiscard]] static bool is_stacktrace_enabled() noexcept;
 
         [[nodiscard]] static DbError create(DbErrorCode err_code, std::string msg, int sql_native_code = 0)
         {

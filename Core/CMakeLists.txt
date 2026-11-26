@@ -50,5 +50,7 @@ target_compile_options(CodeFirstCppDB_Core
 
 target_link_libraries(CodeFirstCppDB_Core
     PUBLIC
-        $<$<CXX_COMPILER_ID:GNU>:stdc++exp>
+        $<$<AND:$<BOOL:${CODEFIRST_ENABLE_CONTRACTS}>,$<CXX_COMPILER_ID:GNU>>:stdc++exp>
+    PRIVATE
+        $<$<AND:$<BOOL:${CODEFIRST_ENABLE_STACKTRACE}>,$<CONFIG:Debug>,$<CXX_COMPILER_ID:GNU>>:stdc++exp>
 )

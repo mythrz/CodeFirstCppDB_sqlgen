@@ -67,6 +67,33 @@ if(NOT TARGET reflectcpp)
 endif()
 
 # sqlite3 (Injected Target or System Dependency)
+function(_codefirst_resolve_sqlite_provider out_var target_name)
+    set(_cur "${target_name}")
+    foreach(_step RANGE 0 4)
+        if(NOT TARGET "${_cur}")
+            break()
+        endif()
+        get_target_property(_aliased "${_cur}" ALIASED_TARGET)
+        if(_aliased)
+            set(_cur "${_aliased}")
+            continue()
+        endif()
+        get_target_property(_ttype "${_cur}" TYPE)
+        if("${_ttype}" STREQUAL "INTERFACE_LIBRARY")
+            get_target_property(_iface_libs "${_cur}" INTERFACE_LINK_LIBRARIES)
+            if(_iface_libs)
+                list(LENGTH _iface_libs _lib_count)
+                if(_lib_count EQUAL 1 AND TARGET "${_iface_libs}")
+                    set(_cur "${_iface_libs}")
+                    continue()
+                endif()
+            endif()
+        endif()
+        break()
+    endforeach()
+    set(${out_var} "${_cur}" PARENT_SCOPE)
+endfunction()
+
 if(CODEFIRST_SQLITE_TARGET)
     if(CODEFIRST_INSTALL)
         message(SEND_ERROR "CODEFIRST_INSTALL=ON cannot be combined with CODEFIRST_SQLITE_TARGET (external non-exported SQLite target).")
@@ -74,18 +101,15 @@ if(CODEFIRST_SQLITE_TARGET)
     if(NOT TARGET "${CODEFIRST_SQLITE_TARGET}")
         message(FATAL_ERROR "CODEFIRST_SQLITE_TARGET '${CODEFIRST_SQLITE_TARGET}' is not a defined CMake target.")
     endif()
+    _codefirst_resolve_sqlite_provider(_cf_expected_provider "${CODEFIRST_SQLITE_TARGET}")
     foreach(_cf_sqlite_alias IN ITEMS SQLite3::SQLite3 SQLite::SQLite3)
         if(TARGET "${_cf_sqlite_alias}")
-            if(NOT "${CODEFIRST_SQLITE_TARGET}" STREQUAL "${_cf_sqlite_alias}")
-                get_target_property(_cf_aliased "${_cf_sqlite_alias}" ALIASED_TARGET)
-                get_target_property(_cf_iface_libs "${_cf_sqlite_alias}" INTERFACE_LINK_LIBRARIES)
-                if(NOT "${_cf_aliased}" STREQUAL "${CODEFIRST_SQLITE_TARGET}"
-                   AND NOT "${_cf_iface_libs}" STREQUAL "${CODEFIRST_SQLITE_TARGET}")
-                    message(FATAL_ERROR
-                        "Conflicting pre-existing SQLite target '${_cf_sqlite_alias}' detected while "
-                        "CODEFIRST_SQLITE_TARGET='${CODEFIRST_SQLITE_TARGET}' is set. Remove the conflicting "
-                        "SQLite provider or unset CODEFIRST_SQLITE_TARGET so all targets link one SQLite implementation.")
-                endif()
+            _codefirst_resolve_sqlite_provider(_cf_alias_provider "${_cf_sqlite_alias}")
+            if(NOT "${_cf_alias_provider}" STREQUAL "${_cf_expected_provider}")
+                message(FATAL_ERROR
+                    "Conflicting pre-existing SQLite target '${_cf_sqlite_alias}' (resolved to '${_cf_alias_provider}') "
+                    "detected while CODEFIRST_SQLITE_TARGET='${CODEFIRST_SQLITE_TARGET}' (resolved to '${_cf_expected_provider}') "
+                    "is set. Remove the conflicting SQLite provider or unset CODEFIRST_SQLITE_TARGET so all targets link one SQLite implementation.")
             endif()
         else()
             add_library("${_cf_sqlite_alias}" INTERFACE IMPORTED)
@@ -98,9 +122,14 @@ else()
         # CMake 4.5 marks FindSQLite3's legacy SQLite::SQLite3 alias deprecated; clear the
         # deprecation noise emitted when bundled extern/sqlgen links SQLite::SQLite3.
         set_target_properties(SQLite::SQLite3 PROPERTIES DEPRECATION "")
-    elseif(TARGET SQLite3::SQLite3)
+    endif()
+    if(NOT TARGET SQLite::SQLite3 AND TARGET SQLite3::SQLite3)
         add_library(SQLite::SQLite3 INTERFACE IMPORTED)
         target_link_libraries(SQLite::SQLite3 INTERFACE SQLite3::SQLite3)
+    endif()
+    if(NOT TARGET SQLite3::SQLite3 AND TARGET SQLite::SQLite3)
+        add_library(SQLite3::SQLite3 INTERFACE IMPORTED)
+        target_link_libraries(SQLite3::SQLite3 INTERFACE SQLite::SQLite3)
     endif()
 endif()
 
@@ -110,16 +139,20 @@ if(NOT TARGET sqlgen)
     if(NOT DEFINED SQLGEN_BUILD_SHARED)
         set(SQLGEN_BUILD_SHARED ${CODEFIRST_BUILD_SHARED} CACHE BOOL "Build sqlgen as shared library")
     endif()
+    # Keep vendored find_package() shims strictly directory-scoped (never CACHE FORCE)
+    # so sibling subprojects in parent builds are never polluted.
+    set(_codefirst_stub_dir "${CMAKE_CURRENT_BINARY_DIR}/_codefirst_cmake_stubs")
+    file(MAKE_DIRECTORY "${_codefirst_stub_dir}")
     if(NOT DEFINED reflectcpp_DIR OR NOT EXISTS "${reflectcpp_DIR}/reflectcppConfig.cmake")
-        set(reflectcpp_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "" FORCE)
-        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/reflectcppConfig.cmake" "")
+        set(reflectcpp_DIR "${_codefirst_stub_dir}")
+        file(WRITE "${_codefirst_stub_dir}/reflectcppConfig.cmake" "")
     endif()
     if(NOT DEFINED SQLite3_DIR OR NOT EXISTS "${SQLite3_DIR}/SQLite3Config.cmake")
-        set(SQLite3_DIR "${CMAKE_CURRENT_BINARY_DIR}" CACHE PATH "" FORCE)
+        set(SQLite3_DIR "${_codefirst_stub_dir}")
         if(CODEFIRST_SQLITE_TARGET)
-            file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/SQLite3Config.cmake" "")
+            file(WRITE "${_codefirst_stub_dir}/SQLite3Config.cmake" "")
         else()
-            file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/SQLite3Config.cmake" "include_directories(\"${SQLite3_INCLUDE_DIRS}\")")
+            file(WRITE "${_codefirst_stub_dir}/SQLite3Config.cmake" "include_directories(\"${SQLite3_INCLUDE_DIRS}\")")
         endif()
     endif()
     set(SQLGEN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -241,4 +274,53 @@ if(CODEFIRST_INSTALL)
             "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
         DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/CodeFirstCppDB"
     )
+    if(TARGET sqlgen)
+        get_target_property(_sqlgen_imported_lic sqlgen IMPORTED)
+        if(NOT _sqlgen_imported_lic AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extern/sqlgen/LICENSE")
+            install(
+                FILES "${CMAKE_CURRENT_SOURCE_DIR}/extern/sqlgen/LICENSE"
+                DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/CodeFirstCppDB"
+                RENAME "LICENSE.sqlgen"
+            )
+        endif()
+    endif()
+    if(TARGET reflectcpp)
+        get_target_property(_rfl_imported_lic reflectcpp IMPORTED)
+        if(NOT _rfl_imported_lic)
+            if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extern/reflect-cpp/LICENSE")
+                install(
+                    FILES "${CMAKE_CURRENT_SOURCE_DIR}/extern/reflect-cpp/LICENSE"
+                    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/CodeFirstCppDB"
+                    RENAME "LICENSE.reflect-cpp"
+                )
+            endif()
+            file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/LICENSE.yyjson"
+"MIT License (yyjson, bundled via reflect-cpp)
+
+Copyright (c) 2020 YaoYuan <ibireme@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the \"Software\"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+")
+            install(
+                FILES "${CMAKE_CURRENT_BINARY_DIR}/LICENSE.yyjson"
+                DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/CodeFirstCppDB"
+            )
+        endif()
+    endif()
 endif()
