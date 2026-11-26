@@ -18,17 +18,13 @@ namespace
 
         void SetUp() override
         {
-            auto rawConnRes = sqlgen::sqlite::connect(":memory:");
-            ASSERT_TRUE(rawConnRes.has_value());
+            auto connRes = DAL::SQLiteConnection::connect(":memory:");
+            ASSERT_TRUE(connRes.has_value());
+            conn = connRes.value();
 
-            auto ddlResult = rawConnRes.and_then(sqlgen::create_table<DAL::Schema::PersonDTO> | sqlgen::if_not_exists)
-                                 .and_then(sqlgen::create_table<DAL::Schema::SomethingDTO> | sqlgen::if_not_exists)
-                                 .and_then(sqlgen::create_table<DAL::Schema::Person_SomethingDTO> | sqlgen::if_not_exists);
-            ASSERT_TRUE(ddlResult.has_value());
-
-            auto rawConn = rawConnRes.value();
-            ASSERT_TRUE(rawConn->execute("PRAGMA foreign_keys = ON;").has_value());
-            conn = std::make_shared<DAL::SQLiteConnection>(rawConn);
+            ASSERT_TRUE(conn->ensure_table_created<DAL::Schema::PersonDTO>().has_value());
+            ASSERT_TRUE(conn->ensure_table_created<DAL::Schema::SomethingDTO>().has_value());
+            ASSERT_TRUE(conn->ensure_table_created<DAL::Schema::Person_SomethingDTO>().has_value());
         }
     };
 
@@ -333,12 +329,12 @@ namespace
 
         EXPECT_EQ(products.min<"score">(), std::optional<int>(10));
         EXPECT_EQ(products.max<"score">(), std::optional<int>(30));
-        EXPECT_EQ(products.sum<"score">(), std::optional<int>(60));
+        EXPECT_EQ(products.sum<"score">(), std::optional<std::int64_t>(60));
         ASSERT_TRUE(products.avg<"price">().has_value());
         EXPECT_NEAR(*products.avg<"price">(), 30.0, 1e-6);
 
         // Filtered aggregation
-        EXPECT_EQ(products.where_not_null<"notes">().sum<"score">(), std::optional<int>(40));
+        EXPECT_EQ(products.where_not_null<"notes">().sum<"score">(), std::optional<std::int64_t>(40));
         EXPECT_EQ(products.where_not_null<"notes">().min<"score">(), std::optional<int>(10));
         EXPECT_EQ(products.where_not_null<"notes">().max<"score">(), std::optional<int>(30));
     }

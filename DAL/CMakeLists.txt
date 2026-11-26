@@ -18,6 +18,7 @@ target_sources(CodeFirstCppDB_DAL
             repositories/GenericRepository.ixx
             context/DbSet.ixx
             context/DbContext.ixx
+            context/SQLiteStatement.ixx
             context/SQLiteConnection.ixx
             dal.ixx
     PRIVATE

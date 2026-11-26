@@ -650,4 +650,88 @@ namespace
         EXPECT_EQ(matched->front().id.value(), 1);
         EXPECT_EQ(matched->front().body, withNul);
     }
+
+    // =========================================================================
+    // Phase 56 (P0/P1): Strict Numeric Storage, Streaming Decoder & Wide Sum
+    // =========================================================================
+
+    struct StrictNumericDTO
+    {
+        static constexpr auto tablename = "StrictNumerics";
+        sqlgen::PrimaryKey<std::int32_t, false> id{ 0 };
+        std::int8_t small_score = 0;
+        std::uint64_t big_counter = 0;
+    };
+
+    struct Phase56NumericContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<StrictNumericDTO> items{ this };
+
+        explicit Phase56NumericContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(Phase56StrictNumericTest, RejectsOversizedUint64AndCorruptOrOutOfRangeReadsAndWidensSum)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        EXPECT_NE(conn->native_handle(), nullptr);
+
+        Phase56NumericContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // 1. Oversized uint64_t (>= 2^63) MUST be rejected before storage (never coerced to lossy REAL).
+        const std::uint64_t twoPow63 = 1ULL << 63;
+        auto ovfSingle = db.items.add(StrictNumericDTO{ .id = 1, .small_score = 10, .big_counter = twoPow63 });
+        ASSERT_FALSE(ovfSingle.has_value());
+        EXPECT_EQ(ovfSingle.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(db.items.count(), 0u);
+
+        std::vector<StrictNumericDTO> batch{
+            StrictNumericDTO{ .id = 1, .small_score = 100, .big_counter = 42 },
+            StrictNumericDTO{ .id = 2, .small_score = 100, .big_counter = twoPow63 + 1ULL },
+        };
+        auto ovfBatch = db.items.add_range(batch);
+        ASSERT_FALSE(ovfBatch.has_value());
+        EXPECT_EQ(ovfBatch.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(db.items.count(), 0u);
+
+        // 2. Valid narrow int8_t rows summing past 127 MUST widen to int64_t (200, not -56).
+        ASSERT_TRUE(db.items.add(StrictNumericDTO{ .id = 1, .small_score = 100, .big_counter = 10 }).has_value());
+        ASSERT_TRUE(db.items.add(StrictNumericDTO{ .id = 2, .small_score = 100, .big_counter = 20 }).has_value());
+        auto sumRes = db.items.try_sum<"small_score">();
+        ASSERT_TRUE(sumRes.has_value()) << sumRes.error().to_string();
+        EXPECT_EQ(*sumRes, std::optional<std::int64_t>{ 200 });
+
+        // 3. Trailing-garbage text ("17ms") and out-of-range integer (128) MUST fail strictly across
+        //    entity reads, single-column projections, and tuple projections.
+        ASSERT_TRUE(conn->execute_raw("INSERT INTO StrictNumerics (id, small_score, big_counter) VALUES (3, '17ms', 30);").has_value());
+        auto badTextRead = db.items.try_find(3);
+        ASSERT_FALSE(badTextRead.has_value());
+        EXPECT_EQ(badTextRead.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto badTextProj = db.items.where_equal<"id">(3).try_select<"small_score">();
+        ASSERT_FALSE(badTextProj.has_value());
+        EXPECT_EQ(badTextProj.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto badTextTuple = db.items.where_equal<"id">(3).try_select_columns<"id", "small_score">();
+        ASSERT_FALSE(badTextTuple.has_value());
+        EXPECT_EQ(badTextTuple.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        ASSERT_TRUE(conn->execute_raw("INSERT INTO StrictNumerics (id, small_score, big_counter) VALUES (4, 128, 40);").has_value());
+        auto badRangeRead = db.items.try_find(4);
+        ASSERT_FALSE(badRangeRead.has_value());
+        EXPECT_EQ(badRangeRead.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto badRangeProj = db.items.where_equal<"id">(4).try_select<"small_score">();
+        ASSERT_FALSE(badRangeProj.has_value());
+        EXPECT_EQ(badRangeProj.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto badRangeAgg = db.items.where_equal<"id">(4).try_max<"small_score">();
+        ASSERT_FALSE(badRangeAgg.has_value());
+        EXPECT_EQ(badRangeAgg.error().code, Core::DbErrorCode::ConstraintViolation);
+    }
 } // namespace

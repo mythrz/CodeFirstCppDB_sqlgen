@@ -71,6 +71,33 @@ export namespace DAL
         {
         };
 
+        template<typename ScalarT>
+        struct SumResultType
+        {
+            using type = ScalarT;
+        };
+
+        template<typename ScalarT>
+            requires(std::is_integral_v<ScalarT> && std::is_signed_v<ScalarT> && !std::is_same_v<ScalarT, bool>)
+        struct SumResultType<ScalarT>
+        {
+            using type = std::int64_t;
+        };
+
+        template<typename ScalarT>
+            requires(std::is_integral_v<ScalarT> && !std::is_signed_v<ScalarT> && !std::is_same_v<ScalarT, bool>)
+        struct SumResultType<ScalarT>
+        {
+            using type = std::uint64_t;
+        };
+
+        template<typename ScalarT>
+            requires std::is_floating_point_v<ScalarT>
+        struct SumResultType<ScalarT>
+        {
+            using type = double;
+        };
+
         template<typename RawFieldT>
         using ProjectedColumn_t = std::conditional_t<
             IsOptionalField<std::remove_cvref_t<RawFieldT>>::value,
@@ -1195,7 +1222,8 @@ export namespace DAL
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
             using RawT = [:std::meta::type_of(dto_m):];
             using ScalarT = typename detail::UnwrapColumnScalar<std::remove_cvref_t<RawT>>::type;
-            return try_aggregate_impl<ScalarT>(sqlgen::sum(Schema::col_of<dto_m>));
+            using SumT = typename detail::SumResultType<ScalarT>::type;
+            return try_aggregate_impl<SumT>(sqlgen::sum(Schema::col_of<dto_m>));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -1245,10 +1273,7 @@ export namespace DAL
                 return std::expected<std::vector<ColValueT>, Core::DbError>{ std::vector<ColValueT>{} };
             }
 
-            struct ProjRow
-            {
-                RawT val{};
-            };
+            using ProjRow = detail::SingleValueRow<RawT>;
 
             auto with_where = [&]()
             {
@@ -1351,10 +1376,7 @@ export namespace DAL
                 return std::expected<std::vector<ColValueT>, Core::DbError>{ std::vector<ColValueT>{} };
             }
 
-            struct ProjRow
-            {
-                RawT val{};
-            };
+            using ProjRow = detail::SingleValueRow<RawT>;
 
             auto with_group = [&]()
             {

@@ -6,4 +6,5 @@ export import :mappers;
 export import :generic_repo;
 export import :db_set;
 export import :db_context;
+export import :sqlite_statement;
 export import :sqlite_connection;
