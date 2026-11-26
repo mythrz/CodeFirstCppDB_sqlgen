@@ -26,7 +26,7 @@ export namespace DAL
     class DbContextBase
     {
     public:
-        explicit DbContextBase(std::shared_ptr<ConnectionHandle> conn)
+        explicit DbContextBase(std::shared_ptr<ConnectionHandle> conn) pre(conn != nullptr)
             : conn_(std::move(conn))
         {
         }
@@ -55,6 +55,12 @@ export namespace DAL
         [[nodiscard]] auto list_tables() const
             requires requires(const ConnectionHandle& c) { c.list_tables(); }
         {
+            using RetT = decltype(conn_->list_tables());
+            if (!is_connected())
+            {
+                return RetT{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot list tables: database connection is closed or null") } };
+            }
             return conn_->list_tables();
         }
 
@@ -62,6 +68,12 @@ export namespace DAL
         [[nodiscard]] auto table_info(std::string_view table_name) const
             requires requires(const ConnectionHandle& c, std::string_view t) { c.table_info(t); }
         {
+            using RetT = decltype(conn_->table_info(table_name));
+            if (!is_connected())
+            {
+                return RetT{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot inspect table: database connection is closed or null") } };
+            }
             return conn_->table_info(table_name);
         }
 
@@ -69,6 +81,12 @@ export namespace DAL
         [[nodiscard]] auto execute_raw(std::string_view sql)
             requires requires(ConnectionHandle& c, std::string_view s) { c.execute_raw(s); }
         {
+            using RetT = decltype(conn_->execute_raw(sql));
+            if (!is_connected())
+            {
+                return RetT{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot execute raw SQL: database connection is closed or null") } };
+            }
             return conn_->execute_raw(sql);
         }
 
@@ -77,12 +95,24 @@ export namespace DAL
         [[nodiscard]] auto query_rows(std::string_view sql, std::span<const CellT> params) const
             requires requires(const ConnectionHandle& c, std::string_view s, std::span<const CellT> p) { c.query_rows(s, p); }
         {
+            using RetT = decltype(conn_->query_rows(sql, params));
+            if (!is_connected())
+            {
+                return RetT{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot query rows: database connection is closed or null") } };
+            }
             return conn_->query_rows(sql, params);
         }
 
         [[nodiscard]] auto query_rows(std::string_view sql) const
             requires requires(const ConnectionHandle& c, std::string_view s) { c.query_rows(s); }
         {
+            using RetT = decltype(conn_->query_rows(sql));
+            if (!is_connected())
+            {
+                return RetT{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot query rows: database connection is closed or null") } };
+            }
             return conn_->query_rows(sql);
         }
 
@@ -91,12 +121,24 @@ export namespace DAL
         [[nodiscard]] auto execute_prepared(std::string_view sql, std::span<const CellT> params)
             requires requires(ConnectionHandle& c, std::string_view s, std::span<const CellT> p) { c.execute_prepared(s, p); }
         {
+            using RetT = decltype(conn_->execute_prepared(sql, params));
+            if (!is_connected())
+            {
+                return RetT{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot execute prepared SQL: database connection is closed or null") } };
+            }
             return conn_->execute_prepared(sql, params);
         }
 
         [[nodiscard]] auto execute_prepared(std::string_view sql)
             requires requires(ConnectionHandle& c, std::string_view s) { c.execute_prepared(s); }
         {
+            using RetT = decltype(conn_->execute_prepared(sql));
+            if (!is_connected())
+            {
+                return RetT{ std::unexpected<Core::DbError>{
+                    Core::DbError::connection_error("Cannot execute prepared SQL: database connection is closed or null") } };
+            }
             return conn_->execute_prepared(sql);
         }
 
@@ -139,9 +181,16 @@ export namespace DAL
         template<typename DerivedType>
         static consteval std::size_t dbset_member_count()
         {
+            std::size_t count = 0;
+            static constexpr auto bases =
+                std::define_static_array(std::meta::bases_of(^^DerivedType, std::meta::access_context::unchecked()));
+            template for (constexpr auto b : bases)
+            {
+                using BaseType = std::remove_cvref_t<typename[:std::meta::type_of(b):]>;
+                count += dbset_member_count<BaseType>();
+            }
             static constexpr auto members =
                 std::define_static_array(std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
-            std::size_t count = 0;
             template for (constexpr auto m : members)
             {
                 using RawMemberType = [:std::meta::type_of(m):];
@@ -154,23 +203,36 @@ export namespace DAL
             return count;
         }
 
-        template<typename DerivedType>
-        static consteval auto dbset_members_of()
+        template<typename DerivedType, std::size_t K>
+        static consteval void collect_dbset_members(std::array<std::meta::info, K>& out, std::size_t& idx)
         {
+            static constexpr auto bases =
+                std::define_static_array(std::meta::bases_of(^^DerivedType, std::meta::access_context::unchecked()));
+            template for (constexpr auto b : bases)
+            {
+                using BaseType = std::remove_cvref_t<typename[:std::meta::type_of(b):]>;
+                collect_dbset_members<BaseType>(out, idx);
+            }
             static constexpr auto members =
                 std::define_static_array(std::meta::nonstatic_data_members_of(^^DerivedType, std::meta::access_context::unchecked()));
-            constexpr std::size_t K = dbset_member_count<DerivedType>();
-            std::array<std::meta::info, K> result{};
-            std::size_t idx = 0;
             template for (constexpr auto m : members)
             {
                 using RawMemberType = [:std::meta::type_of(m):];
                 using MemberType = std::remove_cvref_t<RawMemberType>;
                 if constexpr (IsDbSetMember<MemberType>)
                 {
-                    result[idx++] = m;
+                    out[idx++] = m;
                 }
             }
+        }
+
+        template<typename DerivedType>
+        static consteval auto dbset_members_of()
+        {
+            constexpr std::size_t K = dbset_member_count<DerivedType>();
+            std::array<std::meta::info, K> result{};
+            std::size_t idx = 0;
+            collect_dbset_members<DerivedType>(result, idx);
             return result;
         }
 
@@ -1105,11 +1167,11 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot create savepoint: database connection is closed") };
             }
-            if constexpr (requires(ConnectionHandle& c) { c.savepoint(name); })
+            if constexpr (Repositories::SavepointConnection<ConnectionHandle>)
             {
                 return conn_->savepoint(name);
             }
-            return {};
+            return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Connection adapter does not support savepoints") };
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> release_savepoint(std::string_view name)
@@ -1119,11 +1181,11 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot release savepoint: database connection is closed") };
             }
-            if constexpr (requires(ConnectionHandle& c) { c.release_savepoint(name); })
+            if constexpr (Repositories::SavepointConnection<ConnectionHandle>)
             {
                 return conn_->release_savepoint(name);
             }
-            return {};
+            return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Connection adapter does not support savepoints") };
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> rollback_to_savepoint(std::string_view name)
@@ -1133,11 +1195,11 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
                     "Cannot rollback savepoint: database connection is closed") };
             }
-            if constexpr (requires(ConnectionHandle& c) { c.rollback_to_savepoint(name); })
+            if constexpr (Repositories::SavepointConnection<ConnectionHandle>)
             {
                 return conn_->rollback_to_savepoint(name);
             }
-            return {};
+            return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Connection adapter does not support savepoints") };
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> flush_pending_since(std::size_t start_idx)
@@ -1208,11 +1270,7 @@ export namespace DAL
 
         [[nodiscard]] static constexpr bool supports_savepoints() noexcept
         {
-            return requires(ConnectionHandle& c, std::string_view n) {
-                c.savepoint(n);
-                c.release_savepoint(n);
-                c.rollback_to_savepoint(n);
-            };
+            return Repositories::SavepointConnection<ConnectionHandle>;
         }
 
         template<typename Fn>

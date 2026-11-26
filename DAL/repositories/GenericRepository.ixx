@@ -14,6 +14,23 @@ export namespace DAL::Repositories
         { conn.is_open() } -> std::same_as<bool>;
     };
 
+    // Connection adapter supporting explicit transaction boundaries
+    template<typename T>
+    concept TransactionalConnection = DatabaseConnection<T> && requires(T& conn) {
+        { conn.in_transaction() } -> std::same_as<bool>;
+        { conn.begin_transaction() } -> std::same_as<std::expected<void, Core::DbError>>;
+        { conn.commit() } -> std::same_as<std::expected<void, Core::DbError>>;
+        { conn.rollback() } -> std::same_as<std::expected<void, Core::DbError>>;
+    };
+
+    // Connection adapter supporting nested SQL savepoints inside active transactions
+    template<typename T>
+    concept SavepointConnection = TransactionalConnection<T> && requires(T& conn, std::string_view name) {
+        { conn.savepoint(name) } -> std::same_as<std::expected<void, Core::DbError>>;
+        { conn.release_savepoint(name) } -> std::same_as<std::expected<void, Core::DbError>>;
+        { conn.rollback_to_savepoint(name) } -> std::same_as<std::expected<void, Core::DbError>>;
+    };
+
     // Full contract concept for reading DTOs from connection
     template<typename Conn, typename DTO>
     concept ReadableConnection = DatabaseConnection<Conn> && requires(Conn& conn, std::int32_t id) {

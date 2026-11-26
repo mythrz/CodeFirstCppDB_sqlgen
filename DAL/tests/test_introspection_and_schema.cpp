@@ -908,4 +908,100 @@ namespace
         ASSERT_EQ((*grouped)[1].second.size(), 1u);
         EXPECT_EQ((*grouped)[1].second.front().note, "BelongsToP2");
     }
+
+    // =========================================================================
+    // Phase 59: Derived DbContext Inheritance & Null-Connection Safety
+    // =========================================================================
+
+    struct Phase59BaseAuthorContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        explicit Phase59BaseAuthorContext(std::shared_ptr<DAL::SQLiteConnection> conn)
+            : DbContextBase(std::move(conn))
+        {
+        }
+
+        Set<Phase25Author> authors{ this };
+    };
+
+    struct Phase59DerivedLibraryContext : public Phase59BaseAuthorContext
+    {
+        explicit Phase59DerivedLibraryContext(std::shared_ptr<DAL::SQLiteConnection> conn)
+            : Phase59BaseAuthorContext(std::move(conn))
+        {
+        }
+
+        Set<Phase25Book> books{ this };
+    };
+
+    TEST(Phase59ContextRobustnessTest, DerivedDbContextInheritsBaseDbSetsForSchemaAndNavigation)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase59DerivedLibraryContext db(connRes.value());
+
+        ASSERT_TRUE(db.ensure_created().has_value());
+        auto tablesRes = db.list_tables();
+        ASSERT_TRUE(tablesRes.has_value());
+        EXPECT_TRUE(std::ranges::contains(*tablesRes, std::string_view{ "phase25_authors" }));
+        EXPECT_TRUE(std::ranges::contains(*tablesRes, std::string_view{ "phase25_books" }));
+
+        auto author = db.authors.add_returning(Phase25Author{ .author_id = 0, .name = "Ada" });
+        ASSERT_TRUE(author.has_value()) << author.error().to_string();
+        auto book =
+            db.books.add_returning(Phase25Book{ .book_id = 0, .author_id = author->author_id.value(), .title = "Notes", .genre = "Math" });
+        ASSERT_TRUE(book.has_value()) << book.error().to_string();
+
+        auto childrenRes = db.query_children<Phase25Book>(*author);
+        ASSERT_TRUE(childrenRes.has_value()) << childrenRes.error().to_string();
+        ASSERT_EQ(childrenRes->size(), 1u);
+        EXPECT_EQ(childrenRes->front().title, "Notes");
+
+        auto parentRes = db.query_parent<Phase25Author>(*book);
+        ASSERT_TRUE(parentRes.has_value()) << parentRes.error().to_string();
+        ASSERT_TRUE(parentRes->has_value());
+        EXPECT_EQ((*parentRes)->name, "Ada");
+
+        ASSERT_TRUE(db.ensure_deleted().has_value());
+        auto tablesAfterDrop = db.list_tables();
+        ASSERT_TRUE(tablesAfterDrop.has_value());
+        EXPECT_FALSE(std::ranges::contains(*tablesAfterDrop, std::string_view{ "phase25_authors" }));
+        EXPECT_FALSE(std::ranges::contains(*tablesAfterDrop, std::string_view{ "phase25_books" }));
+    }
+
+#if !defined(CODEFIRST_CONTRACTS_ENFORCED)
+    TEST(Phase59ContextRobustnessTest, NullConnectionGuardsReturnConnectionErrorWhenContractsDisabled)
+    {
+        DAL::DbContextBase<DAL::SQLiteConnection> nullCtx{ std::shared_ptr<DAL::SQLiteConnection>{} };
+        EXPECT_FALSE(nullCtx.is_connected());
+
+        auto tablesRes = nullCtx.list_tables();
+        ASSERT_FALSE(tablesRes.has_value());
+        EXPECT_EQ(tablesRes.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto infoRes = nullCtx.table_info("Person");
+        ASSERT_FALSE(infoRes.has_value());
+        EXPECT_EQ(infoRes.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rawRes = nullCtx.execute_raw("SELECT 1;");
+        ASSERT_FALSE(rawRes.has_value());
+        EXPECT_EQ(rawRes.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto queryRes = nullCtx.query_rows("SELECT 1;");
+        ASSERT_FALSE(queryRes.has_value());
+        EXPECT_EQ(queryRes.error().code, Core::DbErrorCode::ConnectionError);
+
+        const std::array<DAL::DynamicCell, 1> params{ std::int64_t{ 1 } };
+        auto queryParamRes = nullCtx.query_rows("SELECT ?;", std::span<const DAL::DynamicCell>{ params });
+        ASSERT_FALSE(queryParamRes.has_value());
+        EXPECT_EQ(queryParamRes.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto prepRes = nullCtx.execute_prepared("SELECT 1;");
+        ASSERT_FALSE(prepRes.has_value());
+        EXPECT_EQ(prepRes.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto prepParamRes = nullCtx.execute_prepared("SELECT ?;", std::span<const DAL::DynamicCell>{ params });
+        ASSERT_FALSE(prepParamRes.has_value());
+        EXPECT_EQ(prepParamRes.error().code, Core::DbErrorCode::ConnectionError);
+    }
+#endif
 } // namespace

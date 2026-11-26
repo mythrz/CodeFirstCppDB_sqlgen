@@ -16,10 +16,12 @@ target_sources(CodeFirstCppDB_DAL
             schema/EntityMetadata.ixx
             mappers/MapperTraits.ixx
             repositories/GenericRepository.ixx
-            context/DbSet.ixx
-            context/DbContext.ixx
             context/SQLiteStatement.ixx
             context/SQLiteConnection.ixx
+            context/ChangeTracker.ixx
+            context/DbQuery.ixx
+            context/DbSet.ixx
+            context/DbContext.ixx
             dal.ixx
     PRIVATE
 )

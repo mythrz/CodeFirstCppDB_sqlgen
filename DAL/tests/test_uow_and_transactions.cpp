@@ -2271,4 +2271,125 @@ namespace
         EXPECT_FALSE(conn->exists<PocoUser>(101));
     }
 
+    // =========================================================================
+    // Phase 59: Formal Adapter Concepts & Strict WriteBatchTxGuard Contract
+    // =========================================================================
+
+    struct MinimalNonTransactionalConn
+    {
+        bool open{ true };
+        [[nodiscard]] bool is_open() const noexcept
+        {
+            return open;
+        }
+    };
+
+    struct TxOnlyNoSavepointConn
+    {
+        bool open{ true };
+        bool in_tx{ false };
+        [[nodiscard]] bool is_open() const noexcept
+        {
+            return open;
+        }
+        [[nodiscard]] bool in_transaction() const noexcept
+        {
+            return in_tx;
+        }
+        std::expected<void, Core::DbError> begin_transaction()
+        {
+            if (in_tx)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Already in tx") };
+            }
+            in_tx = true;
+            return {};
+        }
+        std::expected<void, Core::DbError> commit()
+        {
+            in_tx = false;
+            return {};
+        }
+        std::expected<void, Core::DbError> rollback()
+        {
+            in_tx = false;
+            return {};
+        }
+    };
+
+    static_assert(DAL::Repositories::DatabaseConnection<MinimalNonTransactionalConn>);
+    static_assert(!DAL::Repositories::TransactionalConnection<MinimalNonTransactionalConn>);
+    static_assert(!DAL::Repositories::SavepointConnection<MinimalNonTransactionalConn>);
+
+    static_assert(DAL::Repositories::TransactionalConnection<TxOnlyNoSavepointConn>);
+    static_assert(!DAL::Repositories::SavepointConnection<TxOnlyNoSavepointConn>);
+
+    static_assert(DAL::Repositories::SavepointConnection<DAL::SQLiteConnection>);
+    static_assert(DAL::Repositories::SavepointConnection<TestDatabaseConnection>);
+
+    TEST(Phase59AdapterContractTest, WriteBatchTxGuardAndSavepointsRespectFormalAdapterConcepts)
+    {
+        // 1. Non-transactional adapter MUST fail WriteBatchTxGuard::begin() instead of silently succeeding.
+        auto minConn = std::make_shared<MinimalNonTransactionalConn>();
+        {
+            DAL::detail::WriteBatchTxGuard<MinimalNonTransactionalConn> guard(minConn);
+            auto res = guard.begin();
+            ASSERT_FALSE(res.has_value());
+            EXPECT_EQ(res.error().code, Core::DbErrorCode::ConnectionError);
+        }
+
+        // 2. Transactional adapter without savepoints succeeds at top level, but MUST reject nested guard & savepoint().
+        auto txOnlyConn = std::make_shared<TxOnlyNoSavepointConn>();
+        {
+            DAL::detail::WriteBatchTxGuard<TxOnlyNoSavepointConn> outer(txOnlyConn);
+            ASSERT_TRUE(outer.begin().has_value());
+            EXPECT_TRUE(txOnlyConn->in_transaction());
+
+            DAL::detail::WriteBatchTxGuard<TxOnlyNoSavepointConn> nested(txOnlyConn);
+            auto nestedRes = nested.begin();
+            ASSERT_FALSE(nestedRes.has_value());
+            EXPECT_EQ(nestedRes.error().code, Core::DbErrorCode::ConnectionError);
+
+            DAL::DbContextBase<TxOnlyNoSavepointConn> ctx(txOnlyConn);
+            auto spRes = ctx.savepoint("sp1");
+            ASSERT_FALSE(spRes.has_value());
+            EXPECT_EQ(spRes.error().code, Core::DbErrorCode::ConnectionError);
+        }
+        EXPECT_FALSE(txOnlyConn->in_transaction());
+
+        // 3. TestDatabaseConnection satisfies SavepointConnection with real nested savepoint rollback.
+        auto mockConn = std::make_shared<TestDatabaseConnection>();
+        ASSERT_TRUE(mockConn->begin_transaction().has_value());
+        ASSERT_TRUE(mockConn->insert(DAL::Schema::PersonDTO{ .id = 1, .first_name = "Outer", .last_name = "Row" }).has_value());
+        {
+            DAL::detail::WriteBatchTxGuard<TestDatabaseConnection> spGuard(mockConn);
+            ASSERT_TRUE(spGuard.begin().has_value());
+            ASSERT_TRUE(mockConn->insert(DAL::Schema::PersonDTO{ .id = 2, .first_name = "Inner", .last_name = "RolledBack" }).has_value());
+            EXPECT_EQ(mockConn->count<DAL::Schema::PersonDTO>(), 2u);
+            // Destructor rolls back savepoint automatically.
+        }
+        EXPECT_EQ(mockConn->count<DAL::Schema::PersonDTO>(), 1u);
+        ASSERT_TRUE(mockConn->commit().has_value());
+        EXPECT_TRUE(mockConn->exists<DAL::Schema::PersonDTO>(1));
+        EXPECT_FALSE(mockConn->exists<DAL::Schema::PersonDTO>(2));
+
+        // 4. SQLiteConnection satisfies SavepointConnection with nested savepoint rollback too.
+        auto sqlConnRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(sqlConnRes.has_value());
+        auto sqlConn = sqlConnRes.value();
+        ASSERT_TRUE(sqlConn->ensure_table_created<PocoUser>().has_value());
+        ASSERT_TRUE(sqlConn->begin_transaction().has_value());
+        ASSERT_TRUE(sqlConn->try_insert(PocoUser{ .user_id = 1, .username = "outer" }).has_value());
+        {
+            DAL::detail::WriteBatchTxGuard<DAL::SQLiteConnection> spGuard(sqlConn);
+            ASSERT_TRUE(spGuard.begin().has_value());
+            ASSERT_TRUE(sqlConn->try_insert(PocoUser{ .user_id = 2, .username = "inner_rolled_back" }).has_value());
+            EXPECT_EQ(sqlConn->count<PocoUser>(), 2u);
+        }
+        EXPECT_EQ(sqlConn->count<PocoUser>(), 1u);
+        ASSERT_TRUE(sqlConn->commit().has_value());
+        EXPECT_TRUE(sqlConn->exists<PocoUser>(1));
+        EXPECT_FALSE(sqlConn->exists<PocoUser>(2));
+    }
+
 } // namespace

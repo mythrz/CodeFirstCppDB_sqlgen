@@ -77,6 +77,7 @@ namespace
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Transaction is already active") };
             }
             snapshot_ = std::make_tuple(persons_, somethings_, person_somethings_);
+            savepoints_.clear();
             in_transaction_ = true;
             return {};
         }
@@ -91,6 +92,7 @@ namespace
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("No active transaction to commit") };
             }
+            savepoints_.clear();
             in_transaction_ = false;
             return {};
         }
@@ -108,8 +110,60 @@ namespace
             persons_ = std::move(std::get<0>(snapshot_));
             somethings_ = std::move(std::get<1>(snapshot_));
             person_somethings_ = std::move(std::get<2>(snapshot_));
+            savepoints_.clear();
             in_transaction_ = false;
             return {};
+        }
+
+        std::expected<void, Core::DbError> savepoint(std::string_view name)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("TestDatabaseConnection is closed") };
+            }
+            if (name.empty())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Savepoint name cannot be empty") };
+            }
+            savepoints_.emplace_back(std::string{ name }, std::make_tuple(persons_, somethings_, person_somethings_));
+            return {};
+        }
+
+        std::expected<void, Core::DbError> release_savepoint(std::string_view name)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("TestDatabaseConnection is closed") };
+            }
+            for (std::size_t i = savepoints_.size(); i-- > 0;)
+            {
+                if (savepoints_[i].first == name)
+                {
+                    savepoints_.resize(i);
+                    return {};
+                }
+            }
+            return std::unexpected<Core::DbError>{ Core::DbError::not_found("Savepoint not found") };
+        }
+
+        std::expected<void, Core::DbError> rollback_to_savepoint(std::string_view name)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("TestDatabaseConnection is closed") };
+            }
+            for (std::size_t i = savepoints_.size(); i-- > 0;)
+            {
+                if (savepoints_[i].first == name)
+                {
+                    persons_ = std::get<0>(savepoints_[i].second);
+                    somethings_ = std::get<1>(savepoints_[i].second);
+                    person_somethings_ = std::get<2>(savepoints_[i].second);
+                    savepoints_.resize(i);
+                    return {};
+                }
+            }
+            return std::unexpected<Core::DbError>{ Core::DbError::not_found("Savepoint not found") };
         }
 
         [[nodiscard]] bool in_transaction() const noexcept
@@ -449,12 +503,15 @@ namespace
         std::vector<DAL::Schema::PersonDTO> persons_;
         std::vector<DAL::Schema::SomethingDTO> somethings_;
         std::vector<DAL::Schema::Person_SomethingDTO> person_somethings_;
-        std::tuple<
+        using SnapshotTuple = std::tuple<
             std::vector<DAL::Schema::PersonDTO>,
             std::vector<DAL::Schema::SomethingDTO>,
-            std::vector<DAL::Schema::Person_SomethingDTO>>
-            snapshot_;
+            std::vector<DAL::Schema::Person_SomethingDTO>>;
+        SnapshotTuple snapshot_;
+        std::vector<std::pair<std::string, SnapshotTuple>> savepoints_;
     };
+
+    static_assert(DAL::Repositories::SavepointConnection<TestDatabaseConnection>);
 
     class Phase6AppDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>
     {
