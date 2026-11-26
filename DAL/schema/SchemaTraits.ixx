@@ -881,6 +881,51 @@ export namespace DAL::Schema
         return result;
     }
 
+    namespace detail
+    {
+        template<typename>
+        struct ForeignKeyColumnName;
+
+        template<rfl::internal::StringLiteral ColName>
+        struct ForeignKeyColumnName<rfl::Literal<ColName>>
+        {
+            static constexpr std::string_view value = ColName.string_view();
+        };
+    } // namespace detail
+
+    template<typename ChildDTO, typename ParentDTO>
+        requires(count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
+    consteval std::meta::info referenced_parent_member_of()
+    {
+        constexpr auto fk_m = find_fk_member_referencing<ChildDTO, ParentDTO>();
+        using RawFieldT = [:std::meta::type_of(fk_m):];
+        using FieldT = std::remove_cvref_t<RawFieldT>;
+        constexpr std::string_view target_col = detail::ForeignKeyColumnName<typename FieldT::ColumnType>::value;
+        std::meta::info found{};
+        bool has_found = false;
+        template for (constexpr auto m : members_v<ParentDTO>)
+        {
+            if (std::meta::identifier_of(m) == target_col)
+            {
+                found = m;
+                has_found = true;
+            }
+        }
+        if (!has_found)
+        {
+            throw std::invalid_argument("referenced_parent_member_of: referenced column not found on ParentDTO");
+        }
+        return found;
+    }
+
+    template<typename ChildDTO, typename ParentDTO>
+        requires(count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
+    [[nodiscard]] constexpr auto extract_referenced_parent_value(const ParentDTO& parent_dto)
+    {
+        constexpr auto target_m = referenced_parent_member_of<ChildDTO, ParentDTO>();
+        return unwrap_field(parent_dto.[:target_m:]);
+    }
+
     template<typename ChildDTO, typename ParentDTO, typename KeyValue>
         requires(count_fk_members_referencing<ChildDTO, ParentDTO>() == 1)
     [[nodiscard]] auto make_fk_where(const KeyValue& parent_pk_val)

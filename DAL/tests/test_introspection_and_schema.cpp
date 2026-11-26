@@ -734,4 +734,178 @@ namespace
         ASSERT_FALSE(badRangeAgg.has_value());
         EXPECT_EQ(badRangeAgg.error().code, Core::DbErrorCode::ConstraintViolation);
     }
+
+    // =========================================================================
+    // Phase 58: Concurrent BEGIN IMMEDIATE Migrations & Declared FK Target Col
+    // =========================================================================
+
+    struct CompositeRefParentDTO
+    {
+        static constexpr auto tablename = "CompositeRefParents";
+        static constexpr std::array<bool, 3> unique_field_flags{ false, true, false };
+        sqlgen::PrimaryKey<std::int32_t> tenant_id{ 0 };
+        sqlgen::PrimaryKey<std::int32_t> code_id{ 0 };
+        std::string label;
+    };
+
+    struct CompositeRefChildDTO
+    {
+        static constexpr auto tablename = "CompositeRefChildren";
+        sqlgen::PrimaryKey<std::int32_t> child_id{ 0 };
+        sqlgen::ForeignKey<std::int32_t, CompositeRefParentDTO, "code_id"> parent_code{ 0 };
+        std::string note;
+    };
+
+    struct Phase58FkNavContext : public DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        explicit Phase58FkNavContext(std::shared_ptr<DAL::SQLiteConnection> conn)
+            : DbContextBase(std::move(conn))
+        {
+        }
+
+        Set<CompositeRefParentDTO> parents{ this };
+        Set<CompositeRefChildDTO> children{ this };
+    };
+
+    TEST(Phase58SnapshotAndFkTargetTest, ConcurrentMigrateToSerializesWithBeginImmediateAndPreventsDowngrade)
+    {
+        const auto dbPath = make_unique_temp_db_path("codefirst_phase58_migrate_race");
+        const ScopedTempDbCleanup cleanup{ dbPath };
+
+        DAL::SQLiteConnectionOptions opts;
+        opts.foreign_keys = true;
+        opts.busy_timeout = std::chrono::milliseconds(5000);
+        opts.wal_mode = true;
+
+        auto connARes = DAL::SQLiteConnection::connect(dbPath, opts);
+        ASSERT_TRUE(connARes.has_value()) << connARes.error().to_string();
+        auto connBRes = DAL::SQLiteConnection::connect(dbPath, opts);
+        ASSERT_TRUE(connBRes.has_value()) << connBRes.error().to_string();
+
+        auto connA = connARes.value();
+        auto connB = connBRes.value();
+
+        std::promise<void> enteredMigration;
+        auto enteredFuture = enteredMigration.get_future();
+
+        // Thread B attempts to migrate to version 2 while Thread A holds BEGIN IMMEDIATE migrating 0 -> 3.
+        std::expected<void, Core::DbError> resB{};
+        std::thread threadB(
+            [&]()
+            {
+                enteredFuture.wait();
+                Phase30DbContext dbB(connB);
+                resB = dbB.migrate_to(
+                    2,
+                    [](std::int32_t, std::int32_t) -> std::expected<void, Core::DbError>
+                    {
+                        return {};
+                    });
+            });
+
+        Phase30DbContext dbA(connA);
+        auto resA = dbA.migrate_to(
+            3,
+            [&](std::int32_t from, std::int32_t to) -> std::expected<void, Core::DbError>
+            {
+                EXPECT_EQ(from, 0);
+                EXPECT_EQ(to, 3);
+                enteredMigration.set_value();
+                std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                return connA->execute_raw("CREATE TABLE IF NOT EXISTS migrate_v3_marker (v INTEGER NOT NULL);");
+            });
+
+        threadB.join();
+
+        ASSERT_TRUE(resA.has_value()) << resA.error().to_string();
+        // Thread B MUST see version 3 inside its own BEGIN IMMEDIATE snapshot and reject downgrade 3 -> 2.
+        ASSERT_FALSE(resB.has_value());
+        EXPECT_EQ(resB.error().code, Core::DbErrorCode::ConstraintViolation);
+        auto verRes = dbA.try_user_version();
+        ASSERT_TRUE(verRes.has_value());
+        EXPECT_EQ(*verRes, 3);
+
+        // Concurrent idempotent race to version 4: callback MUST run exactly once across both connections.
+        std::atomic<int> v4CallbackCount{ 0 };
+        std::promise<void> v4Entered;
+        auto v4Future = v4Entered.get_future();
+        std::expected<void, Core::DbError> resB4{};
+        std::thread threadB4(
+            [&]()
+            {
+                v4Future.wait();
+                Phase30DbContext dbB4(connB);
+                resB4 = dbB4.migrate_to(
+                    4,
+                    [&](std::int32_t, std::int32_t) -> std::expected<void, Core::DbError>
+                    {
+                        ++v4CallbackCount;
+                        return {};
+                    });
+            });
+        auto resA4 = dbA.migrate_to(
+            4,
+            [&](std::int32_t from, std::int32_t to) -> std::expected<void, Core::DbError>
+            {
+                EXPECT_EQ(from, 3);
+                EXPECT_EQ(to, 4);
+                ++v4CallbackCount;
+                v4Entered.set_value();
+                std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                return {};
+            });
+        threadB4.join();
+
+        ASSERT_TRUE(resA4.has_value()) << resA4.error().to_string();
+        ASSERT_TRUE(resB4.has_value()) << resB4.error().to_string();
+        EXPECT_EQ(v4CallbackCount.load(), 1);
+        EXPECT_EQ(dbA.try_user_version().value_or(-1), 4);
+
+        connA->close();
+        connB->close();
+    }
+
+    TEST(Phase58SnapshotAndFkTargetTest, ForeignKeyNavigationHonorsDeclaredReferencedColumnOnCompositeParent)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase58FkNavContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // Overlapping values between tenant_id and code_id:
+        // p1 has tenant_id=10, code_id=20; p2 has tenant_id=20, code_id=10.
+        // Child FK explicitly references CompositeRefParents("code_id"), NOT tenant_id.
+        const CompositeRefParentDTO p1{ .tenant_id = 10, .code_id = 20, .label = "ParentCode20" };
+        const CompositeRefParentDTO p2{ .tenant_id = 20, .code_id = 10, .label = "ParentCode10" };
+        ASSERT_TRUE(db.parents.add(p1).has_value());
+        ASSERT_TRUE(db.parents.add(p2).has_value());
+
+        const CompositeRefChildDTO c1{ .child_id = 1, .parent_code = 20, .note = "BelongsToP1" };
+        const CompositeRefChildDTO c2{ .child_id = 2, .parent_code = 10, .note = "BelongsToP2" };
+        ASSERT_TRUE(db.children.add(c1).has_value());
+        ASSERT_TRUE(db.children.add(c2).has_value());
+
+        auto childrenOfP1 = db.query_children<CompositeRefChildDTO>(p1);
+        ASSERT_TRUE(childrenOfP1.has_value()) << childrenOfP1.error().to_string();
+        ASSERT_EQ(childrenOfP1->size(), 1u);
+        EXPECT_EQ(childrenOfP1->front().note, "BelongsToP1");
+
+        auto parentOfC1 = db.query_parent<CompositeRefParentDTO>(c1);
+        ASSERT_TRUE(parentOfC1.has_value()) << parentOfC1.error().to_string();
+        ASSERT_TRUE(parentOfC1->has_value());
+        EXPECT_EQ((*parentOfC1)->label, "ParentCode20");
+
+        auto batchParents = db.query_parents_batch<CompositeRefParentDTO>(std::vector<CompositeRefChildDTO>{ c1 });
+        ASSERT_TRUE(batchParents.has_value()) << batchParents.error().to_string();
+        ASSERT_EQ(batchParents->size(), 1u);
+        EXPECT_EQ(batchParents->front().label, "ParentCode20");
+
+        auto grouped = db.query_children_grouped<CompositeRefChildDTO>(std::vector<CompositeRefParentDTO>{ p1, p2 });
+        ASSERT_TRUE(grouped.has_value()) << grouped.error().to_string();
+        ASSERT_EQ(grouped->size(), 2u);
+        ASSERT_EQ((*grouped)[0].second.size(), 1u);
+        EXPECT_EQ((*grouped)[0].second.front().note, "BelongsToP1");
+        ASSERT_EQ((*grouped)[1].second.size(), 1u);
+        EXPECT_EQ((*grouped)[1].second.front().note, "BelongsToP2");
+    }
 } // namespace

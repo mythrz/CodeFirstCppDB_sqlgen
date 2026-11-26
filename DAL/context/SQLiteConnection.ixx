@@ -1088,6 +1088,46 @@ export namespace DAL
             return execute_typed_tuple_sql<KeyTuple>(sql);
         }
 
+        template<typename DTO, typename KeyTuple, typename SelectQuery>
+        [[nodiscard]] std::expected<std::vector<KeyTuple>, Core::DbError> delete_where_paginated_returning_keys(SelectQuery&& select_query)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (auto id_chk = detail::validate_dto_ddl_identifiers<DTO>(); !id_chk)
+            {
+                return std::unexpected<Core::DbError>{ id_chk.error() };
+            }
+            auto safe_select = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(std::forward<SelectQuery>(select_query)));
+            if (!safe_select)
+            {
+                return std::unexpected<Core::DbError>{ safe_select.error() };
+            }
+            std::string subquery = std::move(*safe_select);
+            while (!subquery.empty() &&
+                   (subquery.back() == ' ' || subquery.back() == '\t' || subquery.back() == '\n' || subquery.back() == '\r'))
+            {
+                subquery.pop_back();
+            }
+            if (!subquery.empty() && subquery.back() == ';')
+            {
+                subquery.pop_back();
+            }
+            const std::string expected_prefix = std::format("SELECT {} FROM ", build_select_columns_sql<DTO>());
+            if (!subquery.starts_with(expected_prefix))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("Unexpected SELECT shape for atomic paginated delete") };
+            }
+            subquery.replace(0, expected_prefix.size(), "SELECT rowid FROM ");
+            const std::string sql = std::format(
+                "DELETE FROM \"{}\" WHERE rowid IN ({}) RETURNING {};",
+                std::string_view{ DTO::tablename },
+                subquery,
+                build_returning_keys_clause<DTO>());
+            return execute_typed_tuple_sql<KeyTuple>(sql);
+        }
+
         template<typename DTO, typename SetExpr, typename Condition>
         [[nodiscard]] std::expected<void, Core::DbError> update_where(const SetExpr& set_expr, const Condition& cond)
         {

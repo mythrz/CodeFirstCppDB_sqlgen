@@ -784,4 +784,111 @@ namespace
         EXPECT_EQ((*distinctDescs)[1], std::optional<std::string>{ "HasDesc" });
     }
 
+    // =========================================================================
+    // Phase 58: Atomic Paginated Delete & Unified limit(0)/page(0) Contract
+    // =========================================================================
+
+    TEST(Phase58PaginatedDeleteAndLimitTest, AtomicPaginatedRemoveWhereRespectsConcurrentPredicateChange)
+    {
+        const auto dbPath = make_unique_temp_db_path("codefirst_phase58_paginated_delete");
+        const ScopedTempDbCleanup cleanup{ dbPath };
+
+        DAL::SQLiteConnectionOptions opts;
+        opts.foreign_keys = true;
+        opts.busy_timeout = std::chrono::milliseconds(5000);
+        opts.wal_mode = true;
+
+        auto connARes = DAL::SQLiteConnection::connect(dbPath, opts);
+        ASSERT_TRUE(connARes.has_value());
+        auto connBRes = DAL::SQLiteConnection::connect(dbPath, opts);
+        ASSERT_TRUE(connBRes.has_value());
+        auto connA = connARes.value();
+        auto connB = connBRes.value();
+
+        Phase30DbContext dbA(connA);
+        ASSERT_TRUE(dbA.ensure_created().has_value());
+        ASSERT_TRUE(dbA.people.add(Core::Person(Core::PersonId{ 1 }, "Row1", "Stale")).has_value());
+        ASSERT_TRUE(dbA.people.add(Core::Person(Core::PersonId{ 2 }, "Row2", "Stale")).has_value());
+        ASSERT_TRUE(dbA.people.add(Core::Person(Core::PersonId{ 3 }, "Row3", "Keep")).has_value());
+
+        // Conn A opens BEGIN IMMEDIATE and changes Row1 from "Stale" -> "Active" before committing.
+        ASSERT_TRUE(connA->begin_immediate_transaction().has_value());
+        ASSERT_TRUE(dbA.people.where_equal<"id">(1).template update_where<"lastName">("Active").has_value());
+
+        std::expected<void, Core::DbError> delResB{};
+        std::thread threadB(
+            [&]()
+            {
+                Phase30DbContext dbB(connB);
+                // Because paginated remove_where is a single atomic DELETE ... WHERE rowid IN (SELECT ...),
+                // Conn B blocks until Conn A commits, then deletes ONLY Row2 (the first remaining "Stale" row),
+                // NEVER deleting Row1 which became "Active".
+                delResB = dbB.people.where_equal<"lastName">("Stale").order_by<"id">(false).limit(1).remove_where();
+            });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        ASSERT_TRUE(connA->commit().has_value());
+        threadB.join();
+
+        ASSERT_TRUE(delResB.has_value()) << delResB.error().to_string();
+        EXPECT_TRUE(dbA.people.contains(1));
+        EXPECT_EQ(dbA.people.find(1)->getLastName(), "Active");
+        EXPECT_FALSE(dbA.people.contains(2));
+        EXPECT_TRUE(dbA.people.contains(3));
+
+        connA->close();
+        connB->close();
+    }
+
+#if !defined(CODEFIRST_CONTRACTS_ENFORCED)
+    TEST(Phase58PaginatedDeleteAndLimitTest, ZeroLimitAndZeroPageReturnConstraintViolationWhenContractsDisabled)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "Ada", "Lovelace")).has_value());
+
+        auto q0 = db.people.query().limit(0);
+        auto p0 = db.people.page(0, 0);
+
+        auto rVec = q0.try_to_vector();
+        ASSERT_FALSE(rVec.has_value());
+        EXPECT_EQ(rVec.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rFirst = p0.try_first_or_default();
+        ASSERT_FALSE(rFirst.has_value());
+        EXPECT_EQ(rFirst.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rCount = q0.try_count();
+        ASSERT_FALSE(rCount.has_value());
+        EXPECT_EQ(rCount.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rAny = q0.try_any();
+        ASSERT_FALSE(rAny.has_value());
+        EXPECT_EQ(rAny.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rSel = q0.try_select<"firstName">();
+        ASSERT_FALSE(rSel.has_value());
+        EXPECT_EQ(rSel.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rSelDist = q0.try_select_distinct<"firstName">();
+        ASSERT_FALSE(rSelDist.has_value());
+        EXPECT_EQ(rSelDist.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rCols = q0.try_select_columns<"id", "firstName">();
+        ASSERT_FALSE(rCols.has_value());
+        EXPECT_EQ(rCols.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rColsDist = q0.try_select_distinct_columns<"id", "firstName">();
+        ASSERT_FALSE(rColsDist.has_value());
+        EXPECT_EQ(rColsDist.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rDel = db.people.where_equal<"id">(1).limit(0).remove_where();
+        ASSERT_FALSE(rDel.has_value());
+        EXPECT_EQ(rDel.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(db.people.count(), 1u);
+    }
+#endif
+
 } // namespace

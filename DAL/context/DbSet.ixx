@@ -341,7 +341,7 @@ export namespace DAL
             WriteBatchTxGuard(const WriteBatchTxGuard&) = delete;
             WriteBatchTxGuard& operator=(const WriteBatchTxGuard&) = delete;
 
-            [[nodiscard]] std::expected<void, Core::DbError> begin()
+            [[nodiscard]] std::expected<void, Core::DbError> begin(bool immediate = false)
             {
                 if (!conn_)
                 {
@@ -356,7 +356,22 @@ export namespace DAL
                 {
                     if (!conn_->in_transaction())
                     {
-                        auto tx_res = conn_->begin_transaction();
+                        std::expected<void, Core::DbError> tx_res{};
+                        if (immediate)
+                        {
+                            if constexpr (requires(ConnectionHandle& c) { c.begin_immediate_transaction(); })
+                            {
+                                tx_res = conn_->begin_immediate_transaction();
+                            }
+                            else
+                            {
+                                tx_res = conn_->begin_transaction();
+                            }
+                        }
+                        else
+                        {
+                            tx_res = conn_->begin_transaction();
+                        }
                         if (!tx_res)
                         {
                             return tx_res;
@@ -1116,7 +1131,7 @@ export namespace DAL
             }
             if (limit_.has_value() && *limit_ == 0)
             {
-                return std::vector<Domain>{};
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Query limit must be greater than 0") };
             }
 
             if constexpr (requires(const ConnectionHandle& c) { c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>); })
@@ -1198,7 +1213,7 @@ export namespace DAL
             }
             if (limit_.has_value() && *limit_ == 0)
             {
-                return std::optional<Domain>{ std::nullopt };
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Query limit must be greater than 0") };
             }
             auto res = limit(1).try_to_vector();
             if (!res)
@@ -1229,7 +1244,7 @@ export namespace DAL
             }
             if (limit_.has_value() && *limit_ == 0)
             {
-                return 0u;
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Query limit must be greater than 0") };
             }
 
             if (!limit_.has_value() && !offset_.has_value())
@@ -1381,7 +1396,8 @@ export namespace DAL
             }
             if (limit_.has_value() && *limit_ == 0)
             {
-                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::vector<ColValueT>{} };
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::constraint_violation("Query limit must be greater than 0") } };
             }
 
             using ProjRow = detail::SingleValueRow<RawT>;
@@ -1484,7 +1500,8 @@ export namespace DAL
             }
             if (limit_.has_value() && *limit_ == 0)
             {
-                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::vector<ColValueT>{} };
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::constraint_violation("Query limit must be greater than 0") } };
             }
 
             using ProjRow = detail::SingleValueRow<RawT>;
@@ -1565,7 +1582,8 @@ export namespace DAL
             }
             if (limit_.has_value() && *limit_ == 0)
             {
-                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::vector<RowTuple>{} };
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::constraint_violation("Query limit must be greater than 0") } };
             }
 
             auto with_where = [&]()
@@ -1628,7 +1646,8 @@ export namespace DAL
             }
             if (limit_.has_value() && *limit_ == 0)
             {
-                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::vector<RowTuple>{} };
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
+                    Core::DbError::constraint_violation("Query limit must be greater than 0") } };
             }
 
             auto with_group = [&]()
@@ -1713,7 +1732,7 @@ export namespace DAL
             }
             if (limit_.has_value() && *limit_ == 0)
             {
-                return false;
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Query limit must be greater than 0") };
             }
             if (!limit_.has_value() && !offset_.has_value())
             {
@@ -1767,12 +1786,12 @@ export namespace DAL
             }
             if (limit_.has_value() && *limit_ == 0)
             {
-                return {};
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Query limit must be greater than 0") };
             }
 
+            using KeyTuple = detail::KeyTupleFor_t<KeyType>;
             if (!limit_.has_value() && !offset_.has_value())
             {
-                using KeyTuple = detail::KeyTupleFor_t<KeyType>;
                 if constexpr (requires(ConnectionHandle& c) { c.template delete_where_returning_keys<DTO, KeyTuple>(where_cond_); })
                 {
                     auto del_res = conn_->template delete_where_returning_keys<DTO, KeyTuple>(where_cond_);
@@ -1804,7 +1823,38 @@ export namespace DAL
                 }
             }
 
-            // Collect keys without hydrating Domain or polluting ChangeTracker, then delete atomically.
+            // Paginated delete: execute as a single atomic SQLite DELETE ... WHERE rowid IN (SELECT rowid ...) RETURNING ...
+            // statement when supported so concurrent writers cannot mutate predicate columns between select and delete.
+            if constexpr (requires(ConnectionHandle& c) {
+                              c.template delete_where_paginated_returning_keys<DTO, KeyTuple>(sqlgen::read<std::vector<DTO>>);
+                          })
+            {
+                auto del_res = execute_paginated_delete<KeyTuple>(*conn_);
+                if (!del_res)
+                {
+                    return std::unexpected<Core::DbError>{ del_res.error() };
+                }
+                if (untrack_key_fn_)
+                {
+                    for (const auto& tuple_key : *del_res)
+                    {
+                        untrack_key_fn_(detail::KeyTupleFor<KeyType>::from_tuple(tuple_key));
+                    }
+                }
+                else if (!del_res->empty() && clear_track_fn_)
+                {
+                    clear_track_fn_();
+                }
+                return {};
+            }
+
+            // Fallback for custom non-SQLite adapters: acquire an immediate write transaction before reading keys.
+            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn_);
+            if (auto begin_res = tx_guard.begin(true); !begin_res)
+            {
+                return begin_res;
+            }
+
             std::vector<KeyType> keys_to_delete;
             if constexpr (requires(const ConnectionHandle& c) { c.template try_execute_read<DTO>(sqlgen::read<std::vector<DTO>>); })
             {
@@ -1823,17 +1873,6 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::unknown(
                     "Connection adapter does not support server-side WHERE queries") };
-            }
-
-            if (keys_to_delete.empty())
-            {
-                return {};
-            }
-
-            detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn_);
-            if (auto begin_res = tx_guard.begin(); !begin_res)
-            {
-                return begin_res;
             }
 
             for (const auto& key : keys_to_delete)
@@ -1857,7 +1896,7 @@ export namespace DAL
                     untrack_key_fn_(key);
                 }
             }
-            else if (clear_track_fn_)
+            else if (!keys_to_delete.empty() && clear_track_fn_)
             {
                 clear_track_fn_();
             }
@@ -2044,6 +2083,58 @@ export namespace DAL
             else
             {
                 return conn_->template try_aggregate_where<DTO, ResultT>(agg_expr, where_cond_);
+            }
+        }
+
+        template<typename KeyTuple, typename BaseQuery>
+        [[nodiscard]] std::expected<std::vector<KeyTuple>, Core::DbError> execute_paginated_delete_with_limit_offset(
+            ConnectionHandle& conn, BaseQuery&& base_query) const
+        {
+            if (limit_.has_value() && offset_.has_value())
+            {
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_);
+                return conn.template delete_where_paginated_returning_keys<DTO, KeyTuple>(std::move(q));
+            }
+            if (limit_.has_value())
+            {
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_);
+                return conn.template delete_where_paginated_returning_keys<DTO, KeyTuple>(std::move(q));
+            }
+            if (offset_.has_value())
+            {
+                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_);
+                return conn.template delete_where_paginated_returning_keys<DTO, KeyTuple>(std::move(q));
+            }
+            return conn.template delete_where_paginated_returning_keys<DTO, KeyTuple>(std::forward<BaseQuery>(base_query));
+        }
+
+        template<typename KeyTuple>
+        [[nodiscard]] std::expected<std::vector<KeyTuple>, Core::DbError> execute_paginated_delete(ConnectionHandle& conn) const
+        {
+            auto with_where = [&]()
+            {
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
+                {
+                    return sqlgen::read<std::vector<DTO>> | sqlgen::where(where_cond_);
+                }
+                else
+                {
+                    return sqlgen::read<std::vector<DTO>>;
+                }
+            }();
+
+            if constexpr (!std::same_as<OrderByT, rfl::Nothing>)
+            {
+                return std::visit(
+                    [&](const auto& ob)
+                    {
+                        return execute_paginated_delete_with_limit_offset<KeyTuple>(conn, with_where | ob);
+                    },
+                    order_by_);
+            }
+            else
+            {
+                return execute_paginated_delete_with_limit_offset<KeyTuple>(conn, std::move(with_where));
             }
         }
 
@@ -3021,9 +3112,10 @@ export namespace DAL
         template<typename ParentDomain>
         [[nodiscard]] auto where_foreign_key(const ParentDomain& parent) const
         {
-            const auto parent_key = Schema::EntityMetadata<ParentDomain>::extract_key(parent);
-            const auto raw_pk = detail::normalize_query_val(parent_key);
-            return where_sql(Schema::make_fk_where<DTO, Schema::SchemaOf_t<ParentDomain>>(raw_pk));
+            using ParentDTO = Schema::SchemaOf_t<ParentDomain>;
+            const ParentDTO parent_dto = DAL::Mappers::MapperTraits<ParentDomain, ParentDTO>::to_dto(parent);
+            const auto ref_val = Schema::extract_referenced_parent_value<DTO, ParentDTO>(parent_dto);
+            return where_sql(Schema::make_fk_where<DTO, ParentDTO>(ref_val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -3033,7 +3125,7 @@ export namespace DAL
             return query().template order_by<ColLiteral>(desc);
         }
 
-        [[nodiscard]] auto page(std::size_t limit_count, std::size_t offset_count = 0) const
+        [[nodiscard]] auto page(std::size_t limit_count, std::size_t offset_count = 0) const pre(limit_count > 0)
         {
             return query().page(limit_count, offset_count);
         }

@@ -24,6 +24,8 @@ target_sources(CodeFirstCppDB_Core
 target_compile_features(CodeFirstCppDB_Core PUBLIC cxx_std_26)
 
 target_compile_definitions(CodeFirstCppDB_Core
+    PUBLIC
+        $<$<BOOL:${CODEFIRST_ENABLE_CONTRACTS}>:CODEFIRST_CONTRACTS_ENFORCED>
     PRIVATE
         $<$<AND:$<BOOL:${CODEFIRST_ENABLE_STACKTRACE}>,$<CONFIG:Debug>>:CODEFIRST_ENABLE_STACKTRACE>
 )
@@ -33,6 +35,7 @@ target_compile_options(CodeFirstCppDB_Core
         $<$<CXX_COMPILER_ID:GNU>:-freflection>
         $<$<AND:$<BOOL:${CODEFIRST_EXPLICIT_EXCEPTIONS}>,$<CXX_COMPILER_ID:GNU>>:-fexceptions>
         $<$<AND:$<BOOL:${CODEFIRST_ENABLE_CONTRACTS}>,$<CXX_COMPILER_ID:GNU>>:-fcontracts>
+        $<$<AND:$<NOT:$<BOOL:${CODEFIRST_ENABLE_CONTRACTS}>>,$<CXX_COMPILER_ID:GNU>>:-fcontract-evaluation-semantic=ignore>
     PRIVATE
         $<$<CXX_COMPILER_ID:GNU>:-Wall;-Wextra;-Wpedantic;-Wshadow>
 )
