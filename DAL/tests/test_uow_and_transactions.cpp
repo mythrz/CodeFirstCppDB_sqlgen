@@ -1878,4 +1878,153 @@ namespace
         EXPECT_TRUE(std::ranges::contains(*tablesRes, std::string_view{ "AtomicDropGood" }));
     }
 
+    // =========================================================================
+    // Phase 55 (P0): Row Identity & Key Safety (Range Checks & Immutable Tracked PK)
+    // =========================================================================
+
+    struct MutableCompositeLinkDTO
+    {
+        static constexpr auto tablename = "MutableCompositeLinks";
+        static constexpr bool composite_primary_key = true;
+        sqlgen::PrimaryKey<std::int32_t, false> left_id{ 0 };
+        sqlgen::PrimaryKey<std::int32_t, false> right_id{ 0 };
+        std::string tag;
+    };
+
+    struct Phase55IdentityContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<PocoUser> users{ this };
+        Set<MutableCompositeLinkDTO> links{ this };
+
+        explicit Phase55IdentityContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(Phase55RowIdentityTest, OversizedRawKeyRejectedAcrossAllDbSetOverloadsAndReopenIntact)
+    {
+        const auto dbPath = make_unique_temp_db_path("codefirst_phase55_raw_key");
+        const ScopedTempDbCleanup cleanup{ dbPath };
+
+        const std::int64_t wrappedOne = (1LL << 32) + 1LL; // 4,294,967,297 -> would truncate to int32_t(1)
+
+        {
+            auto connRes = DAL::SQLiteConnection::connect(dbPath);
+            ASSERT_TRUE(connRes.has_value());
+            Phase55IdentityContext db(connRes.value());
+            ASSERT_TRUE(db.ensure_created().has_value());
+            db.enable_change_tracking();
+
+            ASSERT_TRUE(db.users.add(PocoUser{ .user_id = 1, .username = "row1" }).has_value());
+            ASSERT_TRUE(db.users.add(PocoUser{ .user_id = 2, .username = "row2" }).has_value());
+            ASSERT_TRUE(db.links.add(MutableCompositeLinkDTO{ .left_id = 1, .right_id = 1, .tag = "L11" }).has_value());
+            ASSERT_TRUE(db.links.add(MutableCompositeLinkDTO{ .left_id = 1, .right_id = 2, .tag = "L12" }).has_value());
+
+            // Single-key oversized integer must NOT silently target row 1.
+            EXPECT_FALSE(db.users.find(wrappedOne).has_value());
+            EXPECT_FALSE(db.users.contains(wrappedOne));
+            EXPECT_EQ(db.users.find_tracked(wrappedOne), nullptr);
+            EXPECT_FALSE(db.users.find_tracked_ref(wrappedOne).has_value());
+
+            auto tf = db.users.try_find(wrappedOne);
+            ASSERT_FALSE(tf.has_value());
+            EXPECT_EQ(tf.error().code, Core::DbErrorCode::ConstraintViolation);
+
+            auto rm = db.users.remove(wrappedOne);
+            ASSERT_FALSE(rm.has_value());
+            EXPECT_EQ(rm.error().code, Core::DbErrorCode::ConstraintViolation);
+
+            db.defer_changes(true);
+            auto srm = db.users.stage_remove(wrappedOne);
+            ASSERT_FALSE(srm.has_value());
+            EXPECT_EQ(srm.error().code, Core::DbErrorCode::ConstraintViolation);
+            EXPECT_EQ(db.pending_changes_count(), 0u);
+            db.defer_changes(false);
+
+            // Composite-key oversized integer must NOT silently target (1, 1).
+            EXPECT_FALSE(db.links.find(wrappedOne, std::int64_t{ 1 }).has_value());
+            EXPECT_FALSE(db.links.contains(std::int64_t{ 1 }, wrappedOne));
+            EXPECT_EQ(db.links.find_tracked(wrappedOne, std::int64_t{ 1 }), nullptr);
+            auto ctf = db.links.try_find(wrappedOne, std::int64_t{ 1 });
+            ASSERT_FALSE(ctf.has_value());
+            EXPECT_EQ(ctf.error().code, Core::DbErrorCode::ConstraintViolation);
+            auto crm = db.links.remove(wrappedOne, std::int64_t{ 1 });
+            ASSERT_FALSE(crm.has_value());
+            EXPECT_EQ(crm.error().code, Core::DbErrorCode::ConstraintViolation);
+
+            connRes.value()->close();
+        }
+
+        // Reopen database and verify all rows remain completely untouched.
+        {
+            auto connRes = DAL::SQLiteConnection::connect(dbPath);
+            ASSERT_TRUE(connRes.has_value());
+            Phase55IdentityContext db(connRes.value());
+            ASSERT_EQ(db.users.count(), 2u);
+            EXPECT_EQ(db.users.find(1)->username, "row1");
+            EXPECT_EQ(db.users.find(2)->username, "row2");
+            ASSERT_EQ(db.links.count(), 2u);
+            EXPECT_EQ(db.links.find(1, 1)->tag, "L11");
+            EXPECT_EQ(db.links.find(1, 2)->tag, "L12");
+            connRes.value()->close();
+        }
+    }
+
+    TEST(Phase55RowIdentityTest, TrackedPrimaryKeyMutationRejectedForSingleAndCompositeKeys)
+    {
+        const auto dbPath = make_unique_temp_db_path("codefirst_phase55_rekey_reject");
+        const ScopedTempDbCleanup cleanup{ dbPath };
+
+        {
+            auto connRes = DAL::SQLiteConnection::connect(dbPath);
+            ASSERT_TRUE(connRes.has_value());
+            Phase55IdentityContext db(connRes.value());
+            ASSERT_TRUE(db.ensure_created().has_value());
+            db.enable_change_tracking();
+
+            ASSERT_TRUE(db.users.add(PocoUser{ .user_id = 1, .username = "alice" }).has_value());
+            ASSERT_TRUE(db.users.add(PocoUser{ .user_id = 2, .username = "bob" }).has_value());
+            ASSERT_TRUE(db.links.add(MutableCompositeLinkDTO{ .left_id = 1, .right_id = 1, .tag = "orig11" }).has_value());
+            ASSERT_TRUE(db.links.add(MutableCompositeLinkDTO{ .left_id = 1, .right_id = 2, .tag = "orig12" }).has_value());
+
+            // 1. Mutate single-key tracked entity's PK from 1 -> 2: save_changes MUST fail and NOT overwrite row 2.
+            auto u1 = db.users.find_tracked(1);
+            ASSERT_NE(u1, nullptr);
+            u1->user_id = 2;
+            u1->username = "hijacked";
+            auto saveSingle = db.save_changes();
+            ASSERT_FALSE(saveSingle.has_value());
+            EXPECT_EQ(saveSingle.error().code, Core::DbErrorCode::ConstraintViolation);
+
+            // Restore u1's PK so we can test composite-key mutation cleanly.
+            u1->user_id = 1;
+            u1->username = "alice";
+            ASSERT_TRUE(db.save_changes().has_value());
+
+            // 2. Mutate composite-key tracked entity's PK from (1, 1) -> (1, 2): MUST fail and NOT overwrite (1, 2).
+            auto l11 = db.links.find_tracked(1, 1);
+            ASSERT_NE(l11, nullptr);
+            l11->right_id = 2;
+            l11->tag = "hijacked_link";
+            auto saveComp = db.save_changes();
+            ASSERT_FALSE(saveComp.has_value());
+            EXPECT_EQ(saveComp.error().code, Core::DbErrorCode::ConstraintViolation);
+
+            connRes.value()->close();
+        }
+
+        // Reopen database and verify rows 1, 2, (1,1), (1,2) were never overwritten.
+        {
+            auto connRes = DAL::SQLiteConnection::connect(dbPath);
+            ASSERT_TRUE(connRes.has_value());
+            Phase55IdentityContext db(connRes.value());
+            EXPECT_EQ(db.users.find(1)->username, "alice");
+            EXPECT_EQ(db.users.find(2)->username, "bob");
+            EXPECT_EQ(db.links.find(1, 1)->tag, "orig11");
+            EXPECT_EQ(db.links.find(1, 2)->tag, "orig12");
+            connRes.value()->close();
+        }
+    }
+
 } // namespace

@@ -110,6 +110,100 @@ export namespace DAL
 
         inline constexpr std::size_t kSqliteUnboundedLimit = static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
 
+        template<typename T>
+        inline constexpr bool is_range_checked_integer_v = std::is_integral_v<std::remove_cvref_t<T>> &&
+            !std::is_same_v<std::remove_cvref_t<T>, bool> && !std::is_same_v<std::remove_cvref_t<T>, char> &&
+            !std::is_same_v<std::remove_cvref_t<T>, wchar_t> && !std::is_same_v<std::remove_cvref_t<T>, char8_t> &&
+            !std::is_same_v<std::remove_cvref_t<T>, char16_t> && !std::is_same_v<std::remove_cvref_t<T>, char32_t>;
+
+        template<typename TargetT, typename SrcT>
+        [[nodiscard]] std::expected<TargetT, Core::DbError> try_narrow_key_part(const SrcT& src)
+        {
+            using CleanTarget = std::remove_cvref_t<TargetT>;
+            using CleanSrc = std::remove_cvref_t<SrcT>;
+
+            if constexpr (Core::StrongIdType<CleanTarget>)
+            {
+                if constexpr (std::same_as<CleanSrc, CleanTarget>)
+                {
+                    return src;
+                }
+                else if constexpr (Core::StrongIdType<CleanSrc>)
+                {
+                    auto inner = try_narrow_key_part<typename CleanTarget::value_type>(src.get());
+                    if (!inner)
+                    {
+                        return std::unexpected<Core::DbError>{ inner.error() };
+                    }
+                    return CleanTarget{ std::move(*inner) };
+                }
+                else
+                {
+                    auto inner = try_narrow_key_part<typename CleanTarget::value_type>(src);
+                    if (!inner)
+                    {
+                        return std::unexpected<Core::DbError>{ inner.error() };
+                    }
+                    return CleanTarget{ std::move(*inner) };
+                }
+            }
+            else if constexpr (is_range_checked_integer_v<CleanTarget> && is_range_checked_integer_v<CleanSrc>)
+            {
+                if (!std::in_range<CleanTarget>(src))
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                        std::format("Key value {} is out of range for entity key type", src)) };
+                }
+                return static_cast<CleanTarget>(src);
+            }
+            else if constexpr (is_range_checked_integer_v<CleanTarget> && std::is_floating_point_v<CleanSrc>)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    "Floating-point value cannot be narrowed to an integral entity key") };
+            }
+            else
+            {
+                return static_cast<CleanTarget>(src);
+            }
+        }
+
+        template<typename KeyType, typename K>
+            requires Core::SingleKeyType<KeyType>
+        [[nodiscard]] std::expected<KeyType, Core::DbError> try_make_single_key(const K& raw_or_id)
+        {
+            auto part = try_narrow_key_part<typename KeyType::key_type>(raw_or_id);
+            if (!part)
+            {
+                return std::unexpected<Core::DbError>{ part.error() };
+            }
+            return KeyType{ std::move(*part) };
+        }
+
+        template<typename KeyType, typename... Ks>
+            requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity)
+        [[nodiscard]] std::expected<KeyType, Core::DbError> try_make_composite_key(const Ks&... parts)
+        {
+            return [&]<std::size_t... Is>(std::index_sequence<Is...>) -> std::expected<KeyType, Core::DbError>
+            {
+                auto narrowed = std::make_tuple(try_narrow_key_part<std::tuple_element_t<Is, typename KeyType::tuple_type>>(parts)...);
+                std::optional<Core::DbError> first_err;
+                (
+                    [&]()
+                    {
+                        if (!first_err && !std::get<Is>(narrowed).has_value())
+                        {
+                            first_err = std::get<Is>(narrowed).error();
+                        }
+                    }(),
+                    ...);
+                if (first_err)
+                {
+                    return std::unexpected<Core::DbError>{ std::move(*first_err) };
+                }
+                return KeyType{ std::move(*std::get<Is>(narrowed))... };
+            }(std::make_index_sequence<sizeof...(Ks)>{});
+        }
+
         template<typename OrderByVariant, typename NewAscCol, typename NewDescCol>
         struct AppendOrderByVariant;
 
@@ -1951,14 +2045,24 @@ export namespace DAL
             (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] std::optional<Domain> find(const K& raw_or_id) const
         {
-            return find(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
+            auto key = detail::try_make_single_key<KeyType>(raw_or_id);
+            if (!key)
+            {
+                return std::nullopt;
+            }
+            return find(*key);
         }
 
         template<typename... Ks>
             requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] std::optional<Domain> find(Ks&&... parts) const
         {
-            return find(KeyType{ std::forward<Ks>(parts)... });
+            auto key = detail::try_make_composite_key<KeyType>(parts...);
+            if (!key)
+            {
+                return std::nullopt;
+            }
+            return find(*key);
         }
 
         // Monadic read: finds an entity by its primary key or returns a structured DbError
@@ -1977,14 +2081,24 @@ export namespace DAL
             (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_find(const K& raw_or_id) const
         {
-            return try_find(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
+            auto key = detail::try_make_single_key<KeyType>(raw_or_id);
+            if (!key)
+            {
+                return std::unexpected<Core::DbError>{ key.error() };
+            }
+            return try_find(*key);
         }
 
         template<typename... Ks>
             requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_find(Ks&&... parts) const
         {
-            return try_find(KeyType{ std::forward<Ks>(parts)... });
+            auto key = detail::try_make_composite_key<KeyType>(parts...);
+            if (!key)
+            {
+                return std::unexpected<Core::DbError>{ key.error() };
+            }
+            return try_find(*key);
         }
 
         // Inserts a single entity into the database table (or stages if deferred)
@@ -2306,14 +2420,24 @@ export namespace DAL
             (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] std::expected<void, Core::DbError> stage_remove(const K& raw_or_id)
         {
-            return stage_remove(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
+            auto key = detail::try_make_single_key<KeyType>(raw_or_id);
+            if (!key)
+            {
+                return std::unexpected<Core::DbError>{ key.error() };
+            }
+            return stage_remove(*key);
         }
 
         template<typename... Ks>
             requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] std::expected<void, Core::DbError> stage_remove(Ks&&... parts)
         {
-            return stage_remove(KeyType{ std::forward<Ks>(parts)... });
+            auto key = detail::try_make_composite_key<KeyType>(parts...);
+            if (!key)
+            {
+                return std::unexpected<Core::DbError>{ key.error() };
+            }
+            return stage_remove(*key);
         }
 
         template<typename K>
@@ -2321,14 +2445,24 @@ export namespace DAL
             (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] std::expected<void, Core::DbError> remove(const K& raw_or_id)
         {
-            return remove(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
+            auto key = detail::try_make_single_key<KeyType>(raw_or_id);
+            if (!key)
+            {
+                return std::unexpected<Core::DbError>{ key.error() };
+            }
+            return remove(*key);
         }
 
         template<typename... Ks>
             requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] std::expected<void, Core::DbError> remove(Ks&&... parts)
         {
-            return remove(KeyType{ std::forward<Ks>(parts)... });
+            auto key = detail::try_make_composite_key<KeyType>(parts...);
+            if (!key)
+            {
+                return std::unexpected<Core::DbError>{ key.error() };
+            }
+            return remove(*key);
         }
 
         // Checks whether an entity with the given primary key exists
@@ -2342,14 +2476,24 @@ export namespace DAL
             (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] bool contains(const K& raw_or_id) const
         {
-            return contains(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
+            auto key = detail::try_make_single_key<KeyType>(raw_or_id);
+            if (!key)
+            {
+                return false;
+            }
+            return contains(*key);
         }
 
         template<typename... Ks>
             requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] bool contains(Ks&&... parts) const
         {
-            return contains(KeyType{ std::forward<Ks>(parts)... });
+            auto key = detail::try_make_composite_key<KeyType>(parts...);
+            if (!key)
+            {
+                return false;
+            }
+            return contains(*key);
         }
 
         // Returns total row count for this entity table with full error propagation
@@ -2791,14 +2935,24 @@ export namespace DAL
             (!std::same_as<std::remove_cvref_t<K>, KeyType>)
         [[nodiscard]] std::shared_ptr<Domain> find_tracked(const K& raw_or_id) const
         {
-            return find_tracked(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
+            auto key = detail::try_make_single_key<KeyType>(raw_or_id);
+            if (!key)
+            {
+                return nullptr;
+            }
+            return find_tracked(*key);
         }
 
         template<typename... Ks>
             requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] std::shared_ptr<Domain> find_tracked(Ks&&... parts) const
         {
-            return find_tracked(KeyType{ std::forward<Ks>(parts)... });
+            auto key = detail::try_make_composite_key<KeyType>(parts...);
+            if (!key)
+            {
+                return nullptr;
+            }
+            return find_tracked(*key);
         }
 
         // Returns a non-owning reference to the tracked entity in the change tracker if present (P2988).
@@ -2826,14 +2980,24 @@ export namespace DAL
             std::constructible_from<typename KeyType::key_type, K>
         [[nodiscard]] std::optional<Domain&> find_tracked_ref(const K& raw_or_id) const
         {
-            return find_tracked_ref(KeyType{ static_cast<typename KeyType::key_type>(raw_or_id) });
+            auto key = detail::try_make_single_key<KeyType>(raw_or_id);
+            if (!key)
+            {
+                return std::nullopt;
+            }
+            return find_tracked_ref(*key);
         }
 
         template<typename... Ks>
             requires Core::CompositeKeyType<KeyType> && (sizeof...(Ks) == KeyType::arity) && std::constructible_from<KeyType, Ks...>
         [[nodiscard]] std::optional<Domain&> find_tracked_ref(Ks&&... parts) const
         {
-            return find_tracked_ref(KeyType{ std::forward<Ks>(parts)... });
+            auto key = detail::try_make_composite_key<KeyType>(parts...);
+            if (!key)
+            {
+                return std::nullopt;
+            }
+            return find_tracked_ref(*key);
         }
 
         [[nodiscard]] std::vector<std::shared_ptr<Domain>> to_tracked_vector() const
@@ -3294,6 +3458,17 @@ export namespace DAL
                 if (DAL::Schema::dto_equals(current_dto, *baseline))
                 {
                     return std::nullopt;
+                }
+
+                const auto baseline_key = Schema::EntityMetadata<Domain, DTO>::extract_dto_key(*baseline);
+                const auto current_key = Schema::EntityMetadata<Domain, DTO>::extract_dto_key(current_dto);
+                if (current_key != baseline_key)
+                {
+                    return []() -> std::expected<void, Core::DbError>
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            "Cannot modify primary key of a tracked entity") };
+                    };
                 }
 
                 Domain updated_domain = *ptr;
