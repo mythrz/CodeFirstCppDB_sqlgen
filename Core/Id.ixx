@@ -1,4 +1,4 @@
-export module core:id;
+export module codefirst.core:id;
 
 import std;
 

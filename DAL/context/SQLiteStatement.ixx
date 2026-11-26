@@ -4,10 +4,10 @@ module;
 #include <sqlgen.hpp>
 #include <sqlite3.h>
 
-export module dal:sqlite_statement;
+export module codefirst.dal:sqlite_statement;
 
 import std;
-import core;
+import codefirst.core;
 import :schema_traits;
 
 export namespace DAL

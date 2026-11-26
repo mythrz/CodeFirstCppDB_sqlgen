@@ -1,4 +1,4 @@
-export module core:key;
+export module codefirst.core:key;
 
 import std;
 import :id;

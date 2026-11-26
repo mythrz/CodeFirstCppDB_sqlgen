@@ -1,7 +1,7 @@
-export module samples:iperson_repository;
+export module codefirst.samples:iperson_repository;
 
 import std;
-import core;
+import codefirst.core;
 import :person;
 
 export namespace Core

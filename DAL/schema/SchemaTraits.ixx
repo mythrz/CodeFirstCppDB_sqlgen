@@ -6,10 +6,10 @@ module;
 #include <sqlgen/Unique.hpp>
 #include <sqlgen/col.hpp>
 
-export module dal:schema_traits;
+export module codefirst.dal:schema_traits;
 
 import std;
-import core;
+import codefirst.core;
 
 export namespace DAL::Schema
 {

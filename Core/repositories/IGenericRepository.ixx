@@ -1,4 +1,4 @@
-export module core:igeneric_repository;
+export module codefirst.core:igeneric_repository;
 
 import std;
 import :db_error;

@@ -1,10 +1,10 @@
 module;
 #include <meta>
 
-export module dal:db_context;
+export module codefirst.dal:db_context;
 
 import std;
-import core;
+import codefirst.core;
 import :schema_traits;
 import :mappers;
 import :generic_repo;

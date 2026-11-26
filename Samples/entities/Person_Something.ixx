@@ -1,7 +1,7 @@
-export module samples:person_something;
+export module codefirst.samples:person_something;
 
 import std;
-import core;
+import codefirst.core;
 import :ids;
 
 export namespace Core

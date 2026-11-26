@@ -1,4 +1,4 @@
-export module samples;
+export module codefirst.samples;
 
 export import :ids;
 export import :person;

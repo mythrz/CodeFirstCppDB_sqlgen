@@ -1,7 +1,7 @@
-export module dal:generic_repo;
+export module codefirst.dal:generic_repo;
 
 import std;
-import core;
+import codefirst.core;
 import :mappers;
 import :schema_traits;
 import :entity_metadata;

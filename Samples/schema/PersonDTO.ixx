@@ -1,11 +1,11 @@
 module;
 #include <sqlgen/PrimaryKey.hpp>
 
-export module samples:schema_person;
+export module codefirst.samples:schema_person;
 
 import std;
-import core;
-import dal;
+import codefirst.core;
+import codefirst.dal;
 import :person;
 
 export namespace DAL::Schema

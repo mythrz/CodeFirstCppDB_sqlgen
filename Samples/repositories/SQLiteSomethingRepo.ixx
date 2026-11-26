@@ -1,8 +1,8 @@
-export module samples:sqlite_something_repo;
+export module codefirst.samples:sqlite_something_repo;
 
 import std;
-import core;
-import dal;
+import codefirst.core;
+import codefirst.dal;
 import :something;
 import :isomething_repository;
 import :schema_something;

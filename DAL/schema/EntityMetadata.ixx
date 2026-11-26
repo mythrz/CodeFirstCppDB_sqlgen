@@ -1,10 +1,10 @@
 module;
 #include <meta>
 
-export module dal:entity_metadata;
+export module codefirst.dal:entity_metadata;
 
 import std;
-import core;
+import codefirst.core;
 import :schema_traits;
 import :mappers;
 

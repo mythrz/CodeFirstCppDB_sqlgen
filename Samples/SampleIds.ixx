@@ -1,6 +1,6 @@
-export module samples:ids;
+export module codefirst.samples:ids;
 
-import core;
+import codefirst.core;
 
 export namespace Core
 {

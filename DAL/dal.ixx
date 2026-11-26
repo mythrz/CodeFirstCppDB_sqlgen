@@ -1,4 +1,4 @@
-export module dal;
+export module codefirst.dal;
 
 export import :schema_traits;
 export import :entity_metadata;

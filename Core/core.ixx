@@ -1,4 +1,4 @@
-export module core;
+export module codefirst.core;
 
 export import :id;
 export import :key;

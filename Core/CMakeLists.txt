@@ -21,6 +21,14 @@ target_sources(CodeFirstCppDB_Core
         repositories/DbError.cpp
 )
 
+if(CODEFIRST_LEGACY_MODULE_ALIASES)
+    target_sources(CodeFirstCppDB_Core
+        PUBLIC
+            FILE_SET CXX_MODULES FILES
+                legacy_core.ixx
+    )
+endif()
+
 target_compile_features(CodeFirstCppDB_Core PUBLIC cxx_std_26)
 
 target_compile_definitions(CodeFirstCppDB_Core

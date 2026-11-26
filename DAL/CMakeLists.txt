@@ -26,6 +26,14 @@ target_sources(CodeFirstCppDB_DAL
     PRIVATE
 )
 
+if(CODEFIRST_LEGACY_MODULE_ALIASES)
+    target_sources(CodeFirstCppDB_DAL
+        PUBLIC
+            FILE_SET CXX_MODULES FILES
+                legacy_dal.ixx
+    )
+endif()
+
 target_link_libraries(CodeFirstCppDB_DAL
     PUBLIC
         CodeFirstCppDB::Core

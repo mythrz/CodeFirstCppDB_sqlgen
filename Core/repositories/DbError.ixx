@@ -1,4 +1,4 @@
-export module core:db_error;
+export module codefirst.core:db_error;
 
 import std;
 

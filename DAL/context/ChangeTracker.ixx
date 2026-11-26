@@ -1,7 +1,7 @@
-export module dal:change_tracker;
+export module codefirst.dal:change_tracker;
 
 import std;
-import core;
+import codefirst.core;
 import :generic_repo;
 
 export namespace DAL

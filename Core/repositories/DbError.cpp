@@ -1,4 +1,4 @@
-module core;
+module codefirst.core;
 
 import std;
 

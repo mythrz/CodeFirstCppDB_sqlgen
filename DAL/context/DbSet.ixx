@@ -1,10 +1,10 @@
 module;
 #include <sqlgen.hpp>
 
-export module dal:db_set;
+export module codefirst.dal:db_set;
 
 import std;
-import core;
+import codefirst.core;
 import :schema_traits;
 import :entity_metadata;
 import :mappers;

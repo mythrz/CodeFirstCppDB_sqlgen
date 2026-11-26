@@ -4,10 +4,10 @@ module;
 #include <sqlgen/sqlite/to_sql.hpp>
 #include <sqlite3.h>
 
-export module dal:sqlite_connection;
+export module codefirst.dal:sqlite_connection;
 
 import std;
-import core;
+import codefirst.core;
 import :schema_traits;
 export import :sqlite_statement;
 

@@ -2,10 +2,10 @@ module;
 #include <meta>
 #include <rfl/internal/StringLiteral.hpp>
 
-export module dal:mappers;
+export module codefirst.dal:mappers;
 
 import std;
-import core;
+import codefirst.core;
 import :schema_traits;
 
 export namespace DAL::Mappers

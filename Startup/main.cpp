@@ -1,7 +1,7 @@
 import std;
-import core;
-import dal;
-import samples;
+import codefirst.core;
+import codefirst.dal;
+import codefirst.samples;
 
 // Application-specific DbContext coordinating entities (EF Core style)
 class AppDbContext : public DAL::DbContextBase<DAL::SQLiteConnection>

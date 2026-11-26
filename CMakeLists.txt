@@ -8,6 +8,7 @@ option(CODEFIRST_ENABLE_CONTRACTS "Enable C++26 pre/post contracts on invariant 
 option(CODEFIRST_BUILD_SHARED "Build CodeFirstCppDB libraries and bundled dependencies as shared libraries" OFF)
 option(CODEFIRST_ENABLE_STACKTRACE "Enable Debug std::stacktrace capture in Core::DbError" ON)
 option(CODEFIRST_INSTALL "Enable install() rules and CMake package config generation" OFF)
+option(CODEFIRST_LEGACY_MODULE_ALIASES "Export deprecated 'core'/'dal'/'samples' module aliases re-exporting 'codefirst.*'" ON)
 
 set(_codefirst_parent_disables_exceptions OFF)
 get_directory_property(_codefirst_dir_compile_options COMPILE_OPTIONS)

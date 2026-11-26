@@ -1,8 +1,8 @@
-export module samples:sqlite_person_repo;
+export module codefirst.samples:sqlite_person_repo;
 
 import std;
-import core;
-import dal;
+import codefirst.core;
+import codefirst.dal;
 import :person;
 import :iperson_repository;
 import :schema_person;

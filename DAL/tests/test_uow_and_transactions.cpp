@@ -3,9 +3,9 @@
 #include <sqlgen/sqlite.hpp>
 
 import std;
-import core;
-import dal;
-import samples;
+import codefirst.core;
+import codefirst.dal;
+import codefirst.samples;
 
 #include "TestSupport.hpp"
 

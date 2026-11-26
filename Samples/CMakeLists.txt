@@ -29,6 +29,16 @@ target_sources(CodeFirstCppDB_Samples
             samples.ixx
 )
 
+if(CODEFIRST_LEGACY_MODULE_ALIASES)
+    target_sources(CodeFirstCppDB_Samples
+        PUBLIC
+            FILE_SET CXX_MODULES
+            BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+            FILES
+                legacy_samples.ixx
+    )
+endif()
+
 target_link_libraries(CodeFirstCppDB_Samples
     PUBLIC
         CodeFirstCppDB::Core
