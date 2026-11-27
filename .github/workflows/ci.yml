@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -18,12 +21,12 @@ jobs:
   format-check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
       - name: Install clang-format
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pip
-          sudo python3 -m pip install --break-system-packages --upgrade "clang-format==21.*"
+          sudo python3 -m pip install --break-system-packages --upgrade "clang-format==21.1.8"
           hash -r
           clang-format --version
       - name: Verify C++ formatting
@@ -48,7 +51,7 @@ jobs:
           g++ --version
           cmake --version
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           submodules: recursive
 
@@ -74,12 +77,19 @@ jobs:
           g++ --version
           cmake --version
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           submodules: recursive
 
       - name: Mark workspace as safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Configure, build, and test Release with hardened compiler flags
+        run: |
+          cmake -S . -B build-hardened -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-fstack-protector-strong -Wformat -Wformat-security -D_FORTIFY_SOURCE=3"
+          cmake --build build-hardened -j 2
+          ctest --test-dir build-hardened --output-on-failure
 
       - name: Configure, build, and test with P2900 contracts enabled
         run: |
@@ -139,7 +149,7 @@ jobs:
       - name: Verify CODEFIRST_LEGACY_MODULE_ALIASES=OFF collision-free consumer & CMake isolation
         run: |
           mkdir -p /tmp/cf_no_legacy_consumer
-          cat <<EOF > /tmp/cf_no_legacy_consumer/CMakeLists.txt
+          cat <<'EOF' > /tmp/cf_no_legacy_consumer/CMakeLists.txt
           cmake_minimum_required(VERSION 4.5)
           project(no_legacy_consumer LANGUAGES CXX)
           set(CMAKE_CXX_STANDARD 26)
@@ -148,7 +158,7 @@ jobs:
           set(CMAKE_CXX_SCAN_FOR_MODULES ON)
           set(CMAKE_CXX_MODULE_STD ON)
           set(CODEFIRST_LEGACY_MODULE_ALIASES OFF CACHE BOOL "" FORCE)
-          add_subdirectory("$GITHUB_WORKSPACE" codefirst_dep)
+          add_subdirectory("${REPO_DIR}" codefirst_dep)
           # Verify vendored reflectcpp_DIR / SQLite3_DIR stubs did not pollute parent CMake cache.
           get_property(_rfl_cached CACHE reflectcpp_DIR PROPERTY VALUE)
           get_property(_sql_cached CACHE SQLite3_DIR PROPERTY VALUE)
@@ -179,14 +189,14 @@ jobs:
               return (conn.has_value() && AppCore::magic() == 42) ? 0 : 1;
           }
           EOF
-          cmake -S /tmp/cf_no_legacy_consumer -B /tmp/cf_no_legacy_consumer/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake -S /tmp/cf_no_legacy_consumer -B /tmp/cf_no_legacy_consumer/build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DREPO_DIR="$GITHUB_WORKSPACE"
           cmake --build /tmp/cf_no_legacy_consumer/build -j 2
           /tmp/cf_no_legacy_consumer/build/no_legacy_app
 
       - name: Verify external add_subdirectory multi-module consumer (legacy aliases ON)
         run: |
           mkdir -p /tmp/cf_subdir_consumer
-          cat <<EOF > /tmp/cf_subdir_consumer/CMakeLists.txt
+          cat <<'EOF' > /tmp/cf_subdir_consumer/CMakeLists.txt
           cmake_minimum_required(VERSION 4.5)
           project(subdir_consumer LANGUAGES CXX)
           set(CMAKE_CXX_STANDARD 26)
@@ -194,7 +204,7 @@ jobs:
           set(CMAKE_CXX_EXTENSIONS OFF)
           set(CMAKE_CXX_SCAN_FOR_MODULES ON)
           set(CMAKE_CXX_MODULE_STD ON)
-          add_subdirectory("$GITHUB_WORKSPACE" codefirst_dep)
+          add_subdirectory("${REPO_DIR}" codefirst_dep)
           # Non-DAL sibling module verifying CodeFirstCppDB::Core does not leak BMI flags onto unrelated modules.
           add_library(plain_mod STATIC)
           target_sources(plain_mod PUBLIC FILE_SET CXX_MODULES FILES plain.ixx)
@@ -239,14 +249,14 @@ jobs:
               return Data::check_db() && Plain::make_id(1).get() == 1 ? 0 : 1;
           }
           EOF
-          cmake -S /tmp/cf_subdir_consumer -B /tmp/cf_subdir_consumer/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake -S /tmp/cf_subdir_consumer -B /tmp/cf_subdir_consumer/build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DREPO_DIR="$GITHUB_WORKSPACE"
           cmake --build /tmp/cf_subdir_consumer/build -j 2
           /tmp/cf_subdir_consumer/build/subdir_consumer
 
       - name: Verify CODEFIRST_SQLITE_TARGET injection consumer
         run: |
           mkdir -p /tmp/cf_injected_sqlite
-          cat <<EOF > /tmp/cf_injected_sqlite/CMakeLists.txt
+          cat <<'EOF' > /tmp/cf_injected_sqlite/CMakeLists.txt
           cmake_minimum_required(VERSION 4.5)
           project(injected_sqlite_consumer LANGUAGES CXX)
           set(CMAKE_CXX_STANDARD 26)
@@ -257,10 +267,10 @@ jobs:
           find_library(SYS_SQLITE3_LIB sqlite3 REQUIRED)
           find_path(SYS_SQLITE3_INC sqlite3.h REQUIRED)
           add_library(custom_sqlite INTERFACE)
-          target_include_directories(custom_sqlite INTERFACE "\${SYS_SQLITE3_INC}")
-          target_link_libraries(custom_sqlite INTERFACE "\${SYS_SQLITE3_LIB}")
+          target_include_directories(custom_sqlite INTERFACE "${SYS_SQLITE3_INC}")
+          target_link_libraries(custom_sqlite INTERFACE "${SYS_SQLITE3_LIB}")
           set(CODEFIRST_SQLITE_TARGET custom_sqlite CACHE STRING "" FORCE)
-          add_subdirectory("$GITHUB_WORKSPACE" codefirst_dep)
+          add_subdirectory("${REPO_DIR}" codefirst_dep)
           add_executable(injected_app main.cpp)
           target_link_libraries(injected_app PRIVATE CodeFirstCppDB::DAL)
           EOF
@@ -273,6 +283,6 @@ jobs:
               return conn ? 0 : 1;
           }
           EOF
-          cmake -S /tmp/cf_injected_sqlite -B /tmp/cf_injected_sqlite/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake -S /tmp/cf_injected_sqlite -B /tmp/cf_injected_sqlite/build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DREPO_DIR="$GITHUB_WORKSPACE"
           cmake --build /tmp/cf_injected_sqlite/build -j 2
           /tmp/cf_injected_sqlite/build/injected_app

@@ -150,8 +150,16 @@ target_link_libraries(my_app PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
 
 - **Primary Fallible API (`[[nodiscard]] std::expected<T, Core::DbError>`):** All connection, DDL, mutation, transaction, and `try_*` read methods return `std::expected<T, Core::DbError>` (`SQLiteConnection::connect`, `ensure_created`, `add`, `add_returning`, `update`, `remove`, `upsert`, `try_find`, `try_to_vector`, `try_first_or_default`, `try_count`, `try_any`, `try_sum`, `try_avg`, `save_changes`, `transaction`, etc.).
 - **Convenience Query Wrappers:** Unprefixed read helpers (`find`, `to_vector`, `first_or_default`, `count`, `any`) return safe defaults (`std::nullopt`, `{}`, `0`, `false`) if an underlying error occurs. Prefer `try_*` whenever errors must be inspected or propagated.
-- **Strict Numeric & Query Semantics:** Typed reads validate SQLite storage classes, reject trailing garbage or out-of-range narrowing, reject `std::uint64_t > INT64_MAX` writes, widen `try_sum<Col>()` to 64-bit integer / `double`, and reject `limit(0)` / `page(0)` with `ConstraintViolation` (or P2900 contract violation when `CODEFIRST_ENABLE_CONTRACTS=ON`).
-- **Diagnostics & Bound Queries:** Core CRUD, `upsert`, and `INSERT ... RETURNING` use parameterized `sqlite3_stmt` bindings directly. For `WHERE` or `SET` predicates involving subnormal/high-precision or non-finite floating-point values, prefer `query_rows` / `execute_prepared` with bound `DAL::DynamicCell` parameters (as upstream `sqlgen`'s SQL literal serializer uses `std::to_string`).
+- **Strict Numeric & Query Semantics:** Typed reads validate SQLite storage classes (`std::string` rejects raw `SQLITE_BLOB`, `std::vector<std::byte>` requires `SQLITE_BLOB`), reject trailing garbage or out-of-range narrowing, reject `std::uint64_t > INT64_MAX` writes/predicates and `limit`/`offset > INT64_MAX`, widen `try_sum<Col>()` to 64-bit integer / `double`, and reject `limit(0)` / `page(0)` with `ConstraintViolation` (or P2900 contract violation when `CODEFIRST_ENABLE_CONTRACTS=ON`).
+- **Parameterized Queries & Redacted Diagnostics:** All CRUD, `upsert`, `INSERT ... RETURNING`, `DbQuery` projections/aggregates, bulk `update_where`, and bulk/paginated `remove_where` statements compile into `?`-bound `sqlite3_stmt` queries (including subnormal/IEEE-754 floats and long embedded-NUL strings, with zero SQL literal interpolation of runtime values). Decode and range errors report column indices and byte lengths without echoing raw cell or key values.
+
+## Security & Hardening
+
+See [SECURITY.md](SECURITY.md) for the full threat model and vulnerability reporting policy.
+
+- **Hardened `SQLiteConnectionOptions` defaults:** `SQLiteConnection::connect(...)` enables `SQLITE_DBCONFIG_DEFENSIVE` (`defensive = true`), disables `TRUSTED_SCHEMA` (`trusted_schema = false`), disables double-quoted string literals (`allow_dqs = false`), disables extension loading (`allow_load_extension = false`), blocks `ATTACH DATABASE` (`max_attached = 0`), and enables `SQLITE_OPEN_NOFOLLOW` (`no_follow = true`). Least-privilege open options are also available: `read_only = true`, `create_if_missing = false`, and (on POSIX) `owner_only_permissions = true` (`0600`).
+- **Safe substring / prefix / suffix filters:** For untrusted user input, use `where_contains`, `where_starts_with`, and `where_ends_with` (plus `or_where_*` variants), which escape `%`, `_`, and `\` using `ESCAPE '\'`. Reserve `where_like` / `where_not_like` for caller-controlled SQL wildcard patterns.
+- **Raw SQL trust boundary:** `execute_raw(...)` runs multi-statement SQL via `sqlite3_exec` and is intended strictly for trusted migration/DDL scripts. For ad-hoc runtime queries, use `query_rows(sql, params)` or `execute_prepared(sql, params)` with single-statement preparation and bound `DAL::DynamicCell` parameters.
 
 ## Unit of Work, Change Tracking & Handle Lifetimes
 
@@ -175,8 +183,8 @@ if (auto res = db.save_changes(); !res)
 ```
 
 - **Retained-handle lifetimes & eviction:**
-  - `find_tracked(...)` returns `std::shared_ptr<Domain>` owned by the change tracker; `find_tracked_ref(...)` returns `std::optional<Domain&>` directly into that entry (returning `std::nullopt` once the owning `DbContext` is destroyed).
-  - Explicit `update(copy)` / `upsert(copy)` with a modified separate value replaces the tracker's internal instance so `save_changes()` does not revert the explicit write; re-fetch handles via `find_tracked(...)` after explicit value overwrites, `remove(...)`, bulk `update_where` / `remove_where` (which evicts only the affected primary keys), or `ensure_deleted()` / `clear_change_tracker()`.
+  - `find_tracked(...)` returns `std::shared_ptr<Domain>` owned by the change tracker; prefer `find_tracked(...)` whenever a handle spans multiple statements or crosses mutating calls.
+  - `find_tracked_ref(...)` returns a non-owning `std::optional<Domain&>` directly into the tracker entry (returning `std::nullopt` once the owning `DbContext` is destroyed). Any operation that replaces, evicts, or clears that tracker entry — including explicit `update(copy)` / `upsert(copy)`, `remove(...)`, bulk `update_where` / `remove_where`, `ensure_deleted()`, `clear_change_tracker()`, or `DbContext` destruction — invalidates previously obtained `Domain&` references.
   - Primary-key fields of tracked entities are immutable; modifying a tracked entity's primary key fails `save_changes()` with `ConstraintViolation`.
   - Context-bound `DbSet` copies outliving their owning `DbContext` reject all mutating calls (`add`, `update`, `remove`, `upsert`, `remove_where`, `update_where`) with `ConnectionError`.
 
