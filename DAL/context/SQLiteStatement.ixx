@@ -2,6 +2,8 @@ module;
 #include <meta>
 #include <rfl.hpp>
 #include <sqlgen.hpp>
+#include <sqlgen/transpilation/to_condition.hpp>
+#include <sqlgen/transpilation/to_sql.hpp>
 #include <sqlite3.h>
 
 export module codefirst.dal:sqlite_statement;
@@ -277,6 +279,1172 @@ export namespace DAL
             return out;
         }
 
+        struct BoundSqlQuery
+        {
+            std::string sql;
+            std::vector<DynamicCell> params;
+        };
+
+        struct EscapedLikeCond
+        {
+            std::string column_name;
+            std::string escaped_pattern;
+            bool negated{ false };
+        };
+
+        template<typename Left, typename Right>
+        struct AndCond
+        {
+            Left left;
+            Right right;
+        };
+
+        template<typename Left, typename Right>
+        struct OrCond
+        {
+            Left left;
+            Right right;
+        };
+
+        template<typename T>
+        inline constexpr bool is_custom_where_cond_v = false;
+        template<>
+        inline constexpr bool is_custom_where_cond_v<EscapedLikeCond> = true;
+        template<typename L, typename R>
+        inline constexpr bool is_custom_where_cond_v<AndCond<L, R>> = true;
+        template<typename L, typename R>
+        inline constexpr bool is_custom_where_cond_v<OrCond<L, R>> = true;
+
+        [[nodiscard]] inline std::string escape_like_literal(std::string_view input)
+        {
+            std::string out;
+            out.reserve(input.size());
+            for (const char ch : input)
+            {
+                if (ch == '\\' || ch == '%' || ch == '_')
+                {
+                    out.push_back('\\');
+                }
+                out.push_back(ch);
+            }
+            return out;
+        }
+
+        // Formats a string literal safely for DDL clauses (e.g. CREATE INDEX ... WHERE) where SQLite
+        // forbids '?' bind parameters. Strings containing embedded NUL bytes use O(1)-depth
+        // CAST(X'...' AS TEXT) hex encoding instead of nested '|| char(0) ||' concatenation chains.
+        [[nodiscard]] inline std::string format_ddl_string_literal(std::string_view sv)
+        {
+            if (sv.find('\0') != std::string_view::npos)
+            {
+                static constexpr char kHex[] = "0123456789ABCDEF";
+                std::string out;
+                out.reserve(16 + sv.size() * 2);
+                out += "CAST(X'";
+                for (const char raw_ch : sv)
+                {
+                    const unsigned char b = static_cast<unsigned char>(raw_ch);
+                    out.push_back(kHex[b >> 4]);
+                    out.push_back(kHex[b & 0x0Fu]);
+                }
+                out += "' AS TEXT)";
+                return out;
+            }
+            std::string out;
+            out.reserve(sv.size() + 2);
+            out.push_back('\'');
+            for (const char ch : sv)
+            {
+                if (ch == '\'')
+                {
+                    out.push_back('\'');
+                }
+                out.push_back(ch);
+            }
+            out.push_back('\'');
+            return out;
+        }
+
+        [[nodiscard]] inline std::string format_sqlite_duration(const sqlgen::dynamic::Duration& d)
+        {
+            const std::string prefix = (d.val >= 0) ? "+" : "-";
+            const std::uint64_t val = (d.val < 0) ? (static_cast<std::uint64_t>(-(d.val + 1)) + 1ULL) : static_cast<std::uint64_t>(d.val);
+            switch (d.unit)
+            {
+            case sqlgen::dynamic::TimeUnit::milliseconds:
+                {
+                    const auto h = val / 3600000ULL;
+                    const auto m = (val / 60000ULL) % 60ULL;
+                    const auto s = (val / 1000ULL) % 60ULL;
+                    const auto ms = val % 1000ULL;
+                    return std::format("{}{:02}:{:02}:{:02}.{:03}", prefix, h, m, s, ms);
+                }
+            case sqlgen::dynamic::TimeUnit::weeks:
+                return std::format("{}{} days", prefix, val * 7ULL);
+            default:
+                return std::format("{}{} {}", prefix, val, rfl::enum_to_string(d.unit));
+            }
+        }
+
+        [[nodiscard]] inline std::string format_sqlite_dynamic_type(const sqlgen::dynamic::Type& t)
+        {
+            return t.visit(
+                [](const auto& v) -> std::string
+                {
+                    using T = std::remove_cvref_t<decltype(v)>;
+                    if constexpr (
+                        std::is_same_v<T, sqlgen::dynamic::types::Boolean> || std::is_same_v<T, sqlgen::dynamic::types::Int8> ||
+                        std::is_same_v<T, sqlgen::dynamic::types::Int16> || std::is_same_v<T, sqlgen::dynamic::types::Int32> ||
+                        std::is_same_v<T, sqlgen::dynamic::types::Int64> || std::is_same_v<T, sqlgen::dynamic::types::UInt8> ||
+                        std::is_same_v<T, sqlgen::dynamic::types::UInt16> || std::is_same_v<T, sqlgen::dynamic::types::UInt32> ||
+                        std::is_same_v<T, sqlgen::dynamic::types::UInt64>)
+                    {
+                        return "INTEGER";
+                    }
+                    else if constexpr (
+                        std::is_same_v<T, sqlgen::dynamic::types::Float32> || std::is_same_v<T, sqlgen::dynamic::types::Float64>)
+                    {
+                        return "REAL";
+                    }
+                    else if constexpr (std::is_same_v<T, sqlgen::dynamic::types::JSON>)
+                    {
+                        return "JSONB";
+                    }
+                    else if constexpr (std::is_same_v<T, sqlgen::dynamic::types::Dynamic>)
+                    {
+                        return v.type_name;
+                    }
+                    else
+                    {
+                        return "TEXT";
+                    }
+                });
+        }
+
+        // Compiles sqlgen::dynamic AST nodes into SQLite SQL with true '?' bind parameters
+        // (or hardened DDL-inline literals when inline_ddl_literals == true for CREATE INDEX ... WHERE).
+        class SqlAstCompiler
+        {
+        public:
+            explicit SqlAstCompiler(bool inline_ddl_literals = false) noexcept
+                : inline_ddl_(inline_ddl_literals)
+            {
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_value(const sqlgen::dynamic::Value& val)
+            {
+                return val.val.visit(
+                    [this](const auto& v) -> std::expected<std::string, Core::DbError>
+                    {
+                        using T = std::remove_cvref_t<decltype(v)>;
+                        if constexpr (std::is_same_v<T, sqlgen::dynamic::Null>)
+                        {
+                            return std::string{ "NULL" };
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Boolean>)
+                        {
+                            if (inline_ddl_)
+                            {
+                                return std::string{ v.val ? "1" : "0" };
+                            }
+                            params_.emplace_back(std::int64_t{ v.val ? 1 : 0 });
+                            return std::string{ "?" };
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Integer>)
+                        {
+                            if (inline_ddl_)
+                            {
+                                return std::to_string(v.val);
+                            }
+                            params_.emplace_back(static_cast<std::int64_t>(v.val));
+                            return std::string{ "?" };
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Float>)
+                        {
+                            if (inline_ddl_)
+                            {
+                                if (std::isnan(v.val) || std::isinf(v.val))
+                                {
+                                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                                        "Non-finite floating-point literal is not allowed in DDL index predicate") };
+                                }
+                                return std::format("{:.17g}", v.val);
+                            }
+                            params_.emplace_back(static_cast<double>(v.val));
+                            return std::string{ "?" };
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::String>)
+                        {
+                            if (inline_ddl_)
+                            {
+                                return format_ddl_string_literal(v.val);
+                            }
+                            params_.emplace_back(v.val);
+                            return std::string{ "?" };
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Timestamp>)
+                        {
+                            if (inline_ddl_)
+                            {
+                                return std::to_string(v.seconds_since_unix);
+                            }
+                            params_.emplace_back(static_cast<std::int64_t>(v.seconds_since_unix));
+                            return std::string{ "?" };
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Duration>)
+                        {
+                            const std::string dur = format_sqlite_duration(v);
+                            if (inline_ddl_)
+                            {
+                                return format_ddl_string_literal(dur);
+                            }
+                            params_.emplace_back(dur);
+                            return std::string{ "?" };
+                        }
+                    });
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_column(const sqlgen::dynamic::Column& c)
+            {
+                if (auto chk = validate_ddl_identifier(c.name); !chk)
+                {
+                    return std::unexpected<Core::DbError>{ chk.error() };
+                }
+                return c.alias_or_table.visit(
+                    [&](const auto& a) -> std::expected<std::string, Core::DbError>
+                    {
+                        using AliasType = std::remove_cvref_t<decltype(a)>;
+                        if constexpr (std::is_same_v<AliasType, sqlgen::dynamic::alias_or_table::Alias>)
+                        {
+                            if (auto chk = validate_ddl_identifier(a.name); !chk)
+                            {
+                                return std::unexpected<Core::DbError>{ chk.error() };
+                            }
+                            return std::format("\"{}\".\"{}\"", a.name, c.name);
+                        }
+                        else if constexpr (std::is_same_v<AliasType, sqlgen::dynamic::alias_or_table::Table>)
+                        {
+                            if (auto chk = validate_ddl_identifier(a.name); !chk)
+                            {
+                                return std::unexpected<Core::DbError>{ chk.error() };
+                            }
+                            return std::format("\"{}\".\"{}\"", a.name, c.name);
+                        }
+                        else
+                        {
+                            return std::format("\"{}\"", c.name);
+                        }
+                    });
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_column_or_value(const sqlgen::dynamic::ColumnOrValue& cov)
+            {
+                return cov.visit(
+                    [this](const auto& item) -> std::expected<std::string, Core::DbError>
+                    {
+                        using T = std::remove_cvref_t<decltype(item)>;
+                        if constexpr (std::is_same_v<T, sqlgen::dynamic::Column>)
+                        {
+                            return compile_column(item);
+                        }
+                        else
+                        {
+                            return compile_value(item);
+                        }
+                    });
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_aggregation(const sqlgen::dynamic::Aggregation& agg)
+            {
+                return agg.val.visit(
+                    [this](const auto& a) -> std::expected<std::string, Core::DbError>
+                    {
+                        using T = std::remove_cvref_t<decltype(a)>;
+                        if constexpr (std::is_same_v<T, sqlgen::dynamic::Aggregation::Avg>)
+                        {
+                            auto op = compile_operation(*a.val);
+                            if (!op)
+                            {
+                                return std::unexpected<Core::DbError>{ op.error() };
+                            }
+                            return std::format("AVG({})", *op);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Aggregation::Count>)
+                        {
+                            if (!a.val)
+                            {
+                                return std::string{ "COUNT(*)" };
+                            }
+                            auto col = compile_column(*a.val);
+                            if (!col)
+                            {
+                                return std::unexpected<Core::DbError>{ col.error() };
+                            }
+                            return std::format("COUNT({}{})", a.distinct ? "DISTINCT " : "", *col);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Aggregation::Max>)
+                        {
+                            auto op = compile_operation(*a.val);
+                            if (!op)
+                            {
+                                return std::unexpected<Core::DbError>{ op.error() };
+                            }
+                            return std::format("MAX({})", *op);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Aggregation::Min>)
+                        {
+                            auto op = compile_operation(*a.val);
+                            if (!op)
+                            {
+                                return std::unexpected<Core::DbError>{ op.error() };
+                            }
+                            return std::format("MIN({})", *op);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Aggregation::Sum>)
+                        {
+                            auto op = compile_operation(*a.val);
+                            if (!op)
+                            {
+                                return std::unexpected<Core::DbError>{ op.error() };
+                            }
+                            return std::format("SUM({})", *op);
+                        }
+                    });
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_operation(const sqlgen::dynamic::Operation& op)
+            {
+                auto unary =
+                    [this](const auto& node, std::string_view prefix, std::string_view suffix) -> std::expected<std::string, Core::DbError>
+                {
+                    auto a = compile_operation(*node.op1);
+                    if (!a)
+                    {
+                        return std::unexpected<Core::DbError>{ a.error() };
+                    }
+                    return std::format("{}{}{}", prefix, *a, suffix);
+                };
+                auto binary = [this](const auto& node, std::string_view prefix, std::string_view mid, std::string_view suffix)
+                    -> std::expected<std::string, Core::DbError>
+                {
+                    auto a = compile_operation(*node.op1);
+                    if (!a)
+                    {
+                        return std::unexpected<Core::DbError>{ a.error() };
+                    }
+                    auto b = compile_operation(*node.op2);
+                    if (!b)
+                    {
+                        return std::unexpected<Core::DbError>{ b.error() };
+                    }
+                    return std::format("{}{}{}{}{}", prefix, *a, mid, *b, suffix);
+                };
+
+                return op.val.visit(
+                    [this, &unary, &binary](const auto& s) -> std::expected<std::string, Core::DbError>
+                    {
+                        using T = std::remove_cvref_t<decltype(s)>;
+
+                        if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Abs>)
+                        {
+                            return unary(s, "abs(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Aggregation>)
+                        {
+                            return compile_aggregation(s);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Cast>)
+                        {
+                            auto a = compile_operation(*s.op1);
+                            if (!a)
+                            {
+                                return std::unexpected<Core::DbError>{ a.error() };
+                            }
+                            return std::format("cast({} as {})", *a, format_sqlite_dynamic_type(s.target_type));
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Ceil>)
+                        {
+                            return unary(s, "ceil(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Coalesce>)
+                        {
+                            std::string out = "coalesce(";
+                            for (std::size_t i = 0; i < s.ops.size(); ++i)
+                            {
+                                if (i > 0)
+                                {
+                                    out += ", ";
+                                }
+                                auto part = compile_operation(*s.ops[i]);
+                                if (!part)
+                                {
+                                    return std::unexpected<Core::DbError>{ part.error() };
+                                }
+                                out += *part;
+                            }
+                            out += ")";
+                            return out;
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Column>)
+                        {
+                            return compile_column(s);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Concat>)
+                        {
+                            std::string out = "(";
+                            for (std::size_t i = 0; i < s.ops.size(); ++i)
+                            {
+                                if (i > 0)
+                                {
+                                    out += " || ";
+                                }
+                                auto part = compile_operation(*s.ops[i]);
+                                if (!part)
+                                {
+                                    return std::unexpected<Core::DbError>{ part.error() };
+                                }
+                                out += *part;
+                            }
+                            out += ")";
+                            return out;
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Cos>)
+                        {
+                            return unary(s, "cos(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Day>)
+                        {
+                            return unary(s, "cast(strftime('%d', ", ") as INT)");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::DaysBetween>)
+                        {
+                            auto b = compile_operation(*s.op2);
+                            if (!b)
+                            {
+                                return std::unexpected<Core::DbError>{ b.error() };
+                            }
+                            auto a = compile_operation(*s.op1);
+                            if (!a)
+                            {
+                                return std::unexpected<Core::DbError>{ a.error() };
+                            }
+                            return std::format("julianday({}) - julianday({})", *b, *a);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::DatePlusDuration>)
+                        {
+                            auto dt = compile_operation(*s.date);
+                            if (!dt)
+                            {
+                                return std::unexpected<Core::DbError>{ dt.error() };
+                            }
+                            std::string out = std::format("datetime({}", *dt);
+                            for (const auto& d : s.durations)
+                            {
+                                auto dv = compile_value(sqlgen::dynamic::Value{ d });
+                                if (!dv)
+                                {
+                                    return std::unexpected<Core::DbError>{ dv.error() };
+                                }
+                                out += ", ";
+                                out += *dv;
+                            }
+                            out += ")";
+                            return out;
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Divides>)
+                        {
+                            return binary(s, "(", ") / (", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Exp>)
+                        {
+                            return unary(s, "exp(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Floor>)
+                        {
+                            return unary(s, "floor(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Hour>)
+                        {
+                            return unary(s, "cast(strftime('%H', ", ") as INT)");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Length>)
+                        {
+                            return unary(s, "length(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Ln>)
+                        {
+                            return unary(s, "ln(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Log2>)
+                        {
+                            return unary(s, "log2(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Lower>)
+                        {
+                            return unary(s, "lower(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::LTrim>)
+                        {
+                            return binary(s, "ltrim(", ", ", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Minus>)
+                        {
+                            return binary(s, "(", ") - (", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Minute>)
+                        {
+                            return unary(s, "cast(strftime('%M', ", ") as INT)");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Mod>)
+                        {
+                            return binary(s, "mod(", ", ", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Month>)
+                        {
+                            return unary(s, "cast(strftime('%m', ", ") as INT)");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Multiplies>)
+                        {
+                            return binary(s, "(", ") * (", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Plus>)
+                        {
+                            return binary(s, "(", ") + (", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Replace>)
+                        {
+                            auto a = compile_operation(*s.op1);
+                            if (!a)
+                            {
+                                return std::unexpected<Core::DbError>{ a.error() };
+                            }
+                            auto b = compile_operation(*s.op2);
+                            if (!b)
+                            {
+                                return std::unexpected<Core::DbError>{ b.error() };
+                            }
+                            auto c = compile_operation(*s.op3);
+                            if (!c)
+                            {
+                                return std::unexpected<Core::DbError>{ c.error() };
+                            }
+                            return std::format("replace({}, {}, {})", *a, *b, *c);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Round>)
+                        {
+                            return binary(s, "round(", ", ", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::RTrim>)
+                        {
+                            return binary(s, "rtrim(", ", ", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Second>)
+                        {
+                            return unary(s, "cast(strftime('%S', ", ") as INT)");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Sin>)
+                        {
+                            return unary(s, "sin(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Sqrt>)
+                        {
+                            return unary(s, "sqrt(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Tan>)
+                        {
+                            return unary(s, "tan(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Trim>)
+                        {
+                            return binary(s, "trim(", ", ", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Unixepoch>)
+                        {
+                            return unary(s, "unixepoch(", ", 'subsec')");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Upper>)
+                        {
+                            return unary(s, "upper(", ")");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Value>)
+                        {
+                            return compile_value(s);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Weekday>)
+                        {
+                            return unary(s, "cast(strftime('%w', ", ") as INT)");
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::dynamic::Operation::Year>)
+                        {
+                            return unary(s, "cast(strftime('%Y', ", ") as INT)");
+                        }
+                    });
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_condition(const sqlgen::dynamic::Condition& cond)
+            {
+                auto cmp = [this](const auto& node, std::string_view op_sym) -> std::expected<std::string, Core::DbError>
+                {
+                    auto lhs = compile_operation(node.op1);
+                    if (!lhs)
+                    {
+                        return std::unexpected<Core::DbError>{ lhs.error() };
+                    }
+                    auto rhs = compile_operation(node.op2);
+                    if (!rhs)
+                    {
+                        return std::unexpected<Core::DbError>{ rhs.error() };
+                    }
+                    return std::format("{} {} {}", *lhs, op_sym, *rhs);
+                };
+
+                return cond.val.visit(
+                    [this, &cmp](const auto& c) -> std::expected<std::string, Core::DbError>
+                    {
+                        using C = std::remove_cvref_t<decltype(c)>;
+
+                        if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::And>)
+                        {
+                            auto a = compile_condition(*c.cond1);
+                            if (!a)
+                            {
+                                return std::unexpected<Core::DbError>{ a.error() };
+                            }
+                            auto b = compile_condition(*c.cond2);
+                            if (!b)
+                            {
+                                return std::unexpected<Core::DbError>{ b.error() };
+                            }
+                            return std::format("({}) AND ({})", *a, *b);
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::Or>)
+                        {
+                            auto a = compile_condition(*c.cond1);
+                            if (!a)
+                            {
+                                return std::unexpected<Core::DbError>{ a.error() };
+                            }
+                            auto b = compile_condition(*c.cond2);
+                            if (!b)
+                            {
+                                return std::unexpected<Core::DbError>{ b.error() };
+                            }
+                            return std::format("({}) OR ({})", *a, *b);
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::Not>)
+                        {
+                            auto inner = compile_condition(*c.cond);
+                            if (!inner)
+                            {
+                                return std::unexpected<Core::DbError>{ inner.error() };
+                            }
+                            return std::format("NOT ({})", *inner);
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::BooleanColumnOrValue>)
+                        {
+                            return compile_column_or_value(c.col_or_val);
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::Equal>)
+                        {
+                            return cmp(c, "=");
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::NotEqual>)
+                        {
+                            return cmp(c, "!=");
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::GreaterEqual>)
+                        {
+                            return cmp(c, ">=");
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::GreaterThan>)
+                        {
+                            return cmp(c, ">");
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::LesserEqual>)
+                        {
+                            return cmp(c, "<=");
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::LesserThan>)
+                        {
+                            return cmp(c, "<");
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::IsNull>)
+                        {
+                            auto a = compile_operation(c.op);
+                            if (!a)
+                            {
+                                return std::unexpected<Core::DbError>{ a.error() };
+                            }
+                            return std::format("{} IS NULL", *a);
+                        }
+                        else if constexpr (std::is_same_v<C, sqlgen::dynamic::Condition::IsNotNull>)
+                        {
+                            auto a = compile_operation(c.op);
+                            if (!a)
+                            {
+                                return std::unexpected<Core::DbError>{ a.error() };
+                            }
+                            return std::format("{} IS NOT NULL", *a);
+                        }
+                        else if constexpr (
+                            std::is_same_v<C, sqlgen::dynamic::Condition::Like> || std::is_same_v<C, sqlgen::dynamic::Condition::NotLike>)
+                        {
+                            auto a = compile_operation(c.op);
+                            if (!a)
+                            {
+                                return std::unexpected<Core::DbError>{ a.error() };
+                            }
+                            auto pat = compile_value(c.pattern);
+                            if (!pat)
+                            {
+                                return std::unexpected<Core::DbError>{ pat.error() };
+                            }
+                            constexpr std::string_view kw = std::is_same_v<C, sqlgen::dynamic::Condition::Like> ? "LIKE" : "NOT LIKE";
+                            return std::format("{} {} {}", *a, kw, *pat);
+                        }
+                        else if constexpr (
+                            std::is_same_v<C, sqlgen::dynamic::Condition::In> || std::is_same_v<C, sqlgen::dynamic::Condition::NotIn>)
+                        {
+                            auto a = compile_operation(c.op);
+                            if (!a)
+                            {
+                                return std::unexpected<Core::DbError>{ a.error() };
+                            }
+                            constexpr std::string_view kw = std::is_same_v<C, sqlgen::dynamic::Condition::In> ? "IN" : "NOT IN";
+                            std::string out = std::format("{} {} (", *a, kw);
+                            for (std::size_t i = 0; i < c.patterns.size(); ++i)
+                            {
+                                if (i > 0)
+                                {
+                                    out += ", ";
+                                }
+                                auto pv = compile_value(c.patterns[i]);
+                                if (!pv)
+                                {
+                                    return std::unexpected<Core::DbError>{ pv.error() };
+                                }
+                                out += *pv;
+                            }
+                            out += ")";
+                            return out;
+                        }
+                    });
+            }
+
+            template<typename DTO, typename CondT>
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_where_expr(const CondT& cond)
+            {
+                using CleanC = std::remove_cvref_t<CondT>;
+                if constexpr (std::is_same_v<CleanC, EscapedLikeCond>)
+                {
+                    if (auto chk = validate_ddl_identifier(cond.column_name); !chk)
+                    {
+                        return std::unexpected<Core::DbError>{ chk.error() };
+                    }
+                    std::string pat_sql;
+                    if (inline_ddl_)
+                    {
+                        pat_sql = format_ddl_string_literal(cond.escaped_pattern);
+                    }
+                    else
+                    {
+                        params_.emplace_back(cond.escaped_pattern);
+                        pat_sql = "?";
+                    }
+                    return std::format("\"{}\" {} {} ESCAPE '\\'", cond.column_name, cond.negated ? "NOT LIKE" : "LIKE", pat_sql);
+                }
+                else if constexpr (requires {
+                                       cond.left;
+                                       cond.right;
+                                   })
+                {
+                    auto lhs = compile_where_expr<DTO>(cond.left);
+                    if (!lhs)
+                    {
+                        return std::unexpected<Core::DbError>{ lhs.error() };
+                    }
+                    auto rhs = compile_where_expr<DTO>(cond.right);
+                    if (!rhs)
+                    {
+                        return std::unexpected<Core::DbError>{ rhs.error() };
+                    }
+                    if constexpr (std::is_same_v<CleanC, AndCond<decltype(cond.left), decltype(cond.right)>>)
+                    {
+                        return std::format("({}) AND ({})", *lhs, *rhs);
+                    }
+                    else
+                    {
+                        return std::format("({}) OR ({})", *lhs, *rhs);
+                    }
+                }
+                else
+                {
+                    const sqlgen::dynamic::Condition dyn_cond = sqlgen::transpilation::ToCondition<DTO, CleanC>{}(cond);
+                    return compile_condition(dyn_cond);
+                }
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_table(const sqlgen::dynamic::Table& t)
+            {
+                if (auto chk = validate_ddl_identifier(t.name); !chk)
+                {
+                    return std::unexpected<Core::DbError>{ chk.error() };
+                }
+                if (t.schema)
+                {
+                    if (auto chk = validate_ddl_identifier(*t.schema); !chk)
+                    {
+                        return std::unexpected<Core::DbError>{ chk.error() };
+                    }
+                    return std::format("\"{}\".\"{}\"", *t.schema, t.name);
+                }
+                return std::format("\"{}\"", t.name);
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_table_or_query(
+                const sqlgen::dynamic::SelectFrom::TableOrQueryType& toq)
+            {
+                return toq.visit(
+                    [this](const auto& item) -> std::expected<std::string, Core::DbError>
+                    {
+                        using T = std::remove_cvref_t<decltype(item)>;
+                        if constexpr (std::is_same_v<T, sqlgen::dynamic::Table>)
+                        {
+                            return compile_table(item);
+                        }
+                        else if constexpr (std::is_same_v<T, sqlgen::Ref<sqlgen::dynamic::SelectFrom::Union>>)
+                        {
+                            auto u = compile_union(*item);
+                            if (!u)
+                            {
+                                return std::unexpected<Core::DbError>{ u.error() };
+                            }
+                            return std::format("({})", *u);
+                        }
+                        else
+                        {
+                            auto s = compile_select_from(*item, false, {});
+                            if (!s)
+                            {
+                                return std::unexpected<Core::DbError>{ s.error() };
+                            }
+                            return std::format("({})", *s);
+                        }
+                    });
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_union(const sqlgen::dynamic::SelectFrom::Union& u)
+            {
+                std::string cols;
+                for (std::size_t i = 0; i < u.columns.size(); ++i)
+                {
+                    if (auto chk = validate_ddl_identifier(u.columns[i]); !chk)
+                    {
+                        return std::unexpected<Core::DbError>{ chk.error() };
+                    }
+                    if (i > 0)
+                    {
+                        cols += ", ";
+                    }
+                    cols += std::format("\"{}\"", u.columns[i]);
+                }
+                std::string out;
+                const std::string_view sep = u.all ? " UNION ALL " : " UNION ";
+                for (std::size_t i = 0; i < u.selects->size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        out += sep;
+                    }
+                    auto sel = compile_select_from((*u.selects)[i], false, {});
+                    if (!sel)
+                    {
+                        return std::unexpected<Core::DbError>{ sel.error() };
+                    }
+                    out += std::format("SELECT {} FROM ({})", cols, *sel);
+                }
+                return out;
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_select_from(
+                const sqlgen::dynamic::SelectFrom& stmt,
+                bool select_rowid_only = false,
+                std::function<std::expected<std::string, Core::DbError>()> injected_where = {})
+            {
+                std::string out = "SELECT ";
+                if (select_rowid_only)
+                {
+                    out += "rowid";
+                }
+                else
+                {
+                    for (std::size_t i = 0; i < stmt.fields.size(); ++i)
+                    {
+                        if (i > 0)
+                        {
+                            out += ", ";
+                        }
+                        auto f = compile_operation(stmt.fields[i].val);
+                        if (!f)
+                        {
+                            return std::unexpected<Core::DbError>{ f.error() };
+                        }
+                        out += *f;
+                        if (stmt.fields[i].as)
+                        {
+                            if (auto chk = validate_ddl_identifier(*stmt.fields[i].as); !chk)
+                            {
+                                return std::unexpected<Core::DbError>{ chk.error() };
+                            }
+                            out += std::format(" AS \"{}\"", *stmt.fields[i].as);
+                        }
+                    }
+                }
+
+                auto from = compile_table_or_query(stmt.table_or_query);
+                if (!from)
+                {
+                    return std::unexpected<Core::DbError>{ from.error() };
+                }
+                out += " FROM ";
+                out += *from;
+
+                if (stmt.alias)
+                {
+                    if (auto chk = validate_ddl_identifier(*stmt.alias); !chk)
+                    {
+                        return std::unexpected<Core::DbError>{ chk.error() };
+                    }
+                    out += std::format(" \"{}\"", *stmt.alias);
+                }
+
+                if (stmt.joins)
+                {
+                    for (const auto& j : *stmt.joins)
+                    {
+                        std::string how = rfl::enum_to_string(j.how);
+                        for (char& ch : how)
+                        {
+                            ch = (ch == '_') ? ' ' : static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                        }
+                        auto jt = compile_table_or_query(j.table_or_query);
+                        if (!jt)
+                        {
+                            return std::unexpected<Core::DbError>{ jt.error() };
+                        }
+                        if (auto chk = validate_ddl_identifier(j.alias); !chk)
+                        {
+                            return std::unexpected<Core::DbError>{ chk.error() };
+                        }
+                        out += std::format(" {} {} \"{}\" ON ", how, *jt, j.alias);
+                        if (j.on)
+                        {
+                            auto on_sql = compile_condition(*j.on);
+                            if (!on_sql)
+                            {
+                                return std::unexpected<Core::DbError>{ on_sql.error() };
+                            }
+                            out += *on_sql;
+                        }
+                        else
+                        {
+                            out += "1 = 1";
+                        }
+                    }
+                }
+
+                if (injected_where)
+                {
+                    auto w = injected_where();
+                    if (!w)
+                    {
+                        return std::unexpected<Core::DbError>{ w.error() };
+                    }
+                    if (!w->empty())
+                    {
+                        out += " WHERE ";
+                        out += *w;
+                    }
+                }
+                else if (stmt.where)
+                {
+                    auto w = compile_condition(*stmt.where);
+                    if (!w)
+                    {
+                        return std::unexpected<Core::DbError>{ w.error() };
+                    }
+                    out += " WHERE ";
+                    out += *w;
+                }
+
+                if (stmt.group_by)
+                {
+                    out += " GROUP BY ";
+                    for (std::size_t i = 0; i < stmt.group_by->columns.size(); ++i)
+                    {
+                        if (i > 0)
+                        {
+                            out += ", ";
+                        }
+                        auto gc = compile_column(stmt.group_by->columns[i]);
+                        if (!gc)
+                        {
+                            return std::unexpected<Core::DbError>{ gc.error() };
+                        }
+                        out += *gc;
+                    }
+                }
+
+                if (stmt.order_by)
+                {
+                    out += " ORDER BY ";
+                    for (std::size_t i = 0; i < stmt.order_by->columns.size(); ++i)
+                    {
+                        if (i > 0)
+                        {
+                            out += ", ";
+                        }
+                        auto oc = compile_column(stmt.order_by->columns[i].column);
+                        if (!oc)
+                        {
+                            return std::unexpected<Core::DbError>{ oc.error() };
+                        }
+                        out += *oc;
+                        if (stmt.order_by->columns[i].desc)
+                        {
+                            out += " DESC";
+                        }
+                    }
+                }
+
+                if (stmt.limit)
+                {
+                    if (stmt.limit->val > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()))
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            "Query limit exceeds SQLite signed 64-bit INTEGER range") };
+                    }
+                    out += std::format(" LIMIT {}", stmt.limit->val);
+                }
+
+                if (stmt.offset)
+                {
+                    if (stmt.offset->val > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()))
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            "Query offset exceeds SQLite signed 64-bit INTEGER range") };
+                    }
+                    out += std::format(" OFFSET {}", stmt.offset->val);
+                }
+
+                return out;
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_delete_from(const sqlgen::dynamic::DeleteFrom& stmt)
+            {
+                auto tbl = compile_table(stmt.table);
+                if (!tbl)
+                {
+                    return std::unexpected<Core::DbError>{ tbl.error() };
+                }
+                std::string out = std::format("DELETE FROM {}", *tbl);
+                if (stmt.where)
+                {
+                    auto w = compile_condition(*stmt.where);
+                    if (!w)
+                    {
+                        return std::unexpected<Core::DbError>{ w.error() };
+                    }
+                    out += " WHERE ";
+                    out += *w;
+                }
+                return out;
+            }
+
+            [[nodiscard]] std::expected<std::string, Core::DbError> compile_update(const sqlgen::dynamic::Update& stmt)
+            {
+                auto tbl = compile_table(stmt.table);
+                if (!tbl)
+                {
+                    return std::unexpected<Core::DbError>{ tbl.error() };
+                }
+                std::string out = std::format("UPDATE {} SET ", *tbl);
+                for (std::size_t i = 0; i < stmt.sets.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        out += ", ";
+                    }
+                    if (auto chk = validate_ddl_identifier(stmt.sets[i].col.name); !chk)
+                    {
+                        return std::unexpected<Core::DbError>{ chk.error() };
+                    }
+                    auto val = compile_column_or_value(stmt.sets[i].to);
+                    if (!val)
+                    {
+                        return std::unexpected<Core::DbError>{ val.error() };
+                    }
+                    out += std::format("\"{}\" = {}", stmt.sets[i].col.name, *val);
+                }
+                if (stmt.where)
+                {
+                    auto w = compile_condition(*stmt.where);
+                    if (!w)
+                    {
+                        return std::unexpected<Core::DbError>{ w.error() };
+                    }
+                    out += " WHERE ";
+                    out += *w;
+                }
+                return out;
+            }
+
+            [[nodiscard]] std::expected<BoundSqlQuery, Core::DbError> compile_statement(const sqlgen::dynamic::Statement& stmt)
+            {
+                auto sql_res = stmt.visit(
+                    [this](const auto& s) -> std::expected<std::string, Core::DbError>
+                    {
+                        using S = std::remove_cvref_t<decltype(s)>;
+                        if constexpr (std::is_same_v<S, sqlgen::dynamic::SelectFrom>)
+                        {
+                            return compile_select_from(s, false, {});
+                        }
+                        else if constexpr (std::is_same_v<S, sqlgen::dynamic::SelectFrom::Union>)
+                        {
+                            return compile_union(s);
+                        }
+                        else if constexpr (std::is_same_v<S, sqlgen::dynamic::DeleteFrom>)
+                        {
+                            return compile_delete_from(s);
+                        }
+                        else if constexpr (std::is_same_v<S, sqlgen::dynamic::Update>)
+                        {
+                            return compile_update(s);
+                        }
+                        else
+                        {
+                            return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                                "Unsupported dynamic statement type for parameterized SQL compilation") };
+                        }
+                    });
+                if (!sql_res)
+                {
+                    return std::unexpected<Core::DbError>{ sql_res.error() };
+                }
+                *sql_res += ";";
+                return BoundSqlQuery{ std::move(*sql_res), std::move(params_) };
+            }
+
+            [[nodiscard]] std::vector<DynamicCell> take_params() noexcept
+            {
+                return std::move(params_);
+            }
+
+        private:
+            bool inline_ddl_{ false };
+            std::vector<DynamicCell> params_{};
+        };
+
         // Move-only RAII wrapper around a single prepared sqlite3_stmt.
         class SQLiteStatement
         {
@@ -405,9 +1573,27 @@ export namespace DAL
             sqlite3_stmt* stmt_{ nullptr };
         };
 
+        [[nodiscard]] inline std::expected<void, Core::DbError> check_variable_limit(sqlite3* db, std::size_t param_count)
+        {
+            if (db != nullptr && param_count > 0)
+            {
+                const int max_vars = sqlite3_limit(db, SQLITE_LIMIT_VARIABLE_NUMBER, -1);
+                if (max_vars > 0 && param_count > static_cast<std::size_t>(max_vars))
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                        std::format("Query parameter count ({}) exceeds SQLite variable limit ({})", param_count, max_vars)) };
+                }
+            }
+            return {};
+        }
+
         [[nodiscard]] inline std::expected<void, Core::DbError> bind_dynamic_params(
             sqlite3* db, sqlite3_stmt* stmt, std::span<const DynamicCell> params)
         {
+            if (auto lim = check_variable_limit(db, params.size()); !lim)
+            {
+                return lim;
+            }
             const int expected_params = sqlite3_bind_parameter_count(stmt);
             if (expected_params < 0 || params.size() != static_cast<std::size_t>(expected_params))
             {

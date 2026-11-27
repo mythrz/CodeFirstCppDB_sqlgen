@@ -273,15 +273,28 @@ export namespace DAL
             {
                 return dto_chk;
             }
-            const std::string raw_sql = sqlgen::sqlite::to_sql(
-                sqlgen::CreateIndex<IndexName, DTO, WhereCond, ColTypes...>{
-                    .unique_ = unique, .if_not_exists_ = true, .where_ = where_cond });
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(raw_sql);
-            if (!safe_sql)
+            std::string base_sql = sqlgen::sqlite::to_sql(
+                sqlgen::CreateIndex<IndexName, DTO, sqlgen::Nothing, ColTypes...>{
+                    .unique_ = unique, .if_not_exists_ = true, .where_ = sqlgen::Nothing{} });
+            while (!base_sql.empty() &&
+                   (base_sql.back() == ' ' || base_sql.back() == '\t' || base_sql.back() == '\n' || base_sql.back() == '\r'))
             {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
+                base_sql.pop_back();
             }
-            return execute_prepared(*safe_sql);
+            if (!base_sql.empty() && base_sql.back() == ';')
+            {
+                base_sql.pop_back();
+            }
+            detail::SqlAstCompiler ddl_compiler(/*inline_ddl_literals=*/true);
+            auto where_sql = ddl_compiler.template compile_where_expr<DTO>(where_cond);
+            if (!where_sql)
+            {
+                return std::unexpected<Core::DbError>{ where_sql.error() };
+            }
+            base_sql += " WHERE ";
+            base_sql += *where_sql;
+            base_sql += ";";
+            return execute_prepared(base_sql);
         }
 
         template<typename DTO>
@@ -529,12 +542,45 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(std::forward<Query>(query)));
-            if (!safe_sql)
+            const sqlgen::dynamic::Statement dyn_stmt = sqlgen::transpilation::to_sql(std::forward<Query>(query));
+            detail::SqlAstCompiler compiler;
+            auto compiled = compiler.compile_statement(dyn_stmt);
+            if (!compiled)
             {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
+                return std::unexpected<Core::DbError>{ compiled.error() };
             }
-            return execute_typed_sql<DTO>(*safe_sql);
+            return execute_typed_sql_dynamic_bound<DTO>(compiled->sql, compiled->params);
+        }
+
+        template<typename OutRowT, typename DTO, typename BaseQuery, typename Cond>
+        [[nodiscard]] std::expected<std::vector<OutRowT>, Core::DbError> try_execute_read_where(
+            BaseQuery&& base_without_where, const Cond& cond) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            const sqlgen::dynamic::Statement dyn_stmt = sqlgen::transpilation::to_sql(std::forward<BaseQuery>(base_without_where));
+            const auto* sel = rfl::get_if<sqlgen::dynamic::SelectFrom>(&dyn_stmt.variant());
+            if (sel == nullptr)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("Expected SelectFrom statement for filtered read") };
+            }
+            detail::SqlAstCompiler compiler;
+            auto sql_res = compiler.compile_select_from(
+                *sel,
+                false,
+                [&]()
+                {
+                    return compiler.template compile_where_expr<DTO>(cond);
+                });
+            if (!sql_res)
+            {
+                return std::unexpected<Core::DbError>{ sql_res.error() };
+            }
+            *sql_res += ";";
+            const auto params = compiler.take_params();
+            return execute_typed_sql_dynamic_bound<OutRowT>(*sql_res, params);
         }
 
         template<typename RowTuple, typename Query>
@@ -544,12 +590,45 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(std::forward<Query>(query)));
-            if (!safe_sql)
+            const sqlgen::dynamic::Statement dyn_stmt = sqlgen::transpilation::to_sql(std::forward<Query>(query));
+            detail::SqlAstCompiler compiler;
+            auto compiled = compiler.compile_statement(dyn_stmt);
+            if (!compiled)
             {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
+                return std::unexpected<Core::DbError>{ compiled.error() };
             }
-            return execute_typed_tuple_sql<RowTuple>(*safe_sql);
+            return execute_typed_tuple_sql_bound<RowTuple>(compiled->sql, compiled->params);
+        }
+
+        template<typename RowTuple, typename DTO, typename BaseQuery, typename Cond>
+        [[nodiscard]] std::expected<std::vector<RowTuple>, Core::DbError> try_execute_tuple_read_where(
+            BaseQuery&& base_without_where, const Cond& cond) const
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            const sqlgen::dynamic::Statement dyn_stmt = sqlgen::transpilation::to_sql(std::forward<BaseQuery>(base_without_where));
+            const auto* sel = rfl::get_if<sqlgen::dynamic::SelectFrom>(&dyn_stmt.variant());
+            if (sel == nullptr)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("Expected SelectFrom statement for filtered tuple read") };
+            }
+            detail::SqlAstCompiler compiler;
+            auto sql_res = compiler.compile_select_from(
+                *sel,
+                false,
+                [&]()
+                {
+                    return compiler.template compile_where_expr<DTO>(cond);
+                });
+            if (!sql_res)
+            {
+                return std::unexpected<Core::DbError>{ sql_res.error() };
+            }
+            *sql_res += ";";
+            const auto params = compiler.take_params();
+            return execute_typed_tuple_sql_bound<RowTuple>(*sql_res, params);
         }
 
         template<typename DTO, typename Query>
@@ -850,13 +929,8 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto query = sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">) | sqlgen::where(cond) | sqlgen::to<RowCount>;
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(query));
-            if (!safe_sql)
-            {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
-            }
-            auto res = execute_typed_sql<RowCount>(*safe_sql);
+            auto base_query = sqlgen::select_from<DTO>(sqlgen::count() | sqlgen::as<"count">) | sqlgen::to<RowCount>;
+            auto res = try_execute_read_where<RowCount, DTO>(std::move(base_query), cond);
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ res.error() };
@@ -878,7 +952,7 @@ export namespace DAL
             }
             using AggRow = detail::SingleValueRow<std::optional<ResultT>>;
             auto query = sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">) | sqlgen::to<AggRow>;
-            auto res = execute_typed_sql<AggRow>(sqlgen::sqlite::to_sql(query));
+            auto res = try_execute_read<AggRow>(std::move(query));
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ res.error() };
@@ -900,13 +974,8 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
             using AggRow = detail::SingleValueRow<std::optional<ResultT>>;
-            auto query = sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">) | sqlgen::where(cond) | sqlgen::to<AggRow>;
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(query));
-            if (!safe_sql)
-            {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
-            }
-            auto res = execute_typed_sql<AggRow>(*safe_sql);
+            auto base_query = sqlgen::select_from<DTO>(agg_expr | sqlgen::as<"val">) | sqlgen::to<AggRow>;
+            auto res = try_execute_read_where<AggRow, DTO>(std::move(base_query), cond);
             if (!res)
             {
                 return std::unexpected<Core::DbError>{ res.error() };
@@ -1058,13 +1127,19 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto query = sqlgen::delete_from<DTO> | sqlgen::where(cond);
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(query));
-            if (!safe_sql)
+            if (auto id_chk = detail::validate_dto_ddl_identifiers<DTO>(); !id_chk)
             {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
+                return id_chk;
             }
-            return execute_prepared(*safe_sql);
+            detail::SqlAstCompiler compiler;
+            auto where_sql = compiler.template compile_where_expr<DTO>(cond);
+            if (!where_sql)
+            {
+                return std::unexpected<Core::DbError>{ where_sql.error() };
+            }
+            const std::string sql = std::format("DELETE FROM \"{}\" WHERE {};", std::string_view{ DTO::tablename }, *where_sql);
+            const auto params = compiler.take_params();
+            return execute_prepared(sql, std::span<const DynamicCell>{ params });
         }
 
         template<typename DTO, typename KeyTuple, typename Condition>
@@ -1078,14 +1153,19 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ id_chk.error() };
             }
-            auto query = sqlgen::delete_from<DTO> | sqlgen::where(cond);
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(query));
-            if (!safe_sql)
+            detail::SqlAstCompiler compiler;
+            auto where_sql = compiler.template compile_where_expr<DTO>(cond);
+            if (!where_sql)
             {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
+                return std::unexpected<Core::DbError>{ where_sql.error() };
             }
-            const std::string sql = append_returning_clause(std::move(*safe_sql), build_returning_keys_clause<DTO>());
-            return execute_typed_tuple_sql<KeyTuple>(sql);
+            const std::string sql = std::format(
+                "DELETE FROM \"{}\" WHERE {} RETURNING {};",
+                std::string_view{ DTO::tablename },
+                *where_sql,
+                build_returning_keys_clause<DTO>());
+            const auto params = compiler.take_params();
+            return execute_typed_tuple_sql_bound<KeyTuple>(sql, params);
         }
 
         template<typename DTO, typename KeyTuple, typename SelectQuery>
@@ -1099,33 +1179,64 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ id_chk.error() };
             }
-            auto safe_select = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(std::forward<SelectQuery>(select_query)));
-            if (!safe_select)
-            {
-                return std::unexpected<Core::DbError>{ safe_select.error() };
-            }
-            std::string subquery = std::move(*safe_select);
-            while (!subquery.empty() &&
-                   (subquery.back() == ' ' || subquery.back() == '\t' || subquery.back() == '\n' || subquery.back() == '\r'))
-            {
-                subquery.pop_back();
-            }
-            if (!subquery.empty() && subquery.back() == ';')
-            {
-                subquery.pop_back();
-            }
-            const std::string expected_prefix = std::format("SELECT {} FROM ", build_select_columns_sql<DTO>());
-            if (!subquery.starts_with(expected_prefix))
+            const sqlgen::dynamic::Statement dyn_stmt = sqlgen::transpilation::to_sql(std::forward<SelectQuery>(select_query));
+            const auto* sel = rfl::get_if<sqlgen::dynamic::SelectFrom>(&dyn_stmt.variant());
+            if (sel == nullptr)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::unknown("Unexpected SELECT shape for atomic paginated delete") };
             }
-            subquery.replace(0, expected_prefix.size(), "SELECT rowid FROM ");
+            detail::SqlAstCompiler compiler;
+            auto subquery = compiler.compile_select_from(*sel, /*select_rowid_only=*/true, {});
+            if (!subquery)
+            {
+                return std::unexpected<Core::DbError>{ subquery.error() };
+            }
             const std::string sql = std::format(
                 "DELETE FROM \"{}\" WHERE rowid IN ({}) RETURNING {};",
                 std::string_view{ DTO::tablename },
-                subquery,
+                *subquery,
                 build_returning_keys_clause<DTO>());
-            return execute_typed_tuple_sql<KeyTuple>(sql);
+            const auto params = compiler.take_params();
+            return execute_typed_tuple_sql_bound<KeyTuple>(sql, params);
+        }
+
+        template<typename DTO, typename KeyTuple, typename BaseQuery, typename Cond>
+        [[nodiscard]] std::expected<std::vector<KeyTuple>, Core::DbError> delete_where_paginated_returning_keys_where(
+            BaseQuery&& base_without_where, const Cond& cond)
+        {
+            if (!is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (auto id_chk = detail::validate_dto_ddl_identifiers<DTO>(); !id_chk)
+            {
+                return std::unexpected<Core::DbError>{ id_chk.error() };
+            }
+            const sqlgen::dynamic::Statement dyn_stmt = sqlgen::transpilation::to_sql(std::forward<BaseQuery>(base_without_where));
+            const auto* sel = rfl::get_if<sqlgen::dynamic::SelectFrom>(&dyn_stmt.variant());
+            if (sel == nullptr)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("Unexpected SELECT shape for atomic paginated delete") };
+            }
+            detail::SqlAstCompiler compiler;
+            auto subquery = compiler.compile_select_from(
+                *sel,
+                /*select_rowid_only=*/true,
+                [&]()
+                {
+                    return compiler.template compile_where_expr<DTO>(cond);
+                });
+            if (!subquery)
+            {
+                return std::unexpected<Core::DbError>{ subquery.error() };
+            }
+            const std::string sql = std::format(
+                "DELETE FROM \"{}\" WHERE rowid IN ({}) RETURNING {};",
+                std::string_view{ DTO::tablename },
+                *subquery,
+                build_returning_keys_clause<DTO>());
+            const auto params = compiler.take_params();
+            return execute_typed_tuple_sql_bound<KeyTuple>(sql, params);
         }
 
         template<typename DTO, typename SetExpr, typename Condition>
@@ -1135,13 +1246,12 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto query = sqlgen::update<DTO>(set_expr) | sqlgen::where(cond);
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(query));
-            if (!safe_sql)
+            auto compiled = compile_update_with_where<DTO>(sqlgen::update<DTO>(set_expr), cond, {});
+            if (!compiled)
             {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
+                return std::unexpected<Core::DbError>{ compiled.error() };
             }
-            return execute_prepared(*safe_sql);
+            return execute_prepared(compiled->sql, std::span<const DynamicCell>{ compiled->params });
         }
 
         template<typename DTO, typename KeyTuple, typename SetExpr, typename Condition>
@@ -1156,14 +1266,12 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ id_chk.error() };
             }
-            auto query = sqlgen::update<DTO>(set_expr) | sqlgen::where(cond);
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(query));
-            if (!safe_sql)
+            auto compiled = compile_update_with_where<DTO>(sqlgen::update<DTO>(set_expr), cond, build_returning_keys_clause<DTO>());
+            if (!compiled)
             {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
+                return std::unexpected<Core::DbError>{ compiled.error() };
             }
-            const std::string sql = append_returning_clause(std::move(*safe_sql), build_returning_keys_clause<DTO>());
-            return execute_typed_tuple_sql<KeyTuple>(sql);
+            return execute_typed_tuple_sql_bound<KeyTuple>(compiled->sql, compiled->params);
         }
 
         template<typename DTO, typename Condition, typename... SetExprs>
@@ -1174,13 +1282,12 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
-            auto query = sqlgen::update<DTO>(set_exprs...) | sqlgen::where(cond);
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(query));
-            if (!safe_sql)
+            auto compiled = compile_update_with_where<DTO>(sqlgen::update<DTO>(set_exprs...), cond, {});
+            if (!compiled)
             {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
+                return std::unexpected<Core::DbError>{ compiled.error() };
             }
-            return execute_prepared(*safe_sql);
+            return execute_prepared(compiled->sql, std::span<const DynamicCell>{ compiled->params });
         }
 
         template<typename DTO, typename KeyTuple, typename Condition, typename... SetExprs>
@@ -1196,14 +1303,12 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ id_chk.error() };
             }
-            auto query = sqlgen::update<DTO>(set_exprs...) | sqlgen::where(cond);
-            auto safe_sql = detail::encode_sqlgen_embedded_nuls(sqlgen::sqlite::to_sql(query));
-            if (!safe_sql)
+            auto compiled = compile_update_with_where<DTO>(sqlgen::update<DTO>(set_exprs...), cond, build_returning_keys_clause<DTO>());
+            if (!compiled)
             {
-                return std::unexpected<Core::DbError>{ safe_sql.error() };
+                return std::unexpected<Core::DbError>{ compiled.error() };
             }
-            const std::string sql = append_returning_clause(std::move(*safe_sql), build_returning_keys_clause<DTO>());
-            return execute_typed_tuple_sql<KeyTuple>(sql);
+            return execute_typed_tuple_sql_bound<KeyTuple>(compiled->sql, compiled->params);
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> savepoint(std::string_view name)
@@ -1447,6 +1552,10 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
+            if (auto lim = detail::check_variable_limit(db_, params.size()); !lim)
+            {
+                return std::unexpected<Core::DbError>{ lim.error() };
+            }
             auto stmt_res = detail::SQLiteStatement::prepare_single(db_, sql);
             if (!stmt_res)
             {
@@ -1530,6 +1639,10 @@ export namespace DAL
             if (!is_open())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (auto lim = detail::check_variable_limit(db_, params.size()); !lim)
+            {
+                return lim;
             }
             auto stmt_res = detail::SQLiteStatement::prepare_single(db_, sql);
             if (!stmt_res)
@@ -2013,6 +2126,54 @@ export namespace DAL
             return result;
         }
 
+        template<typename DTO, typename UpdateBase, typename Cond>
+        [[nodiscard]] std::expected<detail::BoundSqlQuery, Core::DbError> compile_update_with_where(
+            UpdateBase&& update_base, const Cond& cond, std::string_view returning_cols) const
+        {
+            const sqlgen::dynamic::Statement dyn_stmt = sqlgen::transpilation::to_sql(std::forward<UpdateBase>(update_base));
+            const auto* upd = rfl::get_if<sqlgen::dynamic::Update>(&dyn_stmt.variant());
+            if (upd == nullptr)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown("Expected Update statement for bulk update") };
+            }
+            detail::SqlAstCompiler compiler;
+            auto sql_res = compiler.compile_update(*upd);
+            if (!sql_res)
+            {
+                return std::unexpected<Core::DbError>{ sql_res.error() };
+            }
+            auto where_sql = compiler.template compile_where_expr<DTO>(cond);
+            if (!where_sql)
+            {
+                return std::unexpected<Core::DbError>{ where_sql.error() };
+            }
+            *sql_res += " WHERE ";
+            *sql_res += *where_sql;
+            if (!returning_cols.empty())
+            {
+                *sql_res += " RETURNING ";
+                *sql_res += returning_cols;
+            }
+            *sql_res += ";";
+            return detail::BoundSqlQuery{ std::move(*sql_res), compiler.take_params() };
+        }
+
+        template<typename RowT>
+        [[nodiscard]] std::expected<std::vector<RowT>, Core::DbError> execute_typed_sql_dynamic_bound(
+            std::string_view sql, std::span<const DynamicCell> params) const
+        {
+            if (auto lim = detail::check_variable_limit(db_, params.size()); !lim)
+            {
+                return std::unexpected<Core::DbError>{ lim.error() };
+            }
+            return execute_typed_sql_bound<RowT>(
+                sql,
+                [&](sqlite3* db, sqlite3_stmt* stmt) -> std::expected<void, Core::DbError>
+                {
+                    return detail::bind_dynamic_params(db, stmt, params);
+                });
+        }
+
         template<typename RowT>
         [[nodiscard]] std::expected<std::vector<RowT>, Core::DbError> execute_typed_sql(std::string_view sql) const
         {
@@ -2025,11 +2186,16 @@ export namespace DAL
         }
 
         template<typename RowTuple>
-        [[nodiscard]] std::expected<std::vector<RowTuple>, Core::DbError> execute_typed_tuple_sql(std::string_view sql) const
+        [[nodiscard]] std::expected<std::vector<RowTuple>, Core::DbError> execute_typed_tuple_sql_bound(
+            std::string_view sql, std::span<const DynamicCell> params) const
         {
             if (!is_open())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (auto lim = detail::check_variable_limit(db_, params.size()); !lim)
+            {
+                return std::unexpected<Core::DbError>{ lim.error() };
             }
             auto stmt_res = detail::SQLiteStatement::prepare_single(db_, sql);
             if (!stmt_res)
@@ -2037,6 +2203,10 @@ export namespace DAL
                 return std::unexpected<Core::DbError>{ stmt_res.error() };
             }
             auto& stmt = *stmt_res;
+            if (auto bind_res = detail::bind_dynamic_params(db_, stmt.raw(), params); !bind_res)
+            {
+                return std::unexpected<Core::DbError>{ bind_res.error() };
+            }
 
             std::vector<RowTuple> result;
             while (true)
@@ -2058,6 +2228,12 @@ export namespace DAL
                 result.push_back(std::move(*tuple_res));
             }
             return result;
+        }
+
+        template<typename RowTuple>
+        [[nodiscard]] std::expected<std::vector<RowTuple>, Core::DbError> execute_typed_tuple_sql(std::string_view sql) const
+        {
+            return execute_typed_tuple_sql_bound<RowTuple>(sql, {});
         }
 
         [[nodiscard]] Core::DbError map_sqlite_error(std::string_view msg) const

@@ -38,6 +38,80 @@ export namespace DAL
             }
         }
 
+        template<typename Val>
+        [[nodiscard]] inline std::optional<Core::DbError> validate_query_val(const Val& val)
+        {
+            using T = std::remove_cvref_t<Val>;
+            if constexpr (Core::SingleKeyType<T>)
+            {
+                return validate_query_val(val.value);
+            }
+            else if constexpr (Core::StrongIdType<T>)
+            {
+                return validate_query_val(val.get());
+            }
+            else if constexpr (Schema::detail::is_optional_v<T>)
+            {
+                if (val.has_value())
+                {
+                    return validate_query_val(*val);
+                }
+                return std::nullopt;
+            }
+            else if constexpr (
+                std::is_integral_v<T> && std::is_unsigned_v<T> && !std::is_same_v<T, bool> && (sizeof(T) >= sizeof(std::int64_t)))
+            {
+                if (val > static_cast<T>(std::numeric_limits<std::int64_t>::max()))
+                {
+                    return Core::DbError::constraint_violation(
+                        "Unsigned 64-bit query parameter exceeds SQLite signed 64-bit integer range");
+                }
+                return std::nullopt;
+            }
+            else
+            {
+                return std::nullopt;
+            }
+        }
+
+        template<typename... Ts>
+        [[nodiscard]] inline std::optional<Core::DbError> first_query_error(const std::optional<Core::DbError>& existing, const Ts&... vals)
+        {
+            if (existing)
+            {
+                return existing;
+            }
+            std::optional<Core::DbError> err;
+            (
+                [&]()
+                {
+                    if (!err)
+                    {
+                        err = validate_query_val(vals);
+                    }
+                }(),
+                ...);
+            return err;
+        }
+
+        template<typename Val>
+        [[nodiscard]] inline std::optional<Core::DbError> first_query_vec_error(
+            const std::optional<Core::DbError>& existing, const std::vector<Val>& vals)
+        {
+            if (existing)
+            {
+                return existing;
+            }
+            for (const auto& v : vals)
+            {
+                if (auto err = validate_query_val(v))
+                {
+                    return err;
+                }
+            }
+            return std::nullopt;
+        }
+
         template<typename T>
         struct UnwrapColumnScalar
         {
@@ -355,7 +429,8 @@ export namespace DAL
             TrackFn track_fn = {},
             ClearTrackFn clear_track_fn = {},
             UntrackKeyFn untrack_key_fn = {},
-            IsContextAliveFn is_context_alive_fn = {})
+            IsContextAliveFn is_context_alive_fn = {},
+            std::optional<Core::DbError> validation_error = std::nullopt)
             : repo_(std::move(repo))
             , conn_(std::move(conn))
             , where_cond_(std::move(where_cond))
@@ -366,67 +441,20 @@ export namespace DAL
             , clear_track_fn_(std::move(clear_track_fn))
             , untrack_key_fn_(std::move(untrack_key_fn))
             , is_context_alive_fn_(std::move(is_context_alive_fn))
+            , validation_error_(std::move(validation_error))
         {
         }
 
         template<typename Condition>
         [[nodiscard]] auto where_sql(Condition cond) const
         {
-            if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
-            {
-                return DbQuery<Domain, DTO, ConnectionHandle, KeyType, Condition, OrderByT>(
-                    repo_,
-                    conn_,
-                    std::move(cond),
-                    order_by_,
-                    limit_,
-                    offset_,
-                    track_fn_,
-                    clear_track_fn_,
-                    untrack_key_fn_,
-                    is_context_alive_fn_);
-            }
-            else
-            {
-                auto combined = where_cond_ && std::move(cond);
-                using CombinedT = decltype(combined);
-                return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
-                    repo_,
-                    conn_,
-                    std::move(combined),
-                    order_by_,
-                    limit_,
-                    offset_,
-                    track_fn_,
-                    clear_track_fn_,
-                    untrack_key_fn_,
-                    is_context_alive_fn_);
-            }
+            return where_sql_with_error(std::move(cond), validation_error_);
         }
 
         template<typename Condition>
         [[nodiscard]] auto or_where_sql(Condition cond) const
         {
-            if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
-            {
-                return where_sql(std::move(cond));
-            }
-            else
-            {
-                auto combined = where_cond_ || std::move(cond);
-                using CombinedT = decltype(combined);
-                return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
-                    repo_,
-                    conn_,
-                    std::move(combined),
-                    order_by_,
-                    limit_,
-                    offset_,
-                    track_fn_,
-                    clear_track_fn_,
-                    untrack_key_fn_,
-                    is_context_alive_fn_);
-            }
+            return or_where_sql_with_error(std::move(cond), validation_error_);
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -434,7 +462,8 @@ export namespace DAL
         [[nodiscard]] auto where_equal(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return where_sql(Schema::col_of<dto_m> == detail::normalize_query_val(val));
+            return where_sql_with_error(
+                Schema::col_of<dto_m> == detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -442,7 +471,8 @@ export namespace DAL
         [[nodiscard]] auto or_where_equal(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return or_where_sql(Schema::col_of<dto_m> == detail::normalize_query_val(val));
+            return or_where_sql_with_error(
+                Schema::col_of<dto_m> == detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -450,7 +480,8 @@ export namespace DAL
         [[nodiscard]] auto or_where_not_equal(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return or_where_sql(Schema::col_of<dto_m> != detail::normalize_query_val(val));
+            return or_where_sql_with_error(
+                Schema::col_of<dto_m> != detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -458,7 +489,8 @@ export namespace DAL
         [[nodiscard]] auto or_where_lt(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return or_where_sql(Schema::col_of<dto_m> < detail::normalize_query_val(val));
+            return or_where_sql_with_error(
+                Schema::col_of<dto_m> < detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -466,7 +498,8 @@ export namespace DAL
         [[nodiscard]] auto or_where_le(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return or_where_sql(Schema::col_of<dto_m> <= detail::normalize_query_val(val));
+            return or_where_sql_with_error(
+                Schema::col_of<dto_m> <= detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -474,7 +507,8 @@ export namespace DAL
         [[nodiscard]] auto or_where_gt(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return or_where_sql(Schema::col_of<dto_m> > detail::normalize_query_val(val));
+            return or_where_sql_with_error(
+                Schema::col_of<dto_m> > detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -482,7 +516,8 @@ export namespace DAL
         [[nodiscard]] auto or_where_ge(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return or_where_sql(Schema::col_of<dto_m> >= detail::normalize_query_val(val));
+            return or_where_sql_with_error(
+                Schema::col_of<dto_m> >= detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -490,9 +525,9 @@ export namespace DAL
         [[nodiscard]] auto or_where_between(const Val& low, const Val& high) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return or_where_sql(
-                (Schema::col_of<dto_m> >= detail::normalize_query_val(low)) &&
-                (Schema::col_of<dto_m> <= detail::normalize_query_val(high)));
+            return or_where_sql_with_error(
+                (Schema::col_of<dto_m> >= detail::normalize_query_val(low)) && (Schema::col_of<dto_m> <= detail::normalize_query_val(high)),
+                detail::first_query_error(validation_error_, low, high));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -511,12 +546,48 @@ export namespace DAL
             return or_where_sql(Schema::col_of<dto_m>.not_like(std::string(pattern)));
         }
 
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_contains(std::string_view needle) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            std::string pattern;
+            pattern.reserve(needle.size() + 2);
+            pattern.push_back('%');
+            pattern += detail::escape_like_literal(needle);
+            pattern.push_back('%');
+            return or_where_sql(detail::EscapedLikeCond{ std::string{ std::meta::identifier_of(dto_m) }, std::move(pattern), false });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_starts_with(std::string_view prefix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            std::string pattern = detail::escape_like_literal(prefix);
+            pattern.push_back('%');
+            return or_where_sql(detail::EscapedLikeCond{ std::string{ std::meta::identifier_of(dto_m) }, std::move(pattern), false });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_ends_with(std::string_view suffix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            std::string pattern;
+            pattern.reserve(suffix.size() + 1);
+            pattern.push_back('%');
+            pattern += detail::escape_like_literal(suffix);
+            return or_where_sql(detail::EscapedLikeCond{ std::string{ std::meta::identifier_of(dto_m) }, std::move(pattern), false });
+        }
+
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
             requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto or_where_in(const Ts&... vals) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return or_where_sql(Schema::col_of<dto_m>.in(detail::normalize_query_val(vals)...));
+            return or_where_sql_with_error(
+                Schema::col_of<dto_m>.in(detail::normalize_query_val(vals)...), detail::first_query_error(validation_error_, vals...));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -531,7 +602,7 @@ export namespace DAL
             {
                 normalized.push_back(detail::normalize_query_val(v));
             }
-            return or_where_sql(Schema::col_of<dto_m>.in(normalized));
+            return or_where_sql_with_error(Schema::col_of<dto_m>.in(normalized), detail::first_query_vec_error(validation_error_, vals));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
@@ -539,7 +610,8 @@ export namespace DAL
         [[nodiscard]] auto or_where_not_in(const Ts&... vals) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return or_where_sql(Schema::col_of<dto_m>.not_in(detail::normalize_query_val(vals)...));
+            return or_where_sql_with_error(
+                Schema::col_of<dto_m>.not_in(detail::normalize_query_val(vals)...), detail::first_query_error(validation_error_, vals...));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -554,7 +626,8 @@ export namespace DAL
             {
                 normalized.push_back(detail::normalize_query_val(v));
             }
-            return or_where_sql(Schema::col_of<dto_m>.not_in(normalized));
+            return or_where_sql_with_error(
+                Schema::col_of<dto_m>.not_in(normalized), detail::first_query_vec_error(validation_error_, vals));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -578,7 +651,8 @@ export namespace DAL
         [[nodiscard]] auto where_not_equal(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return where_sql(Schema::col_of<dto_m> != detail::normalize_query_val(val));
+            return where_sql_with_error(
+                Schema::col_of<dto_m> != detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -586,7 +660,8 @@ export namespace DAL
         [[nodiscard]] auto where_lt(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return where_sql(Schema::col_of<dto_m> < detail::normalize_query_val(val));
+            return where_sql_with_error(
+                Schema::col_of<dto_m> < detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -594,7 +669,8 @@ export namespace DAL
         [[nodiscard]] auto where_le(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return where_sql(Schema::col_of<dto_m> <= detail::normalize_query_val(val));
+            return where_sql_with_error(
+                Schema::col_of<dto_m> <= detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -602,7 +678,8 @@ export namespace DAL
         [[nodiscard]] auto where_gt(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return where_sql(Schema::col_of<dto_m> > detail::normalize_query_val(val));
+            return where_sql_with_error(
+                Schema::col_of<dto_m> > detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -610,7 +687,8 @@ export namespace DAL
         [[nodiscard]] auto where_ge(const Val& val) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return where_sql(Schema::col_of<dto_m> >= detail::normalize_query_val(val));
+            return where_sql_with_error(
+                Schema::col_of<dto_m> >= detail::normalize_query_val(val), detail::first_query_error(validation_error_, val));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -621,12 +699,48 @@ export namespace DAL
             return where_sql(Schema::col_of<dto_m>.like(std::string(pattern)));
         }
 
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_contains(std::string_view needle) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            std::string pattern;
+            pattern.reserve(needle.size() + 2);
+            pattern.push_back('%');
+            pattern += detail::escape_like_literal(needle);
+            pattern.push_back('%');
+            return where_sql(detail::EscapedLikeCond{ std::string{ std::meta::identifier_of(dto_m) }, std::move(pattern), false });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_starts_with(std::string_view prefix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            std::string pattern = detail::escape_like_literal(prefix);
+            pattern.push_back('%');
+            return where_sql(detail::EscapedLikeCond{ std::string{ std::meta::identifier_of(dto_m) }, std::move(pattern), false });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_ends_with(std::string_view suffix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            std::string pattern;
+            pattern.reserve(suffix.size() + 1);
+            pattern.push_back('%');
+            pattern += detail::escape_like_literal(suffix);
+            return where_sql(detail::EscapedLikeCond{ std::string{ std::meta::identifier_of(dto_m) }, std::move(pattern), false });
+        }
+
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
             requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_in(const Ts&... vals) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return where_sql(Schema::col_of<dto_m>.in(detail::normalize_query_val(vals)...));
+            return where_sql_with_error(
+                Schema::col_of<dto_m>.in(detail::normalize_query_val(vals)...), detail::first_query_error(validation_error_, vals...));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -641,7 +755,7 @@ export namespace DAL
             {
                 normalized.push_back(detail::normalize_query_val(v));
             }
-            return where_sql(Schema::col_of<dto_m>.in(normalized));
+            return where_sql_with_error(Schema::col_of<dto_m>.in(normalized), detail::first_query_vec_error(validation_error_, vals));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -673,7 +787,8 @@ export namespace DAL
         [[nodiscard]] auto where_not_in(const Ts&... vals) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return where_sql(Schema::col_of<dto_m>.not_in(detail::normalize_query_val(vals)...));
+            return where_sql_with_error(
+                Schema::col_of<dto_m>.not_in(detail::normalize_query_val(vals)...), detail::first_query_error(validation_error_, vals...));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -681,9 +796,9 @@ export namespace DAL
         [[nodiscard]] auto where_between(const Val& low, const Val& high) const
         {
             constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
-            return where_sql(
-                (Schema::col_of<dto_m> >= detail::normalize_query_val(low)) &&
-                (Schema::col_of<dto_m> <= detail::normalize_query_val(high)));
+            return where_sql_with_error(
+                (Schema::col_of<dto_m> >= detail::normalize_query_val(low)) && (Schema::col_of<dto_m> <= detail::normalize_query_val(high)),
+                detail::first_query_error(validation_error_, low, high));
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -698,7 +813,7 @@ export namespace DAL
             {
                 normalized.push_back(detail::normalize_query_val(v));
             }
-            return where_sql(Schema::col_of<dto_m>.not_in(normalized));
+            return where_sql_with_error(Schema::col_of<dto_m>.not_in(normalized), detail::first_query_vec_error(validation_error_, vals));
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -720,7 +835,8 @@ export namespace DAL
                 track_fn_,
                 clear_track_fn_,
                 untrack_key_fn_,
-                is_context_alive_fn_);
+                is_context_alive_fn_,
+                validation_error_);
         }
 
         template<rfl::internal::StringLiteral ColLiteral>
@@ -760,11 +876,17 @@ export namespace DAL
                 track_fn_,
                 clear_track_fn_,
                 untrack_key_fn_,
-                is_context_alive_fn_);
+                is_context_alive_fn_,
+                validation_error_);
         }
 
         [[nodiscard]] DbQuery limit(std::size_t limit_count) const pre(limit_count > 0)
         {
+            auto err = validation_error_;
+            if (!err && limit_count > detail::kSqliteUnboundedLimit)
+            {
+                err = Core::DbError::constraint_violation("Query limit exceeds SQLite signed 64-bit integer range");
+            }
             return DbQuery(
                 repo_,
                 conn_,
@@ -775,11 +897,17 @@ export namespace DAL
                 track_fn_,
                 clear_track_fn_,
                 untrack_key_fn_,
-                is_context_alive_fn_);
+                is_context_alive_fn_,
+                std::move(err));
         }
 
         [[nodiscard]] DbQuery offset(std::size_t offset_count) const
         {
+            auto err = validation_error_;
+            if (!err && offset_count > detail::kSqliteUnboundedLimit)
+            {
+                err = Core::DbError::constraint_violation("Query offset exceeds SQLite signed 64-bit integer range");
+            }
             return DbQuery(
                 repo_,
                 conn_,
@@ -790,11 +918,21 @@ export namespace DAL
                 track_fn_,
                 clear_track_fn_,
                 untrack_key_fn_,
-                is_context_alive_fn_);
+                is_context_alive_fn_,
+                std::move(err));
         }
 
         [[nodiscard]] DbQuery page(std::size_t limit_count, std::size_t offset_count = 0) const pre(limit_count > 0)
         {
+            auto err = validation_error_;
+            if (!err && limit_count > detail::kSqliteUnboundedLimit)
+            {
+                err = Core::DbError::constraint_violation("Query limit exceeds SQLite signed 64-bit integer range");
+            }
+            if (!err && offset_count > detail::kSqliteUnboundedLimit)
+            {
+                err = Core::DbError::constraint_violation("Query offset exceeds SQLite signed 64-bit integer range");
+            }
             return DbQuery(
                 repo_,
                 conn_,
@@ -805,7 +943,8 @@ export namespace DAL
                 track_fn_,
                 clear_track_fn_,
                 untrack_key_fn_,
-                is_context_alive_fn_);
+                is_context_alive_fn_,
+                std::move(err));
         }
 
         [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> try_to_vector() const
@@ -817,6 +956,10 @@ export namespace DAL
             if (!conn_->is_open())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (validation_error_)
+            {
+                return std::unexpected<Core::DbError>{ *validation_error_ };
             }
             if (limit_.has_value() && *limit_ == 0)
             {
@@ -900,6 +1043,10 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
+            if (validation_error_)
+            {
+                return std::unexpected<Core::DbError>{ *validation_error_ };
+            }
             if (limit_.has_value() && *limit_ == 0)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Query limit must be greater than 0") };
@@ -930,6 +1077,10 @@ export namespace DAL
             if (!conn_->is_open())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (validation_error_)
+            {
+                return std::unexpected<Core::DbError>{ *validation_error_ };
             }
             if (limit_.has_value() && *limit_ == 0)
             {
@@ -1083,6 +1234,10 @@ export namespace DAL
                 return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
                     Core::DbError::connection_error("Database connection is closed") } };
             }
+            if (validation_error_)
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{ *validation_error_ } };
+            }
             if (limit_.has_value() && *limit_ == 0)
             {
                 return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
@@ -1093,7 +1248,7 @@ export namespace DAL
 
             auto with_where = [&]()
             {
-                if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing> && !detail::is_custom_where_cond_v<WhereCondT>)
                 {
                     return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">) | sqlgen::where(where_cond_);
                 }
@@ -1187,6 +1342,10 @@ export namespace DAL
                 return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
                     Core::DbError::connection_error("Database connection is closed") } };
             }
+            if (validation_error_)
+            {
+                return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{ *validation_error_ } };
+            }
             if (limit_.has_value() && *limit_ == 0)
             {
                 return std::expected<std::vector<ColValueT>, Core::DbError>{ std::unexpected<Core::DbError>{
@@ -1197,7 +1356,7 @@ export namespace DAL
 
             auto with_group = [&]()
             {
-                if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing> && !detail::is_custom_where_cond_v<WhereCondT>)
                 {
                     return sqlgen::select_from<DTO>(Schema::col_of<dto_m> | sqlgen::as<"val">) | sqlgen::where(where_cond_) |
                         sqlgen::group_by(Schema::col_of<dto_m>);
@@ -1269,6 +1428,10 @@ export namespace DAL
                 return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
                     Core::DbError::connection_error("Database connection is closed") } };
             }
+            if (validation_error_)
+            {
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{ *validation_error_ } };
+            }
             if (limit_.has_value() && *limit_ == 0)
             {
                 return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
@@ -1277,7 +1440,7 @@ export namespace DAL
 
             auto with_where = [&]()
             {
-                if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing> && !detail::is_custom_where_cond_v<WhereCondT>)
                 {
                     return sqlgen::select_from<DTO>(Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...) |
                         sqlgen::where(where_cond_);
@@ -1333,6 +1496,10 @@ export namespace DAL
                 return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
                     Core::DbError::connection_error("Database connection is closed") } };
             }
+            if (validation_error_)
+            {
+                return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{ *validation_error_ } };
+            }
             if (limit_.has_value() && *limit_ == 0)
             {
                 return std::expected<std::vector<RowTuple>, Core::DbError>{ std::unexpected<Core::DbError>{
@@ -1341,7 +1508,7 @@ export namespace DAL
 
             auto with_group = [&]()
             {
-                if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing> && !detail::is_custom_where_cond_v<WhereCondT>)
                 {
                     return sqlgen::select_from<DTO>(Schema::col_of<DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiterals>()>...) |
                         sqlgen::where(where_cond_) |
@@ -1390,6 +1557,10 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
             }
+            if (validation_error_)
+            {
+                return std::unexpected<Core::DbError>{ *validation_error_ };
+            }
             if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
             {
                 return conn_->template ensure_filtered_index_created<IndexName, DTO>(
@@ -1418,6 +1589,10 @@ export namespace DAL
             if (!conn_->is_open())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (validation_error_)
+            {
+                return std::unexpected<Core::DbError>{ *validation_error_ };
             }
             if (limit_.has_value() && *limit_ == 0)
             {
@@ -1472,6 +1647,10 @@ export namespace DAL
             if (!conn_->is_open())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (validation_error_)
+            {
+                return std::unexpected<Core::DbError>{ *validation_error_ };
             }
             if (limit_.has_value() && *limit_ == 0)
             {
@@ -1610,6 +1789,10 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
             }
+            if (auto err = detail::first_query_error(validation_error_, new_vals...))
+            {
+                return std::unexpected<Core::DbError>{ std::move(*err) };
+            }
             if (limit_.has_value() || offset_.has_value())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
@@ -1706,51 +1889,183 @@ export namespace DAL
         }
 
     private:
+        template<typename Condition>
+        [[nodiscard]] auto where_sql_with_error(Condition cond, std::optional<Core::DbError> err) const
+        {
+            if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
+            {
+                return DbQuery<Domain, DTO, ConnectionHandle, KeyType, Condition, OrderByT>(
+                    repo_,
+                    conn_,
+                    std::move(cond),
+                    order_by_,
+                    limit_,
+                    offset_,
+                    track_fn_,
+                    clear_track_fn_,
+                    untrack_key_fn_,
+                    is_context_alive_fn_,
+                    std::move(err));
+            }
+            else if constexpr (detail::is_custom_where_cond_v<WhereCondT> || detail::is_custom_where_cond_v<Condition>)
+            {
+                detail::AndCond<WhereCondT, Condition> combined{ where_cond_, std::move(cond) };
+                using CombinedT = decltype(combined);
+                return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
+                    repo_,
+                    conn_,
+                    std::move(combined),
+                    order_by_,
+                    limit_,
+                    offset_,
+                    track_fn_,
+                    clear_track_fn_,
+                    untrack_key_fn_,
+                    is_context_alive_fn_,
+                    std::move(err));
+            }
+            else
+            {
+                auto combined = where_cond_ && std::move(cond);
+                using CombinedT = decltype(combined);
+                return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
+                    repo_,
+                    conn_,
+                    std::move(combined),
+                    order_by_,
+                    limit_,
+                    offset_,
+                    track_fn_,
+                    clear_track_fn_,
+                    untrack_key_fn_,
+                    is_context_alive_fn_,
+                    std::move(err));
+            }
+        }
+
+        template<typename Condition>
+        [[nodiscard]] auto or_where_sql_with_error(Condition cond, std::optional<Core::DbError> err) const
+        {
+            if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
+            {
+                return where_sql_with_error(std::move(cond), std::move(err));
+            }
+            else if constexpr (detail::is_custom_where_cond_v<WhereCondT> || detail::is_custom_where_cond_v<Condition>)
+            {
+                detail::OrCond<WhereCondT, Condition> combined{ where_cond_, std::move(cond) };
+                using CombinedT = decltype(combined);
+                return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
+                    repo_,
+                    conn_,
+                    std::move(combined),
+                    order_by_,
+                    limit_,
+                    offset_,
+                    track_fn_,
+                    clear_track_fn_,
+                    untrack_key_fn_,
+                    is_context_alive_fn_,
+                    std::move(err));
+            }
+            else
+            {
+                auto combined = where_cond_ || std::move(cond);
+                using CombinedT = decltype(combined);
+                return DbQuery<Domain, DTO, ConnectionHandle, KeyType, CombinedT, OrderByT>(
+                    repo_,
+                    conn_,
+                    std::move(combined),
+                    order_by_,
+                    limit_,
+                    offset_,
+                    track_fn_,
+                    clear_track_fn_,
+                    untrack_key_fn_,
+                    is_context_alive_fn_,
+                    std::move(err));
+            }
+        }
+
         template<typename RowTuple, typename BaseQuery>
         [[nodiscard]] std::expected<std::vector<RowTuple>, Core::DbError> execute_tuple_projection(
             const ConnectionHandle& conn, BaseQuery&& base_query) const
         {
+            auto run = [&](auto&& q) -> std::expected<std::vector<RowTuple>, Core::DbError>
+            {
+                if constexpr (detail::is_custom_where_cond_v<WhereCondT>)
+                {
+                    if constexpr (requires { conn.template try_execute_tuple_read_where<RowTuple, DTO>(std::move(q), where_cond_); })
+                    {
+                        return conn.template try_execute_tuple_read_where<RowTuple, DTO>(std::move(q), where_cond_);
+                    }
+                    else
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                            "Connection adapter does not support escaped LIKE predicates") };
+                    }
+                }
+                else
+                {
+                    return conn.template try_execute_tuple_read<RowTuple>(std::move(q));
+                }
+            };
+
             if (limit_.has_value() && offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_);
-                return conn.template try_execute_tuple_read<RowTuple>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_));
             }
             if (limit_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_);
-                return conn.template try_execute_tuple_read<RowTuple>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_));
             }
             if (offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_);
-                return conn.template try_execute_tuple_read<RowTuple>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_));
             }
-            return conn.template try_execute_tuple_read<RowTuple>(std::forward<BaseQuery>(base_query));
+            return run(std::forward<BaseQuery>(base_query));
         }
 
         template<typename OutRowT, typename BaseQuery>
         [[nodiscard]] std::expected<std::vector<OutRowT>, Core::DbError> execute_projection(
             const ConnectionHandle& conn, BaseQuery&& base_query) const
         {
+            auto run = [&](auto&& q) -> std::expected<std::vector<OutRowT>, Core::DbError>
+            {
+                if constexpr (detail::is_custom_where_cond_v<WhereCondT>)
+                {
+                    if constexpr (requires { conn.template try_execute_read_where<OutRowT, DTO>(std::move(q), where_cond_); })
+                    {
+                        return conn.template try_execute_read_where<OutRowT, DTO>(std::move(q), where_cond_);
+                    }
+                    else
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                            "Connection adapter does not support escaped LIKE predicates") };
+                    }
+                }
+                else
+                {
+                    return conn.template try_execute_read<OutRowT>(std::move(q));
+                }
+            };
+
             if (limit_.has_value() && offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_) |
-                    sqlgen::to<std::vector<OutRowT>>;
-                return conn.template try_execute_read<OutRowT>(std::move(q));
+                return run(
+                    std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_) |
+                    sqlgen::to<std::vector<OutRowT>>);
             }
             if (limit_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::to<std::vector<OutRowT>>;
-                return conn.template try_execute_read<OutRowT>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::to<std::vector<OutRowT>>);
             }
             if (offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_) |
-                    sqlgen::to<std::vector<OutRowT>>;
-                return conn.template try_execute_read<OutRowT>(std::move(q));
+                return run(
+                    std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_) |
+                    sqlgen::to<std::vector<OutRowT>>);
             }
-            auto q = std::forward<BaseQuery>(base_query) | sqlgen::to<std::vector<OutRowT>>;
-            return conn.template try_execute_read<OutRowT>(std::move(q));
+            return run(std::forward<BaseQuery>(base_query) | sqlgen::to<std::vector<OutRowT>>);
         }
 
         template<typename ResultT, typename AggExpr>
@@ -1759,6 +2074,10 @@ export namespace DAL
             if (!conn_)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
+            if (validation_error_)
+            {
+                return std::unexpected<Core::DbError>{ *validation_error_ };
             }
             if (limit_.has_value() || offset_.has_value())
             {
@@ -1779,22 +2098,41 @@ export namespace DAL
         [[nodiscard]] std::expected<std::vector<KeyTuple>, Core::DbError> execute_paginated_delete_with_limit_offset(
             ConnectionHandle& conn, BaseQuery&& base_query) const
         {
+            auto run = [&](auto&& q) -> std::expected<std::vector<KeyTuple>, Core::DbError>
+            {
+                if constexpr (detail::is_custom_where_cond_v<WhereCondT>)
+                {
+                    if constexpr (requires {
+                                      conn.template delete_where_paginated_returning_keys_where<DTO, KeyTuple>(std::move(q), where_cond_);
+                                  })
+                    {
+                        return conn.template delete_where_paginated_returning_keys_where<DTO, KeyTuple>(std::move(q), where_cond_);
+                    }
+                    else
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                            "Connection adapter does not support escaped LIKE predicates") };
+                    }
+                }
+                else
+                {
+                    return conn.template delete_where_paginated_returning_keys<DTO, KeyTuple>(std::move(q));
+                }
+            };
+
             if (limit_.has_value() && offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_);
-                return conn.template delete_where_paginated_returning_keys<DTO, KeyTuple>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_));
             }
             if (limit_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_);
-                return conn.template delete_where_paginated_returning_keys<DTO, KeyTuple>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_));
             }
             if (offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_);
-                return conn.template delete_where_paginated_returning_keys<DTO, KeyTuple>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_));
             }
-            return conn.template delete_where_paginated_returning_keys<DTO, KeyTuple>(std::forward<BaseQuery>(base_query));
+            return run(std::forward<BaseQuery>(base_query));
         }
 
         template<typename KeyTuple>
@@ -1802,7 +2140,7 @@ export namespace DAL
         {
             auto with_where = [&]()
             {
-                if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing> && !detail::is_custom_where_cond_v<WhereCondT>)
                 {
                     return sqlgen::read<std::vector<DTO>> | sqlgen::where(where_cond_);
                 }
@@ -1831,29 +2169,46 @@ export namespace DAL
         [[nodiscard]] std::expected<std::vector<DTO>, Core::DbError> execute_with_limit_offset(
             const ConnectionHandle& conn, BaseQuery&& base_query) const
         {
+            auto run = [&](auto&& q) -> std::expected<std::vector<DTO>, Core::DbError>
+            {
+                if constexpr (detail::is_custom_where_cond_v<WhereCondT>)
+                {
+                    if constexpr (requires { conn.template try_execute_read_where<DTO, DTO>(std::move(q), where_cond_); })
+                    {
+                        return conn.template try_execute_read_where<DTO, DTO>(std::move(q), where_cond_);
+                    }
+                    else
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                            "Connection adapter does not support escaped LIKE predicates") };
+                    }
+                }
+                else
+                {
+                    return conn.template try_execute_read<DTO>(std::move(q));
+                }
+            };
+
             if (limit_.has_value() && offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_);
-                return conn.template try_execute_read<DTO>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_));
             }
             if (limit_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_);
-                return conn.template try_execute_read<DTO>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(*limit_));
             }
             if (offset_.has_value())
             {
-                auto q = std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_);
-                return conn.template try_execute_read<DTO>(std::move(q));
+                return run(std::forward<BaseQuery>(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_));
             }
-            return conn.template try_execute_read<DTO>(std::forward<BaseQuery>(base_query));
+            return run(std::forward<BaseQuery>(base_query));
         }
 
         [[nodiscard]] std::expected<std::vector<DTO>, Core::DbError> execute_query(const ConnectionHandle& conn) const
         {
             auto with_where = [&]()
             {
-                if constexpr (!std::same_as<WhereCondT, rfl::Nothing>)
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing> && !detail::is_custom_where_cond_v<WhereCondT>)
                 {
                     return sqlgen::read<std::vector<DTO>> | sqlgen::where(where_cond_);
                 }
@@ -1888,5 +2243,6 @@ export namespace DAL
         ClearTrackFn clear_track_fn_{};
         UntrackKeyFn untrack_key_fn_{};
         IsContextAliveFn is_context_alive_fn_{};
+        std::optional<Core::DbError> validation_error_{};
     };
 } // namespace DAL

@@ -834,6 +834,27 @@ export namespace DAL
             return query().template where_like<ColLiteral>(pattern);
         }
 
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_contains(std::string_view needle) const
+        {
+            return query().template where_contains<ColLiteral>(needle);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_starts_with(std::string_view prefix) const
+        {
+            return query().template where_starts_with<ColLiteral>(prefix);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_ends_with(std::string_view suffix) const
+        {
+            return query().template where_ends_with<ColLiteral>(suffix);
+        }
+
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
             requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_in(const Ts&... vals) const

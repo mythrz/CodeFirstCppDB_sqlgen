@@ -891,4 +891,246 @@ namespace
     }
 #endif
 
+    // =========================================================================
+    // Phase 60 (Security S1): Parameterized Query AST, Predicate Validation & Escaped LIKE
+    // =========================================================================
+
+    struct SecMetricRow
+    {
+        static constexpr const char* tablename = "SecMetricRows";
+        sqlgen::PrimaryKey<std::int32_t> id{ 0 };
+        double score = 0.0;
+        double nan = 0.0;
+        double inf = 0.0;
+        std::uint64_t big_val = 0;
+        std::string label;
+    };
+
+    TEST(Phase60SecurityQueryTest, NaNInfinityAndSubnormalDoublesAreBoundNotInterpolated)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<SecMetricRow>().has_value());
+
+        DAL::DbSet<SecMetricRow> metrics(conn);
+        const double pos_inf = std::numeric_limits<double>::infinity();
+        const double qnan = std::numeric_limits<double>::quiet_NaN();
+
+        ASSERT_TRUE(
+            metrics.add(SecMetricRow{ .id = 1, .score = 1.5, .nan = 1.5, .inf = 1.5, .big_val = 10, .label = "hijack_bait" }).has_value());
+        ASSERT_TRUE(
+            metrics.add(SecMetricRow{ .id = 2, .score = pos_inf, .nan = 0.0, .inf = 0.0, .big_val = 20, .label = "is_inf" }).has_value());
+        ASSERT_TRUE(
+            metrics.add(SecMetricRow{ .id = 3, .score = 1e-9, .nan = 0.0, .inf = 0.0, .big_val = 30, .label = "tiny" }).has_value());
+        ASSERT_TRUE(metrics.add(SecMetricRow{ .id = 4, .score = 0.0, .nan = 0.0, .inf = 0.0, .big_val = 40, .label = "zero" }).has_value());
+
+        // Previously, sqlgen::sqlite::to_sql serialized NaN as unquoted `nan`, turning `WHERE score = nan`
+        // into a column-to-column comparison against column "nan" (matching row 1!). With `?` binding,
+        // NaN binds as SQL NULL so `score = NULL` matches zero rows cleanly with no SQL error.
+        auto nanRows = metrics.where_equal<"score">(qnan).try_to_vector();
+        ASSERT_TRUE(nanRows.has_value()) << nanRows.error().to_string();
+        EXPECT_TRUE(nanRows->empty());
+
+        // Infinity binds via sqlite3_bind_double as IEEE +Inf, matching ONLY row 2 (not row 1 where score == inf).
+        auto infRows = metrics.where_equal<"score">(pos_inf).try_to_vector();
+        ASSERT_TRUE(infRows.has_value()) << infRows.error().to_string();
+        ASSERT_EQ(infRows->size(), 1u);
+        EXPECT_EQ((*infRows)[0].id.value(), 2);
+
+        // Subnormal/small double 1e-9 must NOT truncate to 0.000000 and match row 4!
+        auto tinyRows = metrics.where_equal<"score">(1e-9).try_to_vector();
+        ASSERT_TRUE(tinyRows.has_value()) << tinyRows.error().to_string();
+        ASSERT_EQ(tinyRows->size(), 1u);
+        EXPECT_EQ((*tinyRows)[0].id.value(), 3);
+
+        // Bulk update_where with IEEE +Inf and 1e-9 must also bind cleanly without SQL syntax/hijack issues.
+        ASSERT_TRUE(metrics.where_equal<"id">(4).update_where<"score">(1e-9).has_value());
+        auto tinyAfterUpdate = metrics.where_equal<"score">(1e-9).try_count();
+        ASSERT_TRUE(tinyAfterUpdate.has_value()) << tinyAfterUpdate.error().to_string();
+        EXPECT_EQ(*tinyAfterUpdate, 2u);
+
+        ASSERT_TRUE(metrics.where_equal<"id">(4).update_where<"score">(pos_inf).has_value());
+        auto infAfterUpdate = metrics.where_equal<"score">(pos_inf).try_count();
+        ASSERT_TRUE(infAfterUpdate.has_value()) << infAfterUpdate.error().to_string();
+        EXPECT_EQ(*infAfterUpdate, 2u);
+    }
+
+    TEST(Phase60SecurityQueryTest, OversizedUint64AndLimitOffsetAreRejectedWithConstraintViolation)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<SecMetricRow>().has_value());
+
+        DAL::DbSet<SecMetricRow> metrics(conn);
+        ASSERT_TRUE(metrics.add(SecMetricRow{ .id = 1, .score = 1.0, .nan = 0.0, .inf = 0.0, .big_val = 42, .label = "ok" }).has_value());
+        // Insert a negative sentinel row via raw SQL so any wrap-around of UINT64_MAX -> -1 would match it.
+        ASSERT_TRUE(conn->execute_raw(
+                            "INSERT INTO \"SecMetricRows\" (\"id\", \"score\", \"nan\", \"inf\", \"big_val\", \"label\") "
+                            "VALUES (2, 0.0, 0.0, 0.0, -1, 'neg_sentinel');")
+                        .has_value());
+
+        constexpr std::uint64_t kMaxU64 = std::numeric_limits<std::uint64_t>::max();
+        constexpr std::uint64_t kJustOverI64 = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1ULL;
+
+        auto rEq = metrics.where_equal<"big_val">(kMaxU64).try_to_vector();
+        ASSERT_FALSE(rEq.has_value());
+        EXPECT_EQ(rEq.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rOr = metrics.where_equal<"id">(1).or_where_equal<"big_val">(kJustOverI64).try_count();
+        ASSERT_FALSE(rOr.has_value());
+        EXPECT_EQ(rOr.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rIn = metrics.where_in<"big_val">(std::uint64_t{ 42 }, kMaxU64).try_to_vector();
+        ASSERT_FALSE(rIn.has_value());
+        EXPECT_EQ(rIn.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        const std::vector<std::uint64_t> badVec{ std::uint64_t{ 42 }, kJustOverI64 };
+        auto rInVec = metrics.where_in_vec<"big_val">(badVec).try_to_vector();
+        ASSERT_FALSE(rInVec.has_value());
+        EXPECT_EQ(rInVec.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rBetween = metrics.where_between<"big_val">(std::uint64_t{ 0 }, kMaxU64).try_any();
+        ASSERT_FALSE(rBetween.has_value());
+        EXPECT_EQ(rBetween.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rDel = metrics.where_equal<"big_val">(kMaxU64).remove_where();
+        ASSERT_FALSE(rDel.has_value());
+        EXPECT_EQ(rDel.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto rUpd = metrics.where_equal<"id">(1).update_where<"big_val">(kMaxU64);
+        ASSERT_FALSE(rUpd.has_value());
+        EXPECT_EQ(rUpd.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        // Neither row should have been modified or deleted.
+        EXPECT_EQ(metrics.count(), 2u);
+        auto row1 = metrics.find(1);
+        ASSERT_TRUE(row1.has_value());
+        EXPECT_EQ(row1->big_val, 42ULL);
+
+        // Oversized limit / offset must also fail cleanly with ConstraintViolation.
+        if constexpr (sizeof(std::size_t) >= sizeof(std::int64_t))
+        {
+            const std::size_t kOverI64 = static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) + 1u;
+            auto rLim = metrics.query().limit(kOverI64).try_to_vector();
+            ASSERT_FALSE(rLim.has_value());
+            EXPECT_EQ(rLim.error().code, Core::DbErrorCode::ConstraintViolation);
+
+            auto rOff = metrics.query().offset(kOverI64).try_to_vector();
+            ASSERT_FALSE(rOff.has_value());
+            EXPECT_EQ(rOff.error().code, Core::DbErrorCode::ConstraintViolation);
+        }
+    }
+
+    TEST(Phase60SecurityQueryTest, LongEmbeddedNulStringsWorkWithoutExprDepthOverflowAndPartialIndexHardening)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<SecMetricRow>().has_value());
+
+        DAL::DbSet<SecMetricRow> metrics(conn);
+
+        // 2,000 NUL bytes would create >4,000 chained `|| char(0) ||` expressions and crash SQLITE_LIMIT_EXPR_DEPTH (1000)
+        // under string interpolation, whereas bound `?` handles it in O(1) depth.
+        std::string manyNuls;
+        manyNuls.push_back('A');
+        manyNuls.append(2000, '\0');
+        manyNuls.push_back('Z');
+
+        ASSERT_TRUE(
+            metrics.add(SecMetricRow{ .id = 1, .score = 1.0, .nan = 0.0, .inf = 0.0, .big_val = 1, .label = manyNuls }).has_value());
+
+        auto found = metrics.where_equal<"label">(manyNuls).try_to_vector();
+        ASSERT_TRUE(found.has_value()) << found.error().to_string();
+        ASSERT_EQ(found->size(), 1u);
+        EXPECT_EQ((*found)[0].label, manyNuls);
+
+        std::string manyNuls2;
+        manyNuls2.push_back('B');
+        manyNuls2.append(2000, '\0');
+        manyNuls2.push_back('Y');
+        ASSERT_TRUE(metrics.where_equal<"label">(manyNuls).update_where<"label">(manyNuls2).has_value());
+
+        auto found2 = metrics.where_equal<"label">(manyNuls2).try_count();
+        ASSERT_TRUE(found2.has_value()) << found2.error().to_string();
+        EXPECT_EQ(*found2, 1u);
+
+        // Partial index DDL with 2,000 NUL bytes uses O(1)-depth CAST(X'...' AS TEXT).
+        auto idxNulRes = metrics.where_equal<"label">(manyNuls2).ensure_index_created<"idx_sec_many_nuls", "label">();
+        ASSERT_TRUE(idxNulRes.has_value()) << idxNulRes.error().to_string();
+
+        // Partial index DDL with non-finite floats must be rejected cleanly.
+        auto idxNanRes =
+            metrics.where_equal<"score">(std::numeric_limits<double>::quiet_NaN()).ensure_index_created<"idx_sec_nan", "score">();
+        ASSERT_FALSE(idxNanRes.has_value());
+        EXPECT_EQ(idxNanRes.error().code, Core::DbErrorCode::ConstraintViolation);
+    }
+
+    TEST(Phase60SecurityQueryTest, EscapedLikeHelpersTreatWildcardsLiterallyAcrossAllTerminals)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        Phase30DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 1 }, "100% legit", "Tag")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 2 }, "1000 legit", "Tag")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 3 }, "a_b", "Tag")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 4 }, "axb", "Tag")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 5 }, "c\\d", "Tag")).has_value());
+        ASSERT_TRUE(db.people.add(Core::Person(Core::PersonId{ 6 }, "prefix%mid_end\\tail", "Other")).has_value());
+
+        // Contains with '%' must NOT match "1000 legit"
+        auto pctRows = db.people.where_contains<"firstName">("100%").try_to_vector();
+        ASSERT_TRUE(pctRows.has_value()) << pctRows.error().to_string();
+        ASSERT_EQ(pctRows->size(), 1u);
+        EXPECT_EQ((*pctRows)[0].getId().get(), 1);
+
+        // Contains with '_' must NOT match "axb"
+        auto usRows = db.people.where_contains<"firstName">("a_b").try_to_vector();
+        ASSERT_TRUE(usRows.has_value()) << usRows.error().to_string();
+        ASSERT_EQ(usRows->size(), 1u);
+        EXPECT_EQ((*usRows)[0].getId().get(), 3);
+
+        // Contains with '\' must match literal backslash
+        auto bsRows = db.people.where_contains<"firstName">("c\\d").try_to_vector();
+        ASSERT_TRUE(bsRows.has_value()) << bsRows.error().to_string();
+        ASSERT_EQ(bsRows->size(), 1u);
+        EXPECT_EQ((*bsRows)[0].getId().get(), 5);
+
+        // Starts with & ends with escaping
+        auto swRows = db.people.where_starts_with<"firstName">("prefix%").try_select<"firstName">();
+        ASSERT_TRUE(swRows.has_value()) << swRows.error().to_string();
+        ASSERT_EQ(swRows->size(), 1u);
+        EXPECT_EQ((*swRows)[0], "prefix%mid_end\\tail");
+
+        auto ewRows = db.people.where_ends_with<"firstName">("_end\\tail").try_select_columns<"id", "lastName">();
+        ASSERT_TRUE(ewRows.has_value()) << ewRows.error().to_string();
+        ASSERT_EQ(ewRows->size(), 1u);
+        EXPECT_EQ(std::get<0>((*ewRows)[0]), 6);
+        EXPECT_EQ(std::get<1>((*ewRows)[0]), "Other");
+
+        // Mixed composition: standard sqlgen predicate + escaped LIKE OR + count + update_where + paginated remove_where
+        auto mixedCount = db.people.where_contains<"firstName">("100%")
+                              .or_where_starts_with<"firstName">("a_b")
+                              .or_where_ends_with<"firstName">("\\d")
+                              .try_count();
+        ASSERT_TRUE(mixedCount.has_value()) << mixedCount.error().to_string();
+        EXPECT_EQ(*mixedCount, 3u);
+
+        auto updRes = db.people.where_contains<"firstName">("100%").where_equal<"lastName">("Tag").update_where<"lastName">("Discount");
+        ASSERT_TRUE(updRes.has_value()) << updRes.error().to_string();
+        EXPECT_EQ(db.people.find(1)->getLastName(), "Discount");
+        EXPECT_EQ(db.people.find(2)->getLastName(), "Tag");
+
+        // Paginated remove_where with escaped LIKE predicate
+        auto delRes = db.people.where_contains<"firstName">("%").order_by<"id">(false).limit(1).remove_where();
+        ASSERT_TRUE(delRes.has_value()) << delRes.error().to_string();
+        EXPECT_FALSE(db.people.contains(1)); // "100% legit" deleted
+        EXPECT_TRUE(db.people.contains(6)); // "prefix%mid_end\tail" kept due to limit(1)
+        EXPECT_TRUE(db.people.contains(2)); // "1000 legit" untouched
+    }
+
 } // namespace
