@@ -159,15 +159,51 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("SQL identifier cannot be empty") };
             }
-            if (name.find('\0') != std::string_view::npos)
+            for (const char raw_ch : name)
             {
-                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("SQL identifier contains embedded NUL") };
-            }
-            if (name.find('"') != std::string_view::npos)
-            {
-                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("SQL identifier cannot contain double quotes") };
+                const unsigned char ch = static_cast<unsigned char>(raw_ch);
+                if (ch == '\0')
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("SQL identifier contains embedded NUL") };
+                }
+                if (ch == '"')
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                        "SQL identifier cannot contain double quotes") };
+                }
+                if (ch < 0x20u || ch == 0x7Fu)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                        "SQL identifier cannot contain ASCII control characters") };
+                }
             }
             return {};
+        }
+
+        template<typename FieldT>
+        [[nodiscard]] inline std::expected<void, Core::DbError> validate_field_fk_identifiers()
+        {
+            using CleanT = std::remove_cvref_t<FieldT>;
+            if constexpr (DAL::Schema::SqlgenForeignKeyField<CleanT>)
+            {
+                if (auto res = validate_ddl_identifier(std::string_view{ CleanT::ForeignTableType::tablename }); !res)
+                {
+                    return res;
+                }
+                return validate_ddl_identifier(DAL::Schema::detail::ForeignKeyColumnName<typename CleanT::ColumnType>::value);
+            }
+            else if constexpr (DAL::Schema::detail::is_optional_v<CleanT>)
+            {
+                return validate_field_fk_identifiers<typename CleanT::value_type>();
+            }
+            else if constexpr (is_sqlgen_unique_v<CleanT>)
+            {
+                return validate_field_fk_identifiers<typename CleanT::ReflectionType>();
+            }
+            else
+            {
+                return {};
+            }
         }
 
         template<typename DTO>
@@ -186,12 +222,9 @@ export namespace DAL
                 }
                 using RawFieldT = [:std::meta::type_of(m):];
                 using FieldT = std::remove_cvref_t<RawFieldT>;
-                if constexpr (DAL::Schema::SqlgenForeignKeyField<FieldT>)
+                if (status)
                 {
-                    if (status)
-                    {
-                        status = validate_ddl_identifier(std::string_view{ FieldT::ForeignTableType::tablename });
-                    }
+                    status = validate_field_fk_identifiers<FieldT>();
                 }
             }
             return status;

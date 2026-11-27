@@ -1004,4 +1004,171 @@ namespace
         EXPECT_EQ(prepParamRes.error().code, Core::DbErrorCode::ConnectionError);
     }
 #endif
+
+    // =========================================================================
+    // Phase 61 (Security S2): SQLite Engine Hardening & Least-Privilege Open Options
+    // =========================================================================
+
+    struct SecBadTablenameDto
+    {
+        static constexpr const char* tablename = "Bad\nTable";
+        sqlgen::PrimaryKey<std::int32_t> id{ 0 };
+    };
+
+    struct SecBadFkParentDto
+    {
+        static constexpr const char* tablename = "SecBadFkChild";
+        sqlgen::PrimaryKey<std::int32_t> id{ 0 };
+        sqlgen::ForeignKey<std::int32_t, SecBadTablenameDto, "id"> parent_id{ 0 };
+    };
+
+    TEST(Phase61SqliteHardeningOptionsTest, DefaultEngineHardeningFlagsAreActive)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value()) << connRes.error().to_string();
+        auto conn = connRes.value();
+
+        // TRUSTED_SCHEMA is OFF by default.
+        auto tsRes = conn->query_rows("PRAGMA trusted_schema;");
+        ASSERT_TRUE(tsRes.has_value()) << tsRes.error().to_string();
+        ASSERT_EQ(tsRes->rows.size(), 1u);
+        ASSERT_EQ(tsRes->rows[0].cells.size(), 1u);
+        ASSERT_TRUE(std::holds_alternative<std::int64_t>(tsRes->rows[0].cells[0]));
+        EXPECT_EQ(std::get<std::int64_t>(tsRes->rows[0].cells[0]), 0);
+
+        // DEFENSIVE mode blocks direct writes to sqlite_schema even if writable_schema is requested.
+        ASSERT_TRUE(conn->execute_prepared("CREATE TABLE t_def (id INTEGER PRIMARY KEY);").has_value());
+        (void)conn->execute_prepared("PRAGMA writable_schema = ON;");
+        auto corruptRes = conn->execute_prepared("DELETE FROM sqlite_schema WHERE name = 't_def';");
+        EXPECT_FALSE(corruptRes.has_value());
+
+        // DQS_DML is OFF by default: double-quoted unknown identifier must NOT silently become a string literal.
+        auto dqsRes = conn->query_rows("SELECT \"not_a_real_column\" FROM t_def;");
+        EXPECT_FALSE(dqsRes.has_value());
+
+        // ATTACH DATABASE is blocked by default (max_attached = 0).
+        auto attachBlocked = conn->execute_prepared("ATTACH DATABASE ':memory:' AS extra_db;");
+        EXPECT_FALSE(attachBlocked.has_value());
+
+        // Opting in via max_attached allows ATTACH DATABASE.
+        DAL::SQLiteConnectionOptions attachOpts;
+        attachOpts.max_attached = 2;
+        auto attachConnRes = DAL::SQLiteConnection::connect(":memory:", attachOpts);
+        ASSERT_TRUE(attachConnRes.has_value()) << attachConnRes.error().to_string();
+        auto attachAllowed = attachConnRes.value()->execute_prepared("ATTACH DATABASE ':memory:' AS extra_db;");
+        EXPECT_TRUE(attachAllowed.has_value()) << attachAllowed.error().to_string();
+    }
+
+    TEST(Phase61SqliteHardeningOptionsTest, ReadOnlyCreateIfMissingNoFollowAndOwnerOnlyPermissions)
+    {
+        const auto dbPath = make_unique_temp_db_path("codefirst_phase61_hardening");
+        const ScopedTempDbCleanup cleanup{ dbPath };
+
+        // create_if_missing = false must fail when file does not exist and must not create it.
+        DAL::SQLiteConnectionOptions noCreateOpts;
+        noCreateOpts.create_if_missing = false;
+        auto missingRes = DAL::SQLiteConnection::connect(dbPath, noCreateOpts);
+        ASSERT_FALSE(missingRes.has_value());
+        EXPECT_EQ(missingRes.error().code, Core::DbErrorCode::ConnectionError);
+        EXPECT_FALSE(std::filesystem::exists(dbPath));
+
+        // Invalid option combinations are rejected up front.
+        DAL::SQLiteConnectionOptions badRoWal;
+        badRoWal.read_only = true;
+        badRoWal.wal_mode = true;
+        auto roWalRes = DAL::SQLiteConnection::connect(dbPath, badRoWal);
+        ASSERT_FALSE(roWalRes.has_value());
+        EXPECT_EQ(roWalRes.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        DAL::SQLiteConnectionOptions badRoChmod;
+        badRoChmod.read_only = true;
+        badRoChmod.owner_only_permissions = true;
+        auto roChmodRes = DAL::SQLiteConnection::connect(dbPath, badRoChmod);
+        ASSERT_FALSE(roChmodRes.has_value());
+        EXPECT_EQ(roChmodRes.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        // Create on-disk DB with owner_only_permissions = true and seed one row.
+        DAL::SQLiteConnectionOptions ownerOpts;
+        ownerOpts.owner_only_permissions = true;
+        {
+            auto rwConnRes = DAL::SQLiteConnection::connect(dbPath, ownerOpts);
+            ASSERT_TRUE(rwConnRes.has_value()) << rwConnRes.error().to_string();
+            auto rwConn = rwConnRes.value();
+            ASSERT_TRUE(rwConn->ensure_table_created<PocoUser>().has_value());
+            DAL::DbSet<PocoUser> users(rwConn);
+            ASSERT_TRUE(users.add(PocoUser{ .user_id = 1, .username = "hardened" }).has_value());
+        }
+
+#if defined(__unix__) || defined(__APPLE__)
+        {
+            std::error_code ec;
+            const auto perms = std::filesystem::status(dbPath, ec).permissions();
+            ASSERT_FALSE(ec);
+            const auto rwMask = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write;
+            const auto groupOtherMask = std::filesystem::perms::group_all | std::filesystem::perms::others_all;
+            EXPECT_EQ((perms & rwMask), rwMask);
+            EXPECT_EQ((perms & groupOtherMask), std::filesystem::perms::none);
+        }
+#endif
+
+        // Open read_only = true: reads succeed, writes fail.
+        DAL::SQLiteConnectionOptions roOpts;
+        roOpts.read_only = true;
+        auto roConnRes = DAL::SQLiteConnection::connect(dbPath, roOpts);
+        ASSERT_TRUE(roConnRes.has_value()) << roConnRes.error().to_string();
+        {
+            auto roConn = roConnRes.value();
+            DAL::DbSet<PocoUser> roUsers(roConn);
+            auto found = roUsers.try_find(1);
+            ASSERT_TRUE(found.has_value()) << found.error().to_string();
+            ASSERT_TRUE(found->has_value());
+            EXPECT_EQ((*found)->username, "hardened");
+
+            auto writeAttempt = roUsers.add(PocoUser{ .user_id = 2, .username = "blocked" });
+            EXPECT_FALSE(writeAttempt.has_value());
+        }
+
+#if defined(__unix__) || defined(__APPLE__)
+        // Symlink open must be rejected by default (no_follow = true) and allowed when no_follow = false.
+        const std::string linkPath = dbPath + ".symlink";
+        std::error_code symEc;
+        std::filesystem::remove(linkPath, symEc);
+        std::filesystem::create_symlink(dbPath, linkPath, symEc);
+        ASSERT_FALSE(symEc);
+
+        auto symBlocked = DAL::SQLiteConnection::connect(linkPath);
+        EXPECT_FALSE(symBlocked.has_value());
+
+        DAL::SQLiteConnectionOptions followOpts;
+        followOpts.no_follow = false;
+        followOpts.read_only = true;
+        auto symAllowed = DAL::SQLiteConnection::connect(linkPath, followOpts);
+        EXPECT_TRUE(symAllowed.has_value()) << (symAllowed ? "" : symAllowed.error().to_string());
+
+        std::filesystem::remove(linkPath, symEc);
+#endif
+    }
+
+    TEST(Phase61SqliteHardeningOptionsTest, DdlIdentifierValidationRejectsControlCharsAndFkTargetColumns)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+
+        auto badTableRes = conn->ensure_table_created<SecBadTablenameDto>();
+        ASSERT_FALSE(badTableRes.has_value());
+        EXPECT_EQ(badTableRes.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto badFkRes = conn->ensure_table_created<SecBadFkParentDto>();
+        ASSERT_FALSE(badFkRes.has_value());
+        EXPECT_EQ(badFkRes.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto ctrlLf = DAL::detail::validate_ddl_identifier("col\nname");
+        ASSERT_FALSE(ctrlLf.has_value());
+        EXPECT_EQ(ctrlLf.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto ctrlDel = DAL::detail::validate_ddl_identifier("col\x7f");
+        ASSERT_FALSE(ctrlDel.has_value());
+        EXPECT_EQ(ctrlDel.error().code, Core::DbErrorCode::ConstraintViolation);
+    }
 } // namespace

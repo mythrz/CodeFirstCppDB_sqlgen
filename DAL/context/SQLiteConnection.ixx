@@ -3,6 +3,9 @@ module;
 #include <sqlgen.hpp>
 #include <sqlgen/sqlite/to_sql.hpp>
 #include <sqlite3.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/stat.h>
+#endif
 
 export module codefirst.dal:sqlite_connection;
 
@@ -18,6 +21,15 @@ export namespace DAL
         bool foreign_keys = true;
         std::chrono::milliseconds busy_timeout{ 0 };
         bool wal_mode = false;
+        bool read_only = false;
+        bool create_if_missing = true;
+        bool no_follow = true;
+        bool owner_only_permissions = false;
+        bool defensive = true;
+        bool trusted_schema = false;
+        bool allow_dqs = false;
+        bool allow_load_extension = false;
+        int max_attached = 0;
     };
 
     struct RowCount
@@ -91,9 +103,31 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Invalid SQLite database path") };
             }
+            if (options.read_only && options.wal_mode)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    "Cannot enable WAL journal mode on a read-only SQLite connection") };
+            }
+            if (options.read_only && options.owner_only_permissions)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    "Cannot modify file permissions on a read-only SQLite connection") };
+            }
+
+            int open_flags = options.read_only ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE;
+            if (!options.read_only && options.create_if_missing)
+            {
+                open_flags |= SQLITE_OPEN_CREATE;
+            }
+#ifdef SQLITE_OPEN_NOFOLLOW
+            if (options.no_follow)
+            {
+                open_flags |= SQLITE_OPEN_NOFOLLOW;
+            }
+#endif
 
             sqlite3* raw_db = nullptr;
-            const int open_rc = sqlite3_open_v2(dbPath.c_str(), &raw_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+            const int open_rc = sqlite3_open_v2(dbPath.c_str(), &raw_db, open_flags, nullptr);
             if (open_rc != SQLITE_OK || raw_db == nullptr)
             {
                 const std::string msg = raw_db != nullptr ? sqlite3_errmsg(raw_db) : "Failed to open SQLite database";
@@ -107,6 +141,72 @@ export namespace DAL
             (void)sqlite3_extended_result_codes(raw_db, 1);
 
             auto handle = std::make_shared<SQLiteConnection>(raw_db);
+
+            auto apply_db_config = [raw_db](int op, int val, std::string_view name) -> std::expected<void, Core::DbError>
+            {
+                const int rc = sqlite3_db_config(raw_db, op, val, nullptr);
+                if (rc != SQLITE_OK)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::create(
+                        Core::DbErrorCode::ConnectionError,
+                        std::format("Failed to configure SQLite {}", name),
+                        sqlite3_extended_errcode(raw_db)) };
+                }
+                return {};
+            };
+
+#ifdef SQLITE_DBCONFIG_DEFENSIVE
+            if (auto r = apply_db_config(SQLITE_DBCONFIG_DEFENSIVE, options.defensive ? 1 : 0, "DEFENSIVE"); !r)
+            {
+                return std::unexpected<Core::DbError>{ r.error() };
+            }
+#endif
+#ifdef SQLITE_DBCONFIG_TRUSTED_SCHEMA
+            if (auto r = apply_db_config(SQLITE_DBCONFIG_TRUSTED_SCHEMA, options.trusted_schema ? 1 : 0, "TRUSTED_SCHEMA"); !r)
+            {
+                return std::unexpected<Core::DbError>{ r.error() };
+            }
+#endif
+#ifdef SQLITE_DBCONFIG_DQS_DML
+            if (auto r = apply_db_config(SQLITE_DBCONFIG_DQS_DML, options.allow_dqs ? 1 : 0, "DQS_DML"); !r)
+            {
+                return std::unexpected<Core::DbError>{ r.error() };
+            }
+#endif
+#ifdef SQLITE_DBCONFIG_DQS_DDL
+            if (auto r = apply_db_config(SQLITE_DBCONFIG_DQS_DDL, options.allow_dqs ? 1 : 0, "DQS_DDL"); !r)
+            {
+                return std::unexpected<Core::DbError>{ r.error() };
+            }
+#endif
+#ifdef SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION
+            if (auto r =
+                    apply_db_config(SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, options.allow_load_extension ? 1 : 0, "ENABLE_LOAD_EXTENSION");
+                !r)
+            {
+                return std::unexpected<Core::DbError>{ r.error() };
+            }
+#endif
+            if (options.max_attached >= 0)
+            {
+                (void)sqlite3_limit(raw_db, SQLITE_LIMIT_ATTACHED, options.max_attached);
+            }
+
+#if defined(__unix__) || defined(__APPLE__)
+            if (options.owner_only_permissions)
+            {
+                const char* resolved = sqlite3_db_filename(raw_db, "main");
+                if (resolved != nullptr && resolved[0] != '\0')
+                {
+                    if (::chmod(resolved, S_IRUSR | S_IWUSR) != 0)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                            "Failed to set owner-only (0600) permissions on SQLite database file") };
+                    }
+                }
+            }
+#endif
+
             if (options.foreign_keys)
             {
                 if (auto fk_res = handle->enable_foreign_keys(); !fk_res)
@@ -1432,7 +1532,7 @@ export namespace DAL
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Schema user_version cannot be negative") };
             }
-            if (auto res = execute_raw(std::format("PRAGMA user_version = {};", version)); !res)
+            if (auto res = execute_prepared(std::format("PRAGMA user_version = {};", version)); !res)
             {
                 return res;
             }
