@@ -255,7 +255,7 @@ export namespace DAL
                 if (!std::in_range<CleanTarget>(src))
                 {
                     return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
-                        std::format("Key value {} is out of range for entity key type", src)) };
+                        "Key value is out of range for entity key type") };
                 }
                 return static_cast<CleanTarget>(src);
             }

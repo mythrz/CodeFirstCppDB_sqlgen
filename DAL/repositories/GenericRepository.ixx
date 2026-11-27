@@ -58,12 +58,20 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::vector<Domain> get_all() const override
         {
+            if (!conn_)
+            {
+                return {};
+            }
             return conn_->template fetch_all<DTO>() | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_domain) |
                 std::ranges::to<std::vector>();
         }
 
         [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> try_get_all() const override
         {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
             if constexpr (requires { conn_->template try_fetch_all<DTO>(); })
             {
                 auto res = conn_->template try_fetch_all<DTO>();
@@ -86,6 +94,10 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::optional<Domain> get_by_id(KeyType id) const override
         {
+            if (!conn_)
+            {
+                return std::nullopt;
+            }
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
                 const auto& [... parts] = id.tuple();
@@ -115,6 +127,10 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_get_by_id(KeyType id) const override
         {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
                 const auto& [... parts] = id.tuple();
@@ -184,6 +200,10 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::expected<void, Core::DbError> insert_one(const Domain& item) override
         {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
             if constexpr (requires { conn_->try_insert(dto); })
             {
@@ -202,6 +222,10 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::expected<void, Core::DbError> insert_many(const std::vector<Domain>& items) override
         {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
             auto dtos = items | std::views::transform(DAL::Mappers::MapperTraits<Domain, DTO>::to_dto) | std::ranges::to<std::vector>();
             if constexpr (requires { conn_->try_insert_many(dtos); })
             {
@@ -220,6 +244,10 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::expected<void, Core::DbError> update_one(const Domain& item) override
         {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
             auto dto = DAL::Mappers::MapperTraits<Domain, DTO>::to_dto(item);
             if constexpr (requires { conn_->try_update(dto); })
             {
@@ -238,6 +266,10 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::expected<void, Core::DbError> delete_by_id(KeyType id) override
         {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
                 const auto& [... parts] = id.tuple();
@@ -285,6 +317,10 @@ export namespace DAL::Repositories
 
         [[nodiscard]] bool exists_by_id(KeyType id) const override
         {
+            if (!conn_)
+            {
+                return false;
+            }
             if constexpr (Core::CompositeKeyType<KeyType>)
             {
                 const auto& [... parts] = id.tuple();
@@ -305,20 +341,24 @@ export namespace DAL::Repositories
 
         [[nodiscard]] std::size_t count() const override
         {
+            if (!conn_)
+            {
+                return 0;
+            }
             return conn_->template count<DTO>();
         }
 
     protected:
         [[nodiscard]] Core::DbError map_conn_error(std::string_view msg) const
         {
-            if constexpr (requires { conn_->map_error(msg); })
+            if (conn_)
             {
-                return conn_->map_error(msg);
+                if constexpr (requires { conn_->map_error(msg); })
+                {
+                    return conn_->map_error(msg);
+                }
             }
-            else
-            {
-                return Core::DbError::map_from_message(msg);
-            }
+            return Core::DbError::map_from_message(msg);
         }
 
         template<typename Part>

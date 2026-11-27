@@ -1769,7 +1769,7 @@ export namespace DAL
                     if (field > static_cast<CleanT>(std::numeric_limits<std::int64_t>::max()))
                     {
                         return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
-                            std::format("Unsigned 64-bit integer value {} exceeds SQLite signed 64-bit INTEGER range", field)) };
+                            std::format("Unsigned 64-bit integer parameter at index {} exceeds SQLite signed 64-bit INTEGER range", idx)) };
                     }
                     if (sqlite3_bind_int64(stmt, idx, static_cast<sqlite3_int64>(field)) != SQLITE_OK)
                     {
@@ -1884,6 +1884,10 @@ export namespace DAL
                 }
                 return std::string{};
             }
+            if (len <= 0)
+            {
+                return std::string{};
+            }
             return std::string(txt, static_cast<std::size_t>(len));
         }
 
@@ -1974,7 +1978,7 @@ export namespace DAL
                             return parsed != 0;
                         }
                         return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
-                            std::format("Invalid boolean value '{}' in column {}", sv, col_idx)) };
+                            std::format("Invalid boolean text ({} bytes) in column {}", sv.size(), col_idx)) };
                     }
                     return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
                         std::format("Incompatible SQLite storage class {} for boolean column {}", col_type, col_idx)) };
@@ -1987,7 +1991,7 @@ export namespace DAL
                         if (!std::in_range<CleanT>(v))
                         {
                             return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
-                                std::format("Integer value {} in column {} is out of range for target type", v, col_idx)) };
+                                std::format("Integer value in column {} is out of range for target type", col_idx)) };
                         }
                         return static_cast<CleanT>(v);
                     }
@@ -2011,7 +2015,7 @@ export namespace DAL
                             if (ec != std::errc{} || ptr != sv.data() + sv.size() || !std::in_range<CleanT>(parsed))
                             {
                                 return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
-                                    std::format("Invalid or out-of-range integer '{}' in column {}", sv, col_idx)) };
+                                    std::format("Invalid or out-of-range integer text ({} bytes) in column {}", sv.size(), col_idx)) };
                             }
                             return static_cast<CleanT>(parsed);
                         }
@@ -2022,7 +2026,8 @@ export namespace DAL
                             if (ec != std::errc{} || ptr != sv.data() + sv.size() || !std::in_range<CleanT>(parsed))
                             {
                                 return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
-                                    std::format("Invalid or out-of-range unsigned integer '{}' in column {}", sv, col_idx)) };
+                                    std::format(
+                                        "Invalid or out-of-range unsigned integer text ({} bytes) in column {}", sv.size(), col_idx)) };
                             }
                             return static_cast<CleanT>(parsed);
                         }
@@ -2050,7 +2055,7 @@ export namespace DAL
                         if (ec != std::errc{} || ptr != sv.data() + sv.size())
                         {
                             return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
-                                std::format("Invalid floating-point value '{}' in column {}", sv, col_idx)) };
+                                std::format("Invalid floating-point text ({} bytes) in column {}", sv.size(), col_idx)) };
                         }
                         return static_cast<CleanT>(parsed);
                     }
@@ -2059,17 +2064,35 @@ export namespace DAL
                 }
                 else if constexpr (std::is_same_v<CleanT, std::string>)
                 {
+                    if (col_type == SQLITE_BLOB)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Incompatible SQLite BLOB storage class for string column {}", col_idx)) };
+                    }
                     return read_column_text_exact(db, stmt, col_idx);
                 }
                 else if constexpr (std::is_same_v<CleanT, std::vector<std::byte>>)
                 {
+                    if (col_type != SQLITE_BLOB)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Incompatible SQLite storage class {} for BLOB column {}", col_type, col_idx)) };
+                    }
                     const auto* blob = static_cast<const std::byte*>(sqlite3_column_blob(stmt, col_idx));
                     const int len = sqlite3_column_bytes(stmt, col_idx);
-                    if (blob != nullptr && len > 0)
+                    if (blob == nullptr)
                     {
-                        return std::vector<std::byte>(blob, blob + len);
+                        if (sqlite3_errcode(db) == SQLITE_NOMEM)
+                        {
+                            return std::unexpected<Core::DbError>{ map_sqlite_db_error(db, sqlite3_errmsg(db)) };
+                        }
+                        return std::vector<std::byte>{};
                     }
-                    return std::vector<std::byte>{};
+                    if (len <= 0)
+                    {
+                        return std::vector<std::byte>{};
+                    }
+                    return std::vector<std::byte>(blob, blob + len);
                 }
                 else if constexpr (std::is_enum_v<CleanT>)
                 {
@@ -2083,7 +2106,8 @@ export namespace DAL
                         auto parsed = rfl::string_to_enum<CleanT>(*text_res);
                         if (!parsed)
                         {
-                            return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(parsed.error().what()) };
+                            return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                                std::format("Invalid enum text ({} bytes) in column {}", text_res->size(), col_idx)) };
                         }
                         return *parsed;
                     }
@@ -2094,7 +2118,7 @@ export namespace DAL
                         if (!std::in_range<UnderlyingT>(v))
                         {
                             return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
-                                std::format("Enum integer value {} in column {} is out of range", v, col_idx)) };
+                                std::format("Enum integer value in column {} is out of range", col_idx)) };
                         }
                         return static_cast<CleanT>(static_cast<UnderlyingT>(v));
                     }
@@ -2104,15 +2128,22 @@ export namespace DAL
                 else
                 {
                     // Fallback for custom sqlgen wrapper/domain types (e.g. Timestamp, Date, Varchar, rfl::Validator).
+                    if (col_type == SQLITE_BLOB)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Incompatible SQLite BLOB storage class for column {}", col_idx)) };
+                    }
                     auto text_res = read_column_text_exact(db, stmt, col_idx);
                     if (!text_res)
                     {
                         return std::unexpected<Core::DbError>{ text_res.error() };
                     }
+                    const std::size_t raw_size = text_res->size();
                     auto parsed = sqlgen::parsing::Parser<CleanT>::read(std::optional<std::string>{ std::move(*text_res) });
                     if (!parsed)
                     {
-                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(parsed.error().what()) };
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Failed to decode column {} ({} bytes) into target type", col_idx, raw_size)) };
                     }
                     return std::move(*parsed);
                 }

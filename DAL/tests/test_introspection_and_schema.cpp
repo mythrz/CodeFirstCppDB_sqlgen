@@ -1171,4 +1171,191 @@ namespace
         ASSERT_FALSE(ctrlDel.has_value());
         EXPECT_EQ(ctrlDel.error().code, Core::DbErrorCode::ConstraintViolation);
     }
+
+    // =========================================================================
+    // Phase 62 (Security S3): Null-Connection Safety, Strict BLOB/TEXT Decodes & Diagnostic Redaction
+    // =========================================================================
+
+#if !defined(CODEFIRST_CONTRACTS_ENFORCED)
+    TEST(Phase62SecurityDecodeAndNullSafetyTest, GenericRepositoryAndDbSetNullConnectionGuards)
+    {
+        using PersonRepo =
+            DAL::Repositories::GenericRepository<Core::Person, DAL::Schema::PersonDTO, DAL::SQLiteConnection, Core::Person::Key>;
+        PersonRepo nullRepo{ std::shared_ptr<DAL::SQLiteConnection>{} };
+        const Core::Person sample(Core::PersonId{ 1 }, "Ada", "Lovelace");
+        const Core::Person::Key sampleKey{ Core::PersonId{ 1 } };
+
+        EXPECT_TRUE(nullRepo.get_all().empty());
+        auto rAll = nullRepo.try_get_all();
+        ASSERT_FALSE(rAll.has_value());
+        EXPECT_EQ(rAll.error().code, Core::DbErrorCode::ConnectionError);
+
+        EXPECT_FALSE(nullRepo.get_by_id(sampleKey).has_value());
+        auto rById = nullRepo.try_get_by_id(sampleKey);
+        ASSERT_FALSE(rById.has_value());
+        EXPECT_EQ(rById.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rIns = nullRepo.insert_one(sample);
+        ASSERT_FALSE(rIns.has_value());
+        EXPECT_EQ(rIns.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rInsMany = nullRepo.insert_many({ sample });
+        ASSERT_FALSE(rInsMany.has_value());
+        EXPECT_EQ(rInsMany.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rUpd = nullRepo.update_one(sample);
+        ASSERT_FALSE(rUpd.has_value());
+        EXPECT_EQ(rUpd.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto rDel = nullRepo.delete_by_id(sampleKey);
+        ASSERT_FALSE(rDel.has_value());
+        EXPECT_EQ(rDel.error().code, Core::DbErrorCode::ConnectionError);
+
+        EXPECT_FALSE(nullRepo.exists_by_id(sampleKey));
+        EXPECT_EQ(nullRepo.count(), 0u);
+
+        DAL::DbSet<Core::Person> nullSet{ std::shared_ptr<DAL::SQLiteConnection>{} };
+        EXPECT_TRUE(nullSet.to_vector().empty());
+        EXPECT_FALSE(nullSet.find(1).has_value());
+        EXPECT_FALSE(nullSet.contains(1));
+        EXPECT_EQ(nullSet.count(), 0u);
+
+        auto sAll = nullSet.try_to_vector();
+        ASSERT_FALSE(sAll.has_value());
+        EXPECT_EQ(sAll.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto sFind = nullSet.try_find(1);
+        ASSERT_FALSE(sFind.has_value());
+        EXPECT_EQ(sFind.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto sAdd = nullSet.add(sample);
+        ASSERT_FALSE(sAdd.has_value());
+        EXPECT_EQ(sAdd.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto sUpd = nullSet.update(sample);
+        ASSERT_FALSE(sUpd.has_value());
+        EXPECT_EQ(sUpd.error().code, Core::DbErrorCode::ConnectionError);
+
+        auto sRem = nullSet.remove(sampleKey);
+        ASSERT_FALSE(sRem.has_value());
+        EXPECT_EQ(sRem.error().code, Core::DbErrorCode::ConnectionError);
+    }
+#endif
+
+    struct SecBlobTextRow
+    {
+        static constexpr const char* tablename = "SecBlobTextRows";
+        sqlgen::PrimaryKey<std::int32_t> id{ 0 };
+        std::string text_col;
+        std::vector<std::byte> blob_col;
+    };
+
+    TEST(Phase62SecurityDecodeAndNullSafetyTest, StrictBlobAndTextDecodingRejectsStorageClassMismatches)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<SecBlobTextRow>().has_value());
+
+        DAL::DbSet<SecBlobTextRow> rows(conn);
+        const std::vector<std::byte> bytes{ std::byte{ 0xDE }, std::byte{ 0xAD }, std::byte{ 0xBE }, std::byte{ 0xEF } };
+        ASSERT_TRUE(rows.add(SecBlobTextRow{ .id = 1, .text_col = "valid_text", .blob_col = bytes }).has_value());
+        ASSERT_TRUE(rows.add(SecBlobTextRow{ .id = 2, .text_col = "", .blob_col = {} }).has_value());
+
+        auto ok1 = rows.try_find(1);
+        ASSERT_TRUE(ok1.has_value()) << ok1.error().to_string();
+        ASSERT_TRUE(ok1->has_value());
+        EXPECT_EQ((*ok1)->text_col, "valid_text");
+        EXPECT_EQ((*ok1)->blob_col, bytes);
+
+        auto ok2 = rows.try_find(2);
+        ASSERT_TRUE(ok2.has_value()) << ok2.error().to_string();
+        ASSERT_TRUE(ok2->has_value());
+        EXPECT_TRUE((*ok2)->text_col.empty());
+        EXPECT_TRUE((*ok2)->blob_col.empty());
+
+        // Raw SQLITE_BLOB stored in a std::string column must be rejected.
+        ASSERT_TRUE(
+            conn->execute_prepared("INSERT INTO \"SecBlobTextRows\" (\"id\", \"text_col\", \"blob_col\") VALUES (3, X'DEADBEEF', X'01');")
+                .has_value());
+        auto badText = rows.try_find(3);
+        ASSERT_FALSE(badText.has_value());
+        EXPECT_EQ(badText.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        // SQLITE_TEXT stored in a std::vector<std::byte> column must be rejected.
+        ASSERT_TRUE(
+            conn->execute_prepared("INSERT INTO \"SecBlobTextRows\" (\"id\", \"text_col\", \"blob_col\") VALUES (4, 'ok', 'plaintext');")
+                .has_value());
+        auto badBlobText = rows.try_find(4);
+        ASSERT_FALSE(badBlobText.has_value());
+        EXPECT_EQ(badBlobText.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        // SQLITE_INTEGER stored in a std::vector<std::byte> column must be rejected.
+        ASSERT_TRUE(conn->execute_prepared("INSERT INTO \"SecBlobTextRows\" (\"id\", \"text_col\", \"blob_col\") VALUES (5, 'ok', 12345);")
+                        .has_value());
+        auto badBlobInt = rows.try_find(5);
+        ASSERT_FALSE(badBlobInt.has_value());
+        EXPECT_EQ(badBlobInt.error().code, Core::DbErrorCode::ConstraintViolation);
+    }
+
+    struct SecRedactRow
+    {
+        static constexpr const char* tablename = "SecRedactRows";
+        sqlgen::PrimaryKey<std::int32_t> id{ 0 };
+        std::int32_t num_col = 0;
+        double flt_col = 0.0;
+        bool flag_col = false;
+    };
+
+    TEST(Phase62SecurityDecodeAndNullSafetyTest, DecodeAndKeyRangeErrorsRedactSensitiveRawPayloads)
+    {
+        auto connRes = DAL::SQLiteConnection::connect(":memory:");
+        ASSERT_TRUE(connRes.has_value());
+        auto conn = connRes.value();
+        ASSERT_TRUE(conn->ensure_table_created<SecRedactRow>().has_value());
+
+        ASSERT_TRUE(conn->execute_prepared(
+                            "INSERT INTO \"SecRedactRows\" (\"id\", \"num_col\", \"flt_col\", \"flag_col\") "
+                            "VALUES (1, 'SECRET_TOKEN_XYZ_INT', 1.0, 1);")
+                        .has_value());
+        ASSERT_TRUE(conn->execute_prepared(
+                            "INSERT INTO \"SecRedactRows\" (\"id\", \"num_col\", \"flt_col\", \"flag_col\") "
+                            "VALUES (2, 1, 'SECRET_TOKEN_XYZ_FLT', 1);")
+                        .has_value());
+        ASSERT_TRUE(conn->execute_prepared(
+                            "INSERT INTO \"SecRedactRows\" (\"id\", \"num_col\", \"flt_col\", \"flag_col\") "
+                            "VALUES (3, 1, 1.0, 'SECRET_TOKEN_XYZ_BOOL');")
+                        .has_value());
+        ASSERT_TRUE(conn->execute_prepared(
+                            "INSERT INTO \"SecRedactRows\" (\"id\", \"num_col\", \"flt_col\", \"flag_col\") "
+                            "VALUES (4, 999999999999, 1.0, 1);")
+                        .has_value());
+
+        DAL::DbSet<SecRedactRow> rows(conn);
+
+        auto rInt = rows.try_find(1);
+        ASSERT_FALSE(rInt.has_value());
+        EXPECT_EQ(rInt.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(rInt.error().message.find("SECRET_TOKEN_XYZ"), std::string::npos);
+
+        auto rFlt = rows.try_find(2);
+        ASSERT_FALSE(rFlt.has_value());
+        EXPECT_EQ(rFlt.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(rFlt.error().message.find("SECRET_TOKEN_XYZ"), std::string::npos);
+
+        auto rBool = rows.try_find(3);
+        ASSERT_FALSE(rBool.has_value());
+        EXPECT_EQ(rBool.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(rBool.error().message.find("SECRET_TOKEN_XYZ"), std::string::npos);
+
+        auto rOverflow = rows.try_find(4);
+        ASSERT_FALSE(rOverflow.has_value());
+        EXPECT_EQ(rOverflow.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(rOverflow.error().message.find("999999999999"), std::string::npos);
+
+        auto rKeyRange = rows.try_find(std::int64_t{ 9876543210123LL });
+        ASSERT_FALSE(rKeyRange.has_value());
+        EXPECT_EQ(rKeyRange.error().code, Core::DbErrorCode::ConstraintViolation);
+        EXPECT_EQ(rKeyRange.error().message.find("9876543210123"), std::string::npos);
+    }
 } // namespace

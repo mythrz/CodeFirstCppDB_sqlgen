@@ -1707,13 +1707,28 @@ export namespace DAL
                         {
                             const auto* txt = reinterpret_cast<const char*>(sqlite3_column_text(stmt.raw(), c));
                             const int len = sqlite3_column_bytes(stmt.raw(), c);
-                            row.cells.emplace_back(txt != nullptr ? std::string(txt, static_cast<std::size_t>(len)) : std::string{});
+                            if (txt == nullptr && sqlite3_errcode(db_) == SQLITE_NOMEM)
+                            {
+                                return std::unexpected<Core::DbError>{ map_sqlite_error(sqlite3_errmsg(db_)) };
+                            }
+                            if (txt != nullptr && len > 0)
+                            {
+                                row.cells.emplace_back(std::string(txt, static_cast<std::size_t>(len)));
+                            }
+                            else
+                            {
+                                row.cells.emplace_back(std::string{});
+                            }
                             break;
                         }
                     case SQLITE_BLOB:
                         {
                             const auto* blob = static_cast<const std::byte*>(sqlite3_column_blob(stmt.raw(), c));
                             const int len = sqlite3_column_bytes(stmt.raw(), c);
+                            if (blob == nullptr && sqlite3_errcode(db_) == SQLITE_NOMEM)
+                            {
+                                return std::unexpected<Core::DbError>{ map_sqlite_error(sqlite3_errmsg(db_)) };
+                            }
                             if (blob != nullptr && len > 0)
                             {
                                 row.cells.emplace_back(std::vector<std::byte>(blob, blob + len));
