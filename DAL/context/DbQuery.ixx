@@ -28,6 +28,22 @@ export namespace DAL
             {
                 return val.get();
             }
+            else if constexpr (Schema::detail::is_sys_time_v<T>)
+            {
+                return Schema::detail::format_sys_time_iso8601(val);
+            }
+            else if constexpr (Schema::detail::is_ymd_v<T>)
+            {
+                return Schema::detail::format_ymd_iso8601(val);
+            }
+            else if constexpr (Schema::detail::is_fs_path_v<T>)
+            {
+                return val.string();
+            }
+            else if constexpr (std::is_enum_v<T>)
+            {
+                return std::to_underlying(val);
+            }
             else if constexpr (std::is_convertible_v<T, std::string_view> && !std::same_as<T, std::string>)
             {
                 return std::string(val);
@@ -55,6 +71,14 @@ export namespace DAL
                 if (val.has_value())
                 {
                     return validate_query_val(*val);
+                }
+                return std::nullopt;
+            }
+            else if constexpr (Schema::detail::is_ymd_v<T>)
+            {
+                if (!val.ok())
+                {
+                    return Core::DbError::constraint_violation("Calendar date query parameter is invalid");
                 }
                 return std::nullopt;
             }
@@ -250,6 +274,10 @@ export namespace DAL
                     return CleanTarget{ std::move(*inner) };
                 }
             }
+            else if constexpr (Core::StrongIdType<CleanSrc>)
+            {
+                return try_narrow_key_part<CleanTarget>(src.get());
+            }
             else if constexpr (is_range_checked_integer_v<CleanTarget> && is_range_checked_integer_v<CleanSrc>)
             {
                 if (!std::in_range<CleanTarget>(src))
@@ -400,6 +428,132 @@ export namespace DAL
 
     } // namespace detail
 
+    // Grouped aggregate query builder returned by DbQuery::group_by<Col>() / group_by<Member>().
+    template<typename Domain, typename DTO, typename ConnectionHandle, typename WhereCondT, std::meta::info GroupDtoMember>
+        requires DAL::Mappers::Mappable<Domain, DTO> && Repositories::DatabaseConnection<ConnectionHandle>
+    class DbGroupedQuery
+    {
+    public:
+        using RawGroupT = [:std::meta::type_of(GroupDtoMember):];
+        using GroupValueT = detail::ProjectedColumn_t<RawGroupT>;
+
+        DbGroupedQuery(
+            std::shared_ptr<ConnectionHandle> conn, WhereCondT where_cond, std::optional<Core::DbError> validation_error = std::nullopt)
+            : conn_(std::move(conn))
+            , where_cond_(std::move(where_cond))
+            , validation_error_(std::move(validation_error))
+        {
+        }
+
+        [[nodiscard]] std::expected<std::vector<std::pair<GroupValueT, std::size_t>>, Core::DbError> try_count() const
+        {
+            return execute_grouped<std::size_t>("COUNT(*)");
+        }
+
+        template<rfl::internal::StringLiteral ValCol>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ValCol>
+        [[nodiscard]] auto try_sum() const
+        {
+            constexpr auto val_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ValCol>();
+            using RawValT = [:std::meta::type_of(val_m):];
+            using ScalarT = typename detail::UnwrapColumnScalar<std::remove_cvref_t<RawValT>>::type;
+            using SumT = typename detail::SumResultType<ScalarT>::type;
+            return execute_grouped<std::optional<SumT>>(std::format("SUM(\"{}\")", std::meta::identifier_of(val_m)));
+        }
+
+        template<std::meta::info ValMember>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, ValMember>
+        [[nodiscard]] auto try_sum() const
+        {
+            constexpr auto val_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, ValMember>();
+            return try_sum<DAL::Schema::col_literal_of<val_m>()>();
+        }
+
+        template<rfl::internal::StringLiteral ValCol>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ValCol>
+        [[nodiscard]] std::expected<std::vector<std::pair<GroupValueT, std::optional<double>>>, Core::DbError> try_avg() const
+        {
+            constexpr auto val_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ValCol>();
+            return execute_grouped<std::optional<double>>(std::format("AVG(\"{}\")", std::meta::identifier_of(val_m)));
+        }
+
+        template<std::meta::info ValMember>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, ValMember>
+        [[nodiscard]] std::expected<std::vector<std::pair<GroupValueT, std::optional<double>>>, Core::DbError> try_avg() const
+        {
+            constexpr auto val_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, ValMember>();
+            return try_avg<DAL::Schema::col_literal_of<val_m>()>();
+        }
+
+        template<rfl::internal::StringLiteral ValCol>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ValCol>
+        [[nodiscard]] auto try_min() const
+        {
+            constexpr auto val_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ValCol>();
+            using RawValT = [:std::meta::type_of(val_m):];
+            using ScalarT = typename detail::UnwrapColumnScalar<std::remove_cvref_t<RawValT>>::type;
+            return execute_grouped<std::optional<ScalarT>>(std::format("MIN(\"{}\")", std::meta::identifier_of(val_m)));
+        }
+
+        template<std::meta::info ValMember>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, ValMember>
+        [[nodiscard]] auto try_min() const
+        {
+            constexpr auto val_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, ValMember>();
+            return try_min<DAL::Schema::col_literal_of<val_m>()>();
+        }
+
+        template<rfl::internal::StringLiteral ValCol>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ValCol>
+        [[nodiscard]] auto try_max() const
+        {
+            constexpr auto val_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ValCol>();
+            using RawValT = [:std::meta::type_of(val_m):];
+            using ScalarT = typename detail::UnwrapColumnScalar<std::remove_cvref_t<RawValT>>::type;
+            return execute_grouped<std::optional<ScalarT>>(std::format("MAX(\"{}\")", std::meta::identifier_of(val_m)));
+        }
+
+        template<std::meta::info ValMember>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, ValMember>
+        [[nodiscard]] auto try_max() const
+        {
+            constexpr auto val_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, ValMember>();
+            return try_max<DAL::Schema::col_literal_of<val_m>()>();
+        }
+
+    private:
+        template<typename AggT>
+        [[nodiscard]] std::expected<std::vector<std::pair<GroupValueT, AggT>>, Core::DbError> execute_grouped(
+            std::string_view agg_sql) const
+        {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
+            if (!conn_->is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (validation_error_)
+            {
+                return std::unexpected<Core::DbError>{ *validation_error_ };
+            }
+            constexpr std::string_view group_col = std::meta::identifier_of(GroupDtoMember);
+            if constexpr (std::same_as<WhereCondT, rfl::Nothing>)
+            {
+                return conn_->template try_grouped_aggregate_sql<DTO, GroupValueT, AggT>(group_col, agg_sql);
+            }
+            else
+            {
+                return conn_->template try_grouped_aggregate_where_sql<DTO, GroupValueT, AggT>(group_col, agg_sql, where_cond_);
+            }
+        }
+
+        std::shared_ptr<ConnectionHandle> conn_;
+        WhereCondT where_cond_{};
+        std::optional<Core::DbError> validation_error_{};
+    };
+
     // Fluent server-side query builder for DbSet (Phases 10, 12, 13, 14).
     // Translates filtering, sorting, pagination, aggregations, and bulk deletes into sqlgen pipelines.
     template<
@@ -455,6 +609,519 @@ export namespace DAL
         [[nodiscard]] auto or_where_sql(Condition cond) const
         {
             return or_where_sql_with_error(std::move(cond), validation_error_);
+        }
+
+        [[nodiscard]] const WhereCondT& where_condition() const noexcept
+        {
+            return where_cond_;
+        }
+
+        [[nodiscard]] const std::optional<Core::DbError>& validation_error() const noexcept
+        {
+            return validation_error_;
+        }
+
+        // Grouped boolean predicates: produces explicit SQL parentheses `(...)` for `A AND (B OR C)`.
+        template<typename Fn>
+        [[nodiscard]] auto where_group(Fn&& fn) const
+        {
+            const DbQuery<Domain, DTO, ConnectionHandle, KeyType, rfl::Nothing, rfl::Nothing> seed(repo_, conn_);
+            auto sub = std::invoke(std::forward<Fn>(fn), seed);
+            auto err = validation_error_ ? validation_error_ : sub.validation_error();
+            return where_sql_with_error(detail::GroupCond{ sub.where_condition() }, std::move(err));
+        }
+
+        template<typename Fn>
+        [[nodiscard]] auto or_where_group(Fn&& fn) const
+        {
+            const DbQuery<Domain, DTO, ConnectionHandle, KeyType, rfl::Nothing, rfl::Nothing> seed(repo_, conn_);
+            auto sub = std::invoke(std::forward<Fn>(fn), seed);
+            auto err = validation_error_ ? validation_error_ : sub.validation_error();
+            return or_where_sql_with_error(detail::GroupCond{ sub.where_condition() }, std::move(err));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_iequal(std::string_view val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(detail::CollateNoCaseEqCond{ std::string{ std::meta::identifier_of(dto_m) }, std::string{ val }, false });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_iequal(std::string_view val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return where_sql(detail::CollateNoCaseEqCond{ std::string{ std::meta::identifier_of(dto_m) }, std::string{ val }, true });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_iequal(std::string_view val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return or_where_sql(detail::CollateNoCaseEqCond{ std::string{ std::meta::identifier_of(dto_m) }, std::string{ val }, false });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_icontains(std::string_view needle) const
+        {
+            return where_contains<ColLiteral>(needle);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_contains(std::string_view needle) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            std::string pattern;
+            pattern.reserve(needle.size() + 2);
+            pattern.push_back('%');
+            pattern += detail::escape_like_literal(needle);
+            pattern.push_back('%');
+            return where_sql(detail::EscapedLikeCond{ std::string{ std::meta::identifier_of(dto_m) }, std::move(pattern), true });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_starts_with(std::string_view prefix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            std::string pattern = detail::escape_like_literal(prefix);
+            pattern.push_back('%');
+            return where_sql(detail::EscapedLikeCond{ std::string{ std::meta::identifier_of(dto_m) }, std::move(pattern), true });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_ends_with(std::string_view suffix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            std::string pattern;
+            pattern.reserve(suffix.size() + 1);
+            pattern.push_back('%');
+            pattern += detail::escape_like_literal(suffix);
+            return where_sql(detail::EscapedLikeCond{ std::string{ std::meta::identifier_of(dto_m) }, std::move(pattern), true });
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_in_range(R&& range) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using Val = std::ranges::range_value_t<R>;
+            using NormalizedT = std::remove_cvref_t<decltype(detail::normalize_query_val(std::declval<const Val&>()))>;
+            std::vector<NormalizedT> normalized;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                normalized.reserve(std::ranges::size(range));
+            }
+            auto err = validation_error_;
+            for (const auto& v : range)
+            {
+                if (!err)
+                {
+                    err = detail::validate_query_val(v);
+                }
+                normalized.push_back(detail::normalize_query_val(v));
+            }
+            return where_sql_with_error(Schema::col_of<dto_m>.in(normalized), std::move(err));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_in_range(R&& range) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using Val = std::ranges::range_value_t<R>;
+            using NormalizedT = std::remove_cvref_t<decltype(detail::normalize_query_val(std::declval<const Val&>()))>;
+            std::vector<NormalizedT> normalized;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                normalized.reserve(std::ranges::size(range));
+            }
+            auto err = validation_error_;
+            for (const auto& v : range)
+            {
+                if (!err)
+                {
+                    err = detail::validate_query_val(v);
+                }
+                normalized.push_back(detail::normalize_query_val(v));
+            }
+            return where_sql_with_error(Schema::col_of<dto_m>.not_in(normalized), std::move(err));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_in_range(R&& range) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using Val = std::ranges::range_value_t<R>;
+            using NormalizedT = std::remove_cvref_t<decltype(detail::normalize_query_val(std::declval<const Val&>()))>;
+            std::vector<NormalizedT> normalized;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                normalized.reserve(std::ranges::size(range));
+            }
+            auto err = validation_error_;
+            for (const auto& v : range)
+            {
+                if (!err)
+                {
+                    err = detail::validate_query_val(v);
+                }
+                normalized.push_back(detail::normalize_query_val(v));
+            }
+            return or_where_sql_with_error(Schema::col_of<dto_m>.in(normalized), std::move(err));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto or_where_not_in_range(R&& range) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            using Val = std::ranges::range_value_t<R>;
+            using NormalizedT = std::remove_cvref_t<decltype(detail::normalize_query_val(std::declval<const Val&>()))>;
+            std::vector<NormalizedT> normalized;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                normalized.reserve(std::ranges::size(range));
+            }
+            auto err = validation_error_;
+            for (const auto& v : range)
+            {
+                if (!err)
+                {
+                    err = detail::validate_query_val(v);
+                }
+                normalized.push_back(detail::normalize_query_val(v));
+            }
+            return or_where_sql_with_error(Schema::col_of<dto_m>.not_in(normalized), std::move(err));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto group_by() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member<Domain, DTO, ColLiteral>();
+            return DbGroupedQuery<Domain, DTO, ConnectionHandle, WhereCondT, dto_m>(conn_, where_cond_, validation_error_);
+        }
+
+        // =====================================================================
+        // C++26 P2996 Reflected Member NTTP Overloads (e.g., where_equal<^^Book::title>(...))
+        // =====================================================================
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_equal(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_equal<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_equal(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_not_equal<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_lt(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_lt<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_le(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_le<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_gt(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_gt<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_ge(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_ge<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_between(const Val& low, const Val& high) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_between<Schema::col_literal_of<dto_m>()>(low, high);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_like(std::string_view pattern) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_like<Schema::col_literal_of<dto_m>()>(pattern);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_like(std::string_view pattern) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_not_like<Schema::col_literal_of<dto_m>()>(pattern);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_contains(std::string_view needle) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_contains<Schema::col_literal_of<dto_m>()>(needle);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_icontains(std::string_view needle) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_icontains<Schema::col_literal_of<dto_m>()>(needle);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_contains(std::string_view needle) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_not_contains<Schema::col_literal_of<dto_m>()>(needle);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_starts_with(std::string_view prefix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_starts_with<Schema::col_literal_of<dto_m>()>(prefix);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_starts_with(std::string_view prefix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_not_starts_with<Schema::col_literal_of<dto_m>()>(prefix);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_ends_with(std::string_view suffix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_ends_with<Schema::col_literal_of<dto_m>()>(suffix);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_ends_with(std::string_view suffix) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_not_ends_with<Schema::col_literal_of<dto_m>()>(suffix);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_iequal(std::string_view val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_iequal<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_iequal(std::string_view val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_not_iequal<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member, typename... Ts>
+            requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_in(const Ts&... vals) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_in<Schema::col_literal_of<dto_m>()>(vals...);
+        }
+
+        template<std::meta::info Member, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_in_range(R&& range) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_in_range<Schema::col_literal_of<dto_m>()>(std::forward<R>(range));
+        }
+
+        template<std::meta::info Member, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_in_range(R&& range) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_not_in_range<Schema::col_literal_of<dto_m>()>(std::forward<R>(range));
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_null() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_null<Schema::col_literal_of<dto_m>()>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_null() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return where_not_null<Schema::col_literal_of<dto_m>()>();
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto or_where_equal(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return or_where_equal<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto or_where_not_equal(const Val& val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return or_where_not_equal<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto or_where_iequal(std::string_view val) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return or_where_iequal<Schema::col_literal_of<dto_m>()>(val);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto or_where_contains(std::string_view needle) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return or_where_contains<Schema::col_literal_of<dto_m>()>(needle);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto order_by(bool desc = false) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return order_by<Schema::col_literal_of<dto_m>()>(desc);
+        }
+
+        template<std::meta::info Member>
+            requires(!std::same_as<OrderByT, rfl::Nothing>) && DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto then_by(bool desc = false) const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return then_by<Schema::col_literal_of<dto_m>()>(desc);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto group_by() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return DbGroupedQuery<Domain, DTO, ConnectionHandle, WhereCondT, dto_m>(conn_, where_cond_, validation_error_);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_select() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return try_select<Schema::col_literal_of<dto_m>()>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_select_distinct() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return try_select_distinct<Schema::col_literal_of<dto_m>()>();
+        }
+
+        template<std::meta::info... Members>
+            requires(sizeof...(Members) >= 2) && (DAL::Mappers::ValidQueryMember<Domain, DTO, Members> && ...)
+        [[nodiscard]] auto try_select_columns() const
+        {
+            return try_select_columns<Schema::col_literal_of<DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Members>()>()...>();
+        }
+
+        template<std::meta::info... Members>
+            requires(sizeof...(Members) >= 2) && (DAL::Mappers::ValidQueryMember<Domain, DTO, Members> && ...)
+        [[nodiscard]] auto try_select_distinct_columns() const
+        {
+            return try_select_distinct_columns<Schema::col_literal_of<DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Members>()>()...>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_min() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return try_min<Schema::col_literal_of<dto_m>()>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_max() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return try_max<Schema::col_literal_of<dto_m>()>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_sum() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return try_sum<Schema::col_literal_of<dto_m>()>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] std::expected<std::optional<double>, Core::DbError> try_avg() const
+        {
+            constexpr auto dto_m = DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Member>();
+            return try_avg<Schema::col_literal_of<dto_m>()>();
+        }
+
+        template<std::meta::info... Members, typename... Vals>
+            requires(sizeof...(Members) >= 1) && (sizeof...(Members) == sizeof...(Vals)) && (!std::same_as<WhereCondT, rfl::Nothing>) &&
+            (DAL::Mappers::ValidQueryMember<Domain, DTO, Members> && ...)
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> update_where(const Vals&... new_vals) const
+        {
+            return update_where<Schema::col_literal_of<DAL::Mappers::resolve_dto_member_ref<Domain, DTO, Members>()>()...>(new_vals...);
         }
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
@@ -1068,6 +1735,113 @@ export namespace DAL
             return try_first_or_default().value_or(std::nullopt);
         }
 
+        // Returns the unique matching row, or std::nullopt if 0 rows match; errors with ConstraintViolation if >1 row matches.
+        [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_single_or_default() const
+        {
+            if (!conn_)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+            }
+            if (!conn_->is_open())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+            }
+            if (validation_error_)
+            {
+                return std::unexpected<Core::DbError>{ *validation_error_ };
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Query limit must be greater than 0") };
+            }
+            auto res = limit(2).try_to_vector();
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ res.error() };
+            }
+            if (res->empty())
+            {
+                return std::optional<Domain>{ std::nullopt };
+            }
+            if (res->size() > 1)
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                    "Query expected at most 1 row, but matched multiple rows") };
+            }
+            return std::optional<Domain>{ std::move(res->front()) };
+        }
+
+        // Returns the unique matching row; errors with NotFound if 0 rows match or ConstraintViolation if >1 row matches.
+        [[nodiscard]] std::expected<Domain, Core::DbError> try_single() const
+        {
+            auto res = try_single_or_default();
+            if (!res)
+            {
+                return std::unexpected<Core::DbError>{ res.error() };
+            }
+            if (!res->has_value())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::not_found("Query returned no matching rows") };
+            }
+            return std::move(**res);
+        }
+
+        // Lazy C++26 std::generator row-by-row streaming (O(1) memory footprint).
+        [[nodiscard]] std::generator<std::expected<Domain, Core::DbError>> stream() const
+        {
+            if (!conn_)
+            {
+                co_yield std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is null") };
+                co_return;
+            }
+            if (!conn_->is_open())
+            {
+                co_yield std::unexpected<Core::DbError>{ Core::DbError::connection_error("Database connection is closed") };
+                co_return;
+            }
+            if (validation_error_)
+            {
+                co_yield std::unexpected<Core::DbError>{ *validation_error_ };
+                co_return;
+            }
+            if (limit_.has_value() && *limit_ == 0)
+            {
+                co_yield std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Query limit must be greater than 0") };
+                co_return;
+            }
+
+            if constexpr (requires(const ConnectionHandle& c) { c.template stream_typed_read<DTO>(sqlgen::read<std::vector<DTO>>); })
+            {
+                for (auto&& dto_res : stream_query(*conn_))
+                {
+                    if (!dto_res)
+                    {
+                        co_yield std::unexpected<Core::DbError>{ dto_res.error() };
+                        co_return;
+                    }
+                    Domain entity = DAL::Mappers::MapperTraits<Domain, DTO>::to_domain(*dto_res);
+                    if (track_fn_)
+                    {
+                        track_fn_(entity);
+                    }
+                    co_yield std::move(entity);
+                }
+            }
+            else
+            {
+                auto vec = try_to_vector();
+                if (!vec)
+                {
+                    co_yield std::unexpected<Core::DbError>{ vec.error() };
+                    co_return;
+                }
+                for (auto& item : *vec)
+                {
+                    co_yield std::move(item);
+                }
+            }
+        }
+
         [[nodiscard]] std::expected<std::size_t, Core::DbError> try_count() const
         {
             if (!conn_)
@@ -1632,7 +2406,7 @@ export namespace DAL
             return try_any().value_or(false);
         }
 
-        [[nodiscard]] std::expected<void, Core::DbError> remove_where() const
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> remove_where() const
             requires(!std::same_as<WhereCondT, rfl::Nothing>)
         {
             if (is_context_alive_fn_ && !is_context_alive_fn_())
@@ -1678,16 +2452,27 @@ export namespace DAL
                     {
                         clear_track_fn_();
                     }
-                    return {};
+                    return del_res->size();
                 }
                 else if constexpr (requires(ConnectionHandle& c) { c.template delete_where<DTO>(where_cond_); })
                 {
                     auto del_res = conn_->template delete_where<DTO>(where_cond_);
-                    if (del_res && clear_track_fn_)
+                    if (!del_res)
+                    {
+                        return std::unexpected<Core::DbError>{ del_res.error() };
+                    }
+                    if (clear_track_fn_)
                     {
                         clear_track_fn_();
                     }
-                    return del_res;
+                    if constexpr (std::same_as<decltype(del_res), std::expected<void, Core::DbError>>)
+                    {
+                        return std::size_t{ 0 };
+                    }
+                    else
+                    {
+                        return *del_res;
+                    }
                 }
             }
 
@@ -1713,14 +2498,14 @@ export namespace DAL
                 {
                     clear_track_fn_();
                 }
-                return {};
+                return del_res->size();
             }
 
             // Fallback for custom non-SQLite adapters: acquire an immediate write transaction before reading keys.
             detail::WriteBatchTxGuard<ConnectionHandle> tx_guard(conn_);
             if (auto begin_res = tx_guard.begin(true); !begin_res)
             {
-                return begin_res;
+                return std::unexpected<Core::DbError>{ begin_res.error() };
             }
 
             std::vector<KeyType> keys_to_delete;
@@ -1748,13 +2533,13 @@ export namespace DAL
                 auto del_res = repo_->delete_by_id(key);
                 if (!del_res)
                 {
-                    return del_res;
+                    return std::unexpected<Core::DbError>{ del_res.error() };
                 }
             }
 
             if (auto commit_res = tx_guard.commit(); !commit_res)
             {
-                return commit_res;
+                return std::unexpected<Core::DbError>{ commit_res.error() };
             }
 
             if (untrack_key_fn_)
@@ -1768,13 +2553,13 @@ export namespace DAL
             {
                 clear_track_fn_();
             }
-            return {};
+            return keys_to_delete.size();
         }
 
         template<rfl::internal::StringLiteral... ColLiterals, typename... Vals>
             requires(sizeof...(ColLiterals) >= 1) && (sizeof...(ColLiterals) == sizeof...(Vals)) &&
             (!std::same_as<WhereCondT, rfl::Nothing>) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiterals> && ...)
-        [[nodiscard]] std::expected<void, Core::DbError> update_where(const Vals&... new_vals) const
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> update_where(const Vals&... new_vals) const
         {
             if (is_context_alive_fn_ && !is_context_alive_fn_())
             {
@@ -1834,16 +2619,27 @@ export namespace DAL
                             clear_track_fn_();
                         }
                     }
-                    return {};
+                    return upd_res->size();
                 }
                 else
                 {
                     auto res = conn_->template update_where<DTO>(set_expr, where_cond_);
-                    if (res && clear_track_fn_)
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ res.error() };
+                    }
+                    if (clear_track_fn_)
                     {
                         clear_track_fn_();
                     }
-                    return res;
+                    if constexpr (std::same_as<decltype(res), std::expected<void, Core::DbError>>)
+                    {
+                        return std::size_t{ 0 };
+                    }
+                    else
+                    {
+                        return *res;
+                    }
                 }
             }
             else
@@ -1873,17 +2669,28 @@ export namespace DAL
                             clear_track_fn_();
                         }
                     }
-                    return {};
+                    return upd_res->size();
                 }
                 else
                 {
                     auto res =
                         conn_->template update_where_many<DTO>(where_cond_, make_set_expr.template operator()<ColLiterals>(new_vals)...);
-                    if (res && clear_track_fn_)
+                    if (!res)
+                    {
+                        return std::unexpected<Core::DbError>{ res.error() };
+                    }
+                    if (clear_track_fn_)
                     {
                         clear_track_fn_();
                     }
-                    return res;
+                    if constexpr (std::same_as<decltype(res), std::expected<void, Core::DbError>>)
+                    {
+                        return std::size_t{ 0 };
+                    }
+                    else
+                    {
+                        return *res;
+                    }
                 }
             }
         }
@@ -2230,6 +3037,102 @@ export namespace DAL
             else
             {
                 return execute_with_limit_offset(conn, std::move(with_where));
+            }
+        }
+
+        template<typename BaseQuery>
+        [[nodiscard]] std::generator<std::expected<DTO, Core::DbError>> stream_with_limit_offset(
+            const ConnectionHandle& conn, BaseQuery base_query) const
+        {
+            auto run = [&](auto q) -> std::generator<std::expected<DTO, Core::DbError>>
+            {
+                if constexpr (detail::is_custom_where_cond_v<WhereCondT>)
+                {
+                    if constexpr (requires { conn.template stream_typed_read_where<DTO, DTO>(std::move(q), where_cond_); })
+                    {
+                        for (auto&& r : conn.template stream_typed_read_where<DTO, DTO>(std::move(q), where_cond_))
+                        {
+                            co_yield std::move(r);
+                        }
+                    }
+                    else
+                    {
+                        co_yield std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                            "Connection adapter does not support custom predicate streaming") };
+                    }
+                }
+                else
+                {
+                    for (auto&& r : conn.template stream_typed_read<DTO>(std::move(q)))
+                    {
+                        co_yield std::move(r);
+                    }
+                }
+            };
+
+            if (limit_.has_value() && offset_.has_value())
+            {
+                for (auto&& r : run(std::move(base_query) | sqlgen::limit(*limit_) | sqlgen::offset(*offset_)))
+                {
+                    co_yield std::move(r);
+                }
+            }
+            else if (limit_.has_value())
+            {
+                for (auto&& r : run(std::move(base_query) | sqlgen::limit(*limit_)))
+                {
+                    co_yield std::move(r);
+                }
+            }
+            else if (offset_.has_value())
+            {
+                for (auto&& r : run(std::move(base_query) | sqlgen::limit(detail::kSqliteUnboundedLimit) | sqlgen::offset(*offset_)))
+                {
+                    co_yield std::move(r);
+                }
+            }
+            else
+            {
+                for (auto&& r : run(std::move(base_query)))
+                {
+                    co_yield std::move(r);
+                }
+            }
+        }
+
+        [[nodiscard]] std::generator<std::expected<DTO, Core::DbError>> stream_query(const ConnectionHandle& conn) const
+        {
+            auto with_where = [&]()
+            {
+                if constexpr (!std::same_as<WhereCondT, rfl::Nothing> && !detail::is_custom_where_cond_v<WhereCondT>)
+                {
+                    return sqlgen::read<std::vector<DTO>> | sqlgen::where(where_cond_);
+                }
+                else
+                {
+                    return sqlgen::read<std::vector<DTO>>;
+                }
+            }();
+
+            if constexpr (!std::same_as<OrderByT, rfl::Nothing>)
+            {
+                auto gen = std::visit(
+                    [&](const auto& ob)
+                    {
+                        return stream_with_limit_offset(conn, with_where | ob);
+                    },
+                    order_by_);
+                for (auto&& r : gen)
+                {
+                    co_yield std::move(r);
+                }
+            }
+            else
+            {
+                for (auto&& r : stream_with_limit_offset(conn, std::move(with_where)))
+                {
+                    co_yield std::move(r);
+                }
             }
         }
 

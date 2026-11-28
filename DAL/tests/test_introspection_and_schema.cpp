@@ -1358,4 +1358,209 @@ namespace
         EXPECT_EQ(rKeyRange.error().code, Core::DbErrorCode::ConstraintViolation);
         EXPECT_EQ(rKeyRange.error().message.find("9876543210123"), std::string::npos);
     }
+
+    // =========================================================================
+    // Phase U5: Schema SQL Generation, Drift Verification, Migrate & Ops
+    // =========================================================================
+
+    struct[[= DAL::Schema::table("U5Accounts")]] U5Account
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        [[= DAL::Schema::index{}]] std::string email;
+        std::int32_t balance = 0;
+    };
+
+    struct U5AppContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<U5Account> accounts{ this };
+
+        explicit U5AppContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(PhaseU5MigrationsSchemaAndOpsTest, GenerateSchemaSqlVerifySchemaDriftAndDeclarativeMigrate)
+    {
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value());
+        U5AppContext db(connRes.value());
+
+        // 1. generate_schema_sql() returns CREATE TABLE + CREATE INDEX without mutating DB
+        auto ddlRes = db.generate_schema_sql();
+        ASSERT_TRUE(ddlRes.has_value()) << ddlRes.error().to_string();
+        ASSERT_GE(ddlRes->size(), 2u);
+        EXPECT_NE((*ddlRes)[0].find("CREATE TABLE IF NOT EXISTS \"U5Accounts\""), std::string::npos);
+        EXPECT_NE((*ddlRes)[1].find("CREATE INDEX IF NOT EXISTS \"idx_U5Accounts_email\""), std::string::npos);
+
+        // 2. verify_schema() before ensure_created reports missing table
+        auto driftBefore = db.verify_schema();
+        ASSERT_TRUE(driftBefore.has_value()) << driftBefore.error().to_string();
+        EXPECT_FALSE(driftBefore->is_clean());
+        EXPECT_EQ(driftBefore->missing_tables, (std::vector<std::string>{ "U5Accounts" }));
+
+        // 3. After ensure_created(), verify_schema() is clean
+        ASSERT_TRUE(db.ensure_created().has_value());
+        auto driftClean = db.verify_schema();
+        ASSERT_TRUE(driftClean.has_value()) << driftClean.error().to_string();
+        EXPECT_TRUE(driftClean->is_clean());
+
+        // 4. Introduce index + column drift and verify detection
+        ASSERT_TRUE(db.execute_raw("DROP INDEX \"idx_U5Accounts_email\";").has_value());
+        ASSERT_TRUE(db.execute_raw("ALTER TABLE \"U5Accounts\" ADD COLUMN \"legacy_flag\" INTEGER;").has_value());
+        auto driftAfter = db.verify_schema();
+        ASSERT_TRUE(driftAfter.has_value()) << driftAfter.error().to_string();
+        EXPECT_FALSE(driftAfter->is_clean());
+        EXPECT_EQ(driftAfter->missing_indexes, (std::vector<std::string>{ "U5Accounts.idx_U5Accounts_email" }));
+        EXPECT_EQ(driftAfter->extra_columns, (std::vector<std::string>{ "U5Accounts.legacy_flag" }));
+
+        // 5. Declarative migrate() runner: validation, apply, idempotency, and rollback on failure
+        auto conn2Res = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(conn2Res.has_value());
+        U5AppContext db2(conn2Res.value());
+
+        std::vector<DAL::MigrationStep> badSteps;
+        badSteps.push_back(
+            DAL::MigrationStep{ .version = 2,
+                                .name = "v2",
+                                .up = []() -> std::expected<void, Core::DbError>
+                                {
+                                    return {};
+                                } });
+        badSteps.push_back(
+            DAL::MigrationStep{ .version = 2,
+                                .name = "dup",
+                                .up = []() -> std::expected<void, Core::DbError>
+                                {
+                                    return {};
+                                } });
+        EXPECT_FALSE(db2.migrate(badSteps).has_value());
+
+        std::vector<DAL::MigrationStep> steps;
+        steps.push_back(
+            DAL::MigrationStep{
+                .version = 1,
+                .name = "seed_initial_account",
+                .up = [&]() -> std::expected<void, Core::DbError>
+                {
+                    return db2.accounts.add(U5Account{ 0, "seed@example.com", 100 });
+                },
+            });
+        steps.push_back(
+            DAL::MigrationStep{
+                .version = 2,
+                .name = "bonus_balance",
+                .up = [&]() -> std::expected<void, Core::DbError>
+                {
+                    auto r = db2.accounts.where_equal<"email">("seed@example.com").update_where<"balance">(250);
+                    if (!r)
+                    {
+                        return std::unexpected<Core::DbError>{ r.error() };
+                    }
+                    return {};
+                },
+            });
+
+        auto applied1 = db2.migrate(steps);
+        ASSERT_TRUE(applied1.has_value()) << applied1.error().to_string();
+        EXPECT_EQ(*applied1, 2u);
+        EXPECT_EQ(*db2.try_user_version(), 2);
+        EXPECT_EQ(db2.accounts.find(1)->balance, 250);
+
+        // Re-running same steps is idempotent (0 applied)
+        auto applied2 = db2.migrate(steps);
+        ASSERT_TRUE(applied2.has_value());
+        EXPECT_EQ(*applied2, 0u);
+
+        // Step 3 fails -> must roll back its insert and leave user_version == 2
+        steps.push_back(
+            DAL::MigrationStep{
+                .version = 3,
+                .name = "failing_step",
+                .up = [&]() -> std::expected<void, Core::DbError>
+                {
+                    (void)db2.accounts.add(U5Account{ 0, "rolledback@example.com", 999 });
+                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("boom in v3") };
+                },
+            });
+        auto applied3 = db2.migrate(steps);
+        ASSERT_FALSE(applied3.has_value());
+        EXPECT_EQ(*db2.try_user_version(), 2);
+        EXPECT_EQ(db2.accounts.count(), 1u);
+    }
+
+    TEST(PhaseU5MigrationsSchemaAndOpsTest, ConnectFsPathBackupWalCheckpointVacuumIntegrityAndQueryTracing)
+    {
+        const auto stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        const auto srcPath = std::filesystem::temp_directory_path() / ("codefirst_u5_src_" + stamp + ".db");
+        const auto bakPath = std::filesystem::temp_directory_path() / ("codefirst_u5_bak_" + stamp + ".db");
+        struct TempCleanup
+        {
+            std::filesystem::path a;
+            std::filesystem::path b;
+            ~TempCleanup() noexcept
+            {
+                std::error_code ec;
+                for (const auto& p : { a, b })
+                {
+                    std::filesystem::remove(p, ec);
+                    std::filesystem::remove(p.string() + "-wal", ec);
+                    std::filesystem::remove(p.string() + "-shm", ec);
+                }
+            }
+        } cleanup{ srcPath, bakPath };
+
+        std::vector<std::string> tracedSql;
+        DAL::SQLiteConnectionOptions opts{};
+        opts.wal_mode = true;
+        opts.on_query = [&](std::string_view sql, std::chrono::nanoseconds)
+        {
+            tracedSql.emplace_back(sql);
+        };
+
+        auto connRes = DAL::SQLiteConnection::connect(srcPath, opts);
+        ASSERT_TRUE(connRes.has_value()) << connRes.error().to_string();
+        auto conn = *connRes;
+        U5AppContext db(conn);
+        ASSERT_TRUE(db.ensure_created().has_value());
+        ASSERT_TRUE(db.accounts.add(U5Account{ 0, "SECRET_EMAIL_DO_NOT_TRACE@example.com", 500 }).has_value());
+
+        // Verify query tracer fired on parameterized SQL templates without leaking bound PII values
+        EXPECT_FALSE(tracedSql.empty());
+        bool sawSelectOrInsert = false;
+        for (const auto& s : tracedSql)
+        {
+            EXPECT_EQ(s.find("SECRET_EMAIL_DO_NOT_TRACE"), std::string::npos);
+            if (s.find("U5Accounts") != std::string::npos)
+            {
+                sawSelectOrInsert = true;
+            }
+        }
+        EXPECT_TRUE(sawSelectOrInsert);
+
+        // Operational utilities: integrity_check, checkpoint_wal, vacuum, backup_to
+        auto ic = conn->integrity_check();
+        ASSERT_TRUE(ic.has_value()) << ic.error().to_string();
+
+        auto cp = conn->checkpoint_wal(DAL::WalCheckpointMode::Truncate);
+        ASSERT_TRUE(cp.has_value()) << cp.error().to_string();
+
+        auto vac = conn->vacuum();
+        ASSERT_TRUE(vac.has_value()) << vac.error().to_string();
+
+        // Confirm disable_attach hardening is restored immediately after VACUUM
+        EXPECT_FALSE(conn->execute_raw("ATTACH DATABASE ':memory:' AS extra;").has_value());
+
+        auto bakRes = conn->backup_to(bakPath);
+        ASSERT_TRUE(bakRes.has_value()) << bakRes.error().to_string();
+
+        // Open backup via std::filesystem::path overload and confirm rows are intact
+        auto bakConnRes = DAL::SQLiteConnection::connect(bakPath);
+        ASSERT_TRUE(bakConnRes.has_value()) << bakConnRes.error().to_string();
+        U5AppContext bakDb(*bakConnRes);
+        auto bakAcc = bakDb.accounts.find(1);
+        ASSERT_TRUE(bakAcc.has_value());
+        EXPECT_EQ(bakAcc->email, "SECRET_EMAIL_DO_NOT_TRACE@example.com");
+        EXPECT_EQ(bakAcc->balance, 500);
+    }
 } // namespace

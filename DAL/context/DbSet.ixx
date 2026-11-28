@@ -319,6 +319,23 @@ export namespace DAL
             return results;
         }
 
+        template<std::ranges::input_range R>
+            requires(!std::same_as<std::remove_cvref_t<R>, std::vector<Domain>>) &&
+            std::convertible_to<std::ranges::range_reference_t<R>, const Domain&>
+        [[nodiscard]] std::expected<std::vector<Domain>, Core::DbError> add_range_returning(R&& items)
+        {
+            std::vector<Domain> vec;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                vec.reserve(std::ranges::size(items));
+            }
+            for (auto&& item : items)
+            {
+                vec.push_back(std::forward<decltype(item)>(item));
+            }
+            return add_range_returning(vec);
+        }
+
         // Inserts multiple entities atomically into the database table (or stages if deferred)
         [[nodiscard]] std::expected<void, Core::DbError> add_range(const std::vector<Domain>& items)
         {
@@ -359,6 +376,23 @@ export namespace DAL
                 }
             }
             return {};
+        }
+
+        template<std::ranges::input_range R>
+            requires(!std::same_as<std::remove_cvref_t<R>, std::vector<Domain>>) &&
+            std::convertible_to<std::ranges::range_reference_t<R>, const Domain&>
+        [[nodiscard]] std::expected<void, Core::DbError> add_range(R&& items)
+        {
+            std::vector<Domain> vec;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                vec.reserve(std::ranges::size(items));
+            }
+            for (auto&& item : items)
+            {
+                vec.push_back(std::forward<decltype(item)>(item));
+            }
+            return add_range(vec);
         }
 
         // Updates an existing entity (or stages if deferred)
@@ -429,6 +463,23 @@ export namespace DAL
                 return stage_upsert_range(items);
             }
             return upsert_many_immediate(items);
+        }
+
+        template<std::ranges::input_range R>
+            requires(!std::same_as<std::remove_cvref_t<R>, std::vector<Domain>>) &&
+            std::convertible_to<std::ranges::range_reference_t<R>, const Domain&>
+        [[nodiscard]] std::expected<void, Core::DbError> upsert_range(R&& items)
+        {
+            std::vector<Domain> vec;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                vec.reserve(std::ranges::size(items));
+            }
+            for (auto&& item : items)
+            {
+                vec.push_back(std::forward<decltype(item)>(item));
+            }
+            return upsert_range(vec);
         }
 
         [[nodiscard]] std::expected<void, Core::DbError> stage_upsert(const Domain& item)
@@ -855,6 +906,312 @@ export namespace DAL
             return query().template where_ends_with<ColLiteral>(suffix);
         }
 
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_icontains(std::string_view needle) const
+        {
+            return query().template where_icontains<ColLiteral>(needle);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_contains(std::string_view needle) const
+        {
+            return query().template where_not_contains<ColLiteral>(needle);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_starts_with(std::string_view prefix) const
+        {
+            return query().template where_not_starts_with<ColLiteral>(prefix);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_ends_with(std::string_view suffix) const
+        {
+            return query().template where_not_ends_with<ColLiteral>(suffix);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_iequal(std::string_view val) const
+        {
+            return query().template where_iequal<ColLiteral>(val);
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_iequal(std::string_view val) const
+        {
+            return query().template where_not_iequal<ColLiteral>(val);
+        }
+
+        template<typename Fn>
+        [[nodiscard]] auto where_group(Fn&& fn) const
+        {
+            return query().where_group(std::forward<Fn>(fn));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_in_range(R&& range) const
+        {
+            return query().template where_in_range<ColLiteral>(std::forward<R>(range));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto where_not_in_range(R&& range) const
+        {
+            return query().template where_not_in_range<ColLiteral>(std::forward<R>(range));
+        }
+
+        template<rfl::internal::StringLiteral ColLiteral>
+            requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
+        [[nodiscard]] auto group_by() const
+        {
+            return query().template group_by<ColLiteral>();
+        }
+
+        [[nodiscard]] std::expected<std::optional<Domain>, Core::DbError> try_single_or_default() const
+        {
+            return query().try_single_or_default();
+        }
+
+        [[nodiscard]] std::expected<Domain, Core::DbError> try_single() const
+        {
+            return query().try_single();
+        }
+
+        [[nodiscard]] std::generator<std::expected<Domain, Core::DbError>> stream() const
+        {
+            auto q = query();
+            for (auto&& row : q.stream())
+            {
+                co_yield std::move(row);
+            }
+        }
+
+        // C++26 P2996 Reflected Member NTTP forwarding overloads (e.g. db.books.where_equal<^^Book::title>(...))
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_equal(const Val& val) const
+        {
+            return query().template where_equal<Member>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_equal(const Val& val) const
+        {
+            return query().template where_not_equal<Member>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_lt(const Val& val) const
+        {
+            return query().template where_lt<Member>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_le(const Val& val) const
+        {
+            return query().template where_le<Member>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_gt(const Val& val) const
+        {
+            return query().template where_gt<Member>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_ge(const Val& val) const
+        {
+            return query().template where_ge<Member>(val);
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_between(const Val& low, const Val& high) const
+        {
+            return query().template where_between<Member>(low, high);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_like(std::string_view pattern) const
+        {
+            return query().template where_like<Member>(pattern);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_contains(std::string_view needle) const
+        {
+            return query().template where_contains<Member>(needle);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_icontains(std::string_view needle) const
+        {
+            return query().template where_icontains<Member>(needle);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_contains(std::string_view needle) const
+        {
+            return query().template where_not_contains<Member>(needle);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_starts_with(std::string_view prefix) const
+        {
+            return query().template where_starts_with<Member>(prefix);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_starts_with(std::string_view prefix) const
+        {
+            return query().template where_not_starts_with<Member>(prefix);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_ends_with(std::string_view suffix) const
+        {
+            return query().template where_ends_with<Member>(suffix);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_ends_with(std::string_view suffix) const
+        {
+            return query().template where_not_ends_with<Member>(suffix);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_iequal(std::string_view val) const
+        {
+            return query().template where_iequal<Member>(val);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_iequal(std::string_view val) const
+        {
+            return query().template where_not_iequal<Member>(val);
+        }
+
+        template<std::meta::info Member, typename... Ts>
+            requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_in(const Ts&... vals) const
+        {
+            return query().template where_in<Member>(vals...);
+        }
+
+        template<std::meta::info Member, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_in_range(R&& range) const
+        {
+            return query().template where_in_range<Member>(std::forward<R>(range));
+        }
+
+        template<std::meta::info Member, std::ranges::input_range R>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_in_range(R&& range) const
+        {
+            return query().template where_not_in_range<Member>(std::forward<R>(range));
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_null() const
+        {
+            return query().template where_null<Member>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto where_not_null() const
+        {
+            return query().template where_not_null<Member>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto order_by(bool desc = false) const
+        {
+            return query().template order_by<Member>(desc);
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto group_by() const
+        {
+            return query().template group_by<Member>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_select() const
+        {
+            return query().template try_select<Member>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_select_distinct() const
+        {
+            return query().template try_select_distinct<Member>();
+        }
+
+        template<std::meta::info... Members>
+            requires(sizeof...(Members) >= 2) && (DAL::Mappers::ValidQueryMember<Domain, DTO, Members> && ...)
+        [[nodiscard]] auto try_select_columns() const
+        {
+            return query().template try_select_columns<Members...>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_min() const
+        {
+            return query().template try_min<Member>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_max() const
+        {
+            return query().template try_max<Member>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] auto try_sum() const
+        {
+            return query().template try_sum<Member>();
+        }
+
+        template<std::meta::info Member>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] std::expected<std::optional<double>, Core::DbError> try_avg() const
+        {
+            return query().template try_avg<Member>();
+        }
+
         template<rfl::internal::StringLiteral ColLiteral, typename... Ts>
             requires(sizeof...(Ts) > 0) && DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
         [[nodiscard]] auto where_in(const Ts&... vals) const
@@ -913,17 +1270,34 @@ export namespace DAL
 
         template<rfl::internal::StringLiteral ColLiteral, typename Val>
             requires DAL::Mappers::ValidQueryColumn<Domain, DTO, ColLiteral>
-        [[nodiscard]] std::expected<void, Core::DbError> remove_where_equal(const Val& val) const
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> remove_where_equal(const Val& val) const
         {
             return where_equal<ColLiteral>(val).remove_where();
+        }
+
+        template<std::meta::info Member, typename Val>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, Member>
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> remove_where_equal(const Val& val) const
+        {
+            return where_equal<Member>(val).remove_where();
         }
 
         template<rfl::internal::StringLiteral MatchCol, rfl::internal::StringLiteral... SetCols, typename MatchVal, typename... SetVals>
             requires DAL::Mappers::ValidQueryColumn<Domain, DTO, MatchCol> && (sizeof...(SetCols) >= 1) &&
             (sizeof...(SetCols) == sizeof...(SetVals)) && (DAL::Mappers::ValidQueryColumn<Domain, DTO, SetCols> && ...)
-        [[nodiscard]] std::expected<void, Core::DbError> update_where_equal(const MatchVal& match_val, const SetVals&... new_vals) const
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> update_where_equal(
+            const MatchVal& match_val, const SetVals&... new_vals) const
         {
             return where_equal<MatchCol>(match_val).template update_where<SetCols...>(new_vals...);
+        }
+
+        template<std::meta::info MatchMember, std::meta::info... SetMembers, typename MatchVal, typename... SetVals>
+            requires DAL::Mappers::ValidQueryMember<Domain, DTO, MatchMember> && (sizeof...(SetMembers) >= 1) &&
+            (sizeof...(SetMembers) == sizeof...(SetVals)) && (DAL::Mappers::ValidQueryMember<Domain, DTO, SetMembers> && ...)
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> update_where_equal(
+            const MatchVal& match_val, const SetVals&... new_vals) const
+        {
+            return where_equal<MatchMember>(match_val).template update_where<SetMembers...>(new_vals...);
         }
 
         template<rfl::internal::StringLiteral IndexName, rfl::internal::StringLiteral... ColLiterals>

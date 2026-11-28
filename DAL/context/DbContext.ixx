@@ -8,10 +8,59 @@ import codefirst.core;
 import :schema_traits;
 import :mappers;
 import :generic_repo;
+import :sqlite_statement;
+import :sqlite_connection;
 import :db_set;
 
 export namespace DAL
 {
+    struct SchemaDriftReport
+    {
+        std::vector<std::string> missing_tables;
+        std::vector<std::string> missing_columns;
+        std::vector<std::string> extra_columns;
+        std::vector<std::string> missing_indexes;
+
+        [[nodiscard]] bool is_clean() const noexcept
+        {
+            return missing_tables.empty() && missing_columns.empty() && extra_columns.empty() && missing_indexes.empty();
+        }
+    };
+
+    struct MigrationStep
+    {
+        std::int32_t version = 0;
+        std::string name;
+        std::move_only_function<std::expected<void, Core::DbError>()> up;
+    };
+
+    namespace detail
+    {
+        template<typename T>
+        struct TransactionReturn
+        {
+            using value_type = T;
+            using expected_type = std::expected<T, Core::DbError>;
+            static constexpr bool is_expected_result = false;
+        };
+
+        template<>
+        struct TransactionReturn<void>
+        {
+            using value_type = void;
+            using expected_type = std::expected<void, Core::DbError>;
+            static constexpr bool is_expected_result = false;
+        };
+
+        template<typename T>
+        struct TransactionReturn<std::expected<T, Core::DbError>>
+        {
+            using value_type = T;
+            using expected_type = std::expected<T, Core::DbError>;
+            static constexpr bool is_expected_result = true;
+        };
+    } // namespace detail
+
     template<typename T>
     concept IsDbSetMember = requires {
         typename T::DomainType;
@@ -140,6 +189,55 @@ export namespace DAL
                     Core::DbError::connection_error("Cannot execute prepared SQL: database connection is closed or null") } };
             }
             return conn_->execute_prepared(sql);
+        }
+
+        // Typed ad-hoc SQL hydration into any reflected C++ struct (maps by column name with positional fallback).
+        template<typename RowT>
+        [[nodiscard]] std::expected<std::vector<RowT>, Core::DbError> query_as(
+            std::string_view sql, std::span<const DynamicCell> params = {}) const
+            requires requires(const ConnectionHandle& c, std::string_view s, std::span<const DynamicCell> p) {
+                c.template query_as<RowT>(s, p);
+            }
+        {
+            if (!is_connected())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot execute typed query: database connection is closed or null") };
+            }
+            return conn_->template query_as<RowT>(sql, params);
+        }
+
+        template<typename RowT, typename... Args>
+            requires(sizeof...(Args) >= 1) && (!std::same_as<std::remove_cvref_t<Args...[0]>, std::span<const DynamicCell>>) &&
+            requires(const ConnectionHandle& c, std::string_view s, const Args&... a) { c.template query_as<RowT>(s, a...); }
+        [[nodiscard]] std::expected<std::vector<RowT>, Core::DbError> query_as(std::string_view sql, const Args&... args) const
+        {
+            if (!is_connected())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot execute typed query: database connection is closed or null") };
+            }
+            return conn_->template query_as<RowT>(sql, args...);
+        }
+
+        // Lazy C++26 std::generator streaming over arbitrary typed SQL queries.
+        template<typename RowT>
+        [[nodiscard]] std::generator<std::expected<RowT, Core::DbError>> stream_as(
+            std::string sql, std::vector<DynamicCell> params = {}) const
+            requires requires(const ConnectionHandle& c, std::string s, std::vector<DynamicCell> p) {
+                c.template stream_as<RowT>(std::move(s), std::move(p));
+            }
+        {
+            if (!is_connected())
+            {
+                co_yield std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot stream query: database connection is closed or null") };
+                co_return;
+            }
+            for (auto&& row : conn_->template stream_as<RowT>(std::move(sql), std::move(params)))
+            {
+                co_yield std::move(row);
+            }
         }
 
         // Type alias for zero-boilerplate DbSet declarations inside derived DbContext classes
@@ -292,6 +390,239 @@ export namespace DAL
             }
 
             return self.conn_->enable_foreign_keys();
+        }
+
+        // Generates topologically sorted CREATE TABLE + declarative CREATE INDEX DDL statements without mutating the DB.
+        template<typename Self>
+        [[nodiscard]] std::expected<std::vector<std::string>, Core::DbError> generate_schema_sql(this Self&&)
+        {
+            using DerivedType = std::remove_cvref_t<Self>;
+            static constexpr auto dbset_members = dbset_members_of<DerivedType>();
+            static constexpr auto order = topological_dbset_order<DerivedType>();
+
+            std::vector<std::string> all_stmts;
+            std::optional<Core::DbError> err;
+            template for (constexpr std::size_t idx : order)
+            {
+                if (!err)
+                {
+                    constexpr auto m = dbset_members[idx];
+                    using RawMemberType = [:std::meta::type_of(m):];
+                    using MemberType = std::remove_cvref_t<RawMemberType>;
+                    auto stmts = detail::build_table_ddl_statements<typename MemberType::DTOType>();
+                    if (!stmts)
+                    {
+                        err = std::move(stmts.error());
+                    }
+                    else
+                    {
+                        for (auto& s : *stmts)
+                        {
+                            all_stmts.push_back(std::move(s));
+                        }
+                    }
+                }
+            }
+            if (err)
+            {
+                return std::unexpected<Core::DbError>{ std::move(*err) };
+            }
+            return all_stmts;
+        }
+
+        // Compares reflected C++ entities against live SQLite schema (tables, columns, declarative indexes).
+        template<typename Self>
+        [[nodiscard]] std::expected<SchemaDriftReport, Core::DbError> verify_schema(this Self&& self)
+            requires requires(const ConnectionHandle& c) {
+                c.list_tables();
+                c.table_info(std::string_view{});
+                c.list_indexes(std::string_view{});
+            }
+        {
+            if (!self.is_connected())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot verify schema: database connection is closed or null") };
+            }
+            auto live_tables_res = self.conn_->list_tables();
+            if (!live_tables_res)
+            {
+                return std::unexpected<Core::DbError>{ live_tables_res.error() };
+            }
+            std::set<std::string> live_tables(live_tables_res->begin(), live_tables_res->end());
+
+            SchemaDriftReport report{};
+            using DerivedType = std::remove_cvref_t<Self>;
+            static constexpr auto dbset_members = dbset_members_of<DerivedType>();
+            std::optional<Core::DbError> err;
+
+            template for (constexpr auto m : dbset_members)
+            {
+                if (!err)
+                {
+                    using RawMemberType = [:std::meta::type_of(m):];
+                    using DTO = typename std::remove_cvref_t<RawMemberType>::DTOType;
+                    const std::string tname{ DTO::tablename };
+
+                    if (!live_tables.contains(tname))
+                    {
+                        report.missing_tables.push_back(tname);
+                    }
+                    else
+                    {
+                        auto live_cols_res = self.conn_->table_info(tname);
+                        if (!live_cols_res)
+                        {
+                            err = live_cols_res.error();
+                        }
+                        else
+                        {
+                            std::set<std::string> live_col_names;
+                            for (const auto& c : *live_cols_res)
+                            {
+                                live_col_names.insert(c.name);
+                            }
+
+                            std::set<std::string> expected_col_names;
+                            template for (constexpr auto cm : Schema::members_v<DTO>)
+                            {
+                                const std::string cname{ std::meta::identifier_of(cm) };
+                                expected_col_names.insert(cname);
+                                if (!live_col_names.contains(cname))
+                                {
+                                    report.missing_columns.push_back(std::format("{}.{}", tname, cname));
+                                }
+                            }
+                            for (const auto& lc : live_col_names)
+                            {
+                                if (!expected_col_names.contains(lc))
+                                {
+                                    report.extra_columns.push_back(std::format("{}.{}", tname, lc));
+                                }
+                            }
+
+                            auto live_idx_res = self.conn_->list_indexes(tname);
+                            if (!live_idx_res)
+                            {
+                                err = live_idx_res.error();
+                            }
+                            else
+                            {
+                                std::set<std::string> live_idx_names;
+                                for (const auto& ix : *live_idx_res)
+                                {
+                                    live_idx_names.insert(ix.name);
+                                }
+                                if constexpr (requires { DTO::field_ddl_meta; })
+                                {
+                                    std::size_t col_i = 0;
+                                    template for (constexpr auto cm : Schema::members_v<DTO>)
+                                    {
+                                        if (col_i < DTO::field_ddl_meta.size() && DTO::field_ddl_meta[col_i].has_index)
+                                        {
+                                            const auto& fm = DTO::field_ddl_meta[col_i];
+                                            const std::string expected_idx = fm.has_index_name
+                                                ? std::string{ fm.index_name }
+                                                : std::format("idx_{}_{}", tname, std::meta::identifier_of(cm));
+                                            if (!live_idx_names.contains(expected_idx))
+                                            {
+                                                report.missing_indexes.push_back(std::format("{}.{}", tname, expected_idx));
+                                            }
+                                        }
+                                        ++col_i;
+                                    }
+                                }
+                                if constexpr (requires { DTO::composite_indexes; })
+                                {
+                                    for (const auto& ci : DTO::composite_indexes)
+                                    {
+                                        const std::string expected_idx{ ci.name };
+                                        if (!live_idx_names.contains(expected_idx))
+                                        {
+                                            report.missing_indexes.push_back(std::format("{}.{}", tname, expected_idx));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (err)
+            {
+                return std::unexpected<Core::DbError>{ std::move(*err) };
+            }
+            return report;
+        }
+
+        // Declarative versioned migration runner built on transactional PRAGMA user_version + BEGIN IMMEDIATE.
+        template<typename Self>
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> migrate(this Self&& self, std::span<MigrationStep> steps)
+        {
+            if (!self.is_connected())
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
+                    "Cannot run migrations: database connection is closed") };
+            }
+            std::int32_t prev_v = 0;
+            for (const auto& s : steps)
+            {
+                if (s.version <= 0 || s.version <= prev_v)
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                        "Migration steps must have strictly positive, strictly increasing versions") };
+                }
+                prev_v = s.version;
+            }
+            if (steps.empty())
+            {
+                auto ec = self.ensure_created();
+                if (!ec)
+                {
+                    return std::unexpected<Core::DbError>{ ec.error() };
+                }
+                return std::size_t{ 0 };
+            }
+
+            std::size_t applied_count = 0;
+            const std::int32_t target_version = steps.back().version;
+            auto mig_res = self.migrate_to(
+                target_version,
+                [&](std::int32_t current_version, std::int32_t) -> std::expected<void, Core::DbError>
+                {
+                    for (auto& step : steps)
+                    {
+                        if (step.version > current_version)
+                        {
+                            if (step.up)
+                            {
+                                if (auto r = step.up(); !r)
+                                {
+                                    return r;
+                                }
+                            }
+                            ++applied_count;
+                        }
+                    }
+                    return {};
+                });
+            if (!mig_res)
+            {
+                return std::unexpected<Core::DbError>{ mig_res.error() };
+            }
+            return applied_count;
+        }
+
+        template<typename Self>
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> migrate(this Self&& self, std::vector<MigrationStep>& steps)
+        {
+            return self.migrate(std::span<MigrationStep>{ steps });
+        }
+
+        template<typename Self>
+        [[nodiscard]] std::expected<std::size_t, Core::DbError> migrate(this Self&& self, std::vector<MigrationStep>&& steps)
+        {
+            return self.migrate(std::span<MigrationStep>{ steps });
         }
 
         template<typename... Domains>
@@ -675,15 +1006,91 @@ export namespace DAL
 
             const ChildDTO child_dto = DAL::Mappers::MapperTraits<ChildDomain, ChildDTO>::to_dto(child);
             const auto fk_val = Schema::extract_fk_value<ChildDTO, ParentDTO>(child_dto);
+            using FkValT = std::remove_cvref_t<decltype(fk_val)>;
             constexpr auto target_m = Schema::referenced_parent_member_of<ChildDTO, ParentDTO>();
-            if constexpr (Schema::SinglePrimaryKey<ParentDTO>)
+
+            auto lookup_by_scalar = [&](const auto& scalar_fk) -> std::expected<std::optional<ParentDomain>, Core::DbError>
             {
-                if constexpr (target_m == Schema::primary_key_member<ParentDTO>())
+                if constexpr (Schema::SinglePrimaryKey<ParentDTO>)
                 {
-                    return parent_set.try_find(fk_val);
+                    if constexpr (target_m == Schema::primary_key_member<ParentDTO>())
+                    {
+                        return parent_set.try_find(scalar_fk);
+                    }
                 }
+                return parent_set.where_sql(Schema::col_of<target_m> == scalar_fk).try_first_or_default();
+            };
+
+            if constexpr (Schema::detail::is_optional_v<FkValT>)
+            {
+                if (!fk_val.has_value())
+                {
+                    return std::optional<ParentDomain>{ std::nullopt };
+                }
+                return lookup_by_scalar(*fk_val);
             }
-            return parent_set.where_sql(Schema::col_of<target_m> == fk_val).try_first_or_default();
+            else
+            {
+                return lookup_by_scalar(fk_val);
+            }
+        }
+
+        // Single-query SQL INNER JOIN across Child -> Parent using reflected FK metadata.
+        template<typename ChildDomain, typename ParentDomain, typename Self>
+        [[nodiscard]] std::expected<std::vector<std::pair<ChildDomain, ParentDomain>>, Core::DbError> join(this Self&& self)
+        {
+            auto& child_set = self.template find_dbset<ChildDomain>();
+            auto& parent_set = self.template find_dbset<ParentDomain>();
+            using ChildDTO = typename std::remove_cvref_t<decltype(child_set)>::DTOType;
+            using ParentDTO = typename std::remove_cvref_t<decltype(parent_set)>::DTOType;
+
+            constexpr auto fk_m = Schema::find_fk_member_referencing<ChildDTO, ParentDTO>();
+            constexpr auto target_m = Schema::referenced_parent_member_of<ChildDTO, ParentDTO>();
+            auto rows = self.conn_->template try_inner_join_read<ChildDTO, ParentDTO>(
+                std::meta::identifier_of(fk_m), std::meta::identifier_of(target_m));
+            if (!rows)
+            {
+                return std::unexpected<Core::DbError>{ rows.error() };
+            }
+            std::vector<std::pair<ChildDomain, ParentDomain>> out;
+            out.reserve(rows->size());
+            for (const auto& [c_dto, p_dto] : *rows)
+            {
+                out.emplace_back(
+                    DAL::Mappers::MapperTraits<ChildDomain, ChildDTO>::to_domain(c_dto),
+                    DAL::Mappers::MapperTraits<ParentDomain, ParentDTO>::to_domain(p_dto));
+            }
+            return out;
+        }
+
+        // Single-query SQL LEFT JOIN across Child -> Optional<Parent> using reflected FK metadata.
+        template<typename ChildDomain, typename ParentDomain, typename Self>
+        [[nodiscard]] std::expected<std::vector<std::pair<ChildDomain, std::optional<ParentDomain>>>, Core::DbError> left_join(
+            this Self&& self)
+        {
+            auto& child_set = self.template find_dbset<ChildDomain>();
+            auto& parent_set = self.template find_dbset<ParentDomain>();
+            using ChildDTO = typename std::remove_cvref_t<decltype(child_set)>::DTOType;
+            using ParentDTO = typename std::remove_cvref_t<decltype(parent_set)>::DTOType;
+
+            constexpr auto fk_m = Schema::find_fk_member_referencing<ChildDTO, ParentDTO>();
+            constexpr auto target_m = Schema::referenced_parent_member_of<ChildDTO, ParentDTO>();
+            auto rows = self.conn_->template try_left_join_read<ChildDTO, ParentDTO>(
+                std::meta::identifier_of(fk_m), std::meta::identifier_of(target_m));
+            if (!rows)
+            {
+                return std::unexpected<Core::DbError>{ rows.error() };
+            }
+            std::vector<std::pair<ChildDomain, std::optional<ParentDomain>>> out;
+            out.reserve(rows->size());
+            for (const auto& [c_dto, p_opt] : *rows)
+            {
+                std::optional<ParentDomain> p_dom = p_opt.has_value()
+                    ? std::optional<ParentDomain>{ DAL::Mappers::MapperTraits<ParentDomain, ParentDTO>::to_domain(*p_opt) }
+                    : std::nullopt;
+                out.emplace_back(DAL::Mappers::MapperTraits<ChildDomain, ChildDTO>::to_domain(c_dto), std::move(p_dom));
+            }
+            return out;
         }
 
         template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
@@ -748,6 +1155,23 @@ export namespace DAL
             return child_set.where_sql(Schema::col_of<fk_m>.in(ref_vals)).try_to_vector();
         }
 
+        template<typename ChildDomain, std::ranges::input_range R, typename Self>
+            requires(!std::same_as<std::remove_cvref_t<R>, std::vector<std::ranges::range_value_t<R>>>)
+        [[nodiscard]] std::expected<std::vector<ChildDomain>, Core::DbError> query_children_batch(this Self&& self, R&& parents)
+        {
+            using ParentDomain = std::ranges::range_value_t<R>;
+            std::vector<ParentDomain> vec;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                vec.reserve(std::ranges::size(parents));
+            }
+            for (auto&& p : parents)
+            {
+                vec.push_back(std::forward<decltype(p)>(p));
+            }
+            return self.template query_children_batch<ChildDomain>(vec);
+        }
+
         template<typename ParentDomain, typename ChildDomain, typename Self>
         [[nodiscard]] std::expected<std::vector<ParentDomain>, Core::DbError> query_parents_batch(
             this Self&& self, const std::vector<ChildDomain>& children)
@@ -773,6 +1197,23 @@ export namespace DAL
                 fk_vals.push_back(Schema::extract_fk_value<ChildDTO, ParentDTO>(c_dto));
             }
             return parent_set.where_sql(Schema::col_of<target_m>.in(fk_vals)).try_to_vector();
+        }
+
+        template<typename ParentDomain, std::ranges::input_range R, typename Self>
+            requires(!std::same_as<std::remove_cvref_t<R>, std::vector<std::ranges::range_value_t<R>>>)
+        [[nodiscard]] std::expected<std::vector<ParentDomain>, Core::DbError> query_parents_batch(this Self&& self, R&& children)
+        {
+            using ChildDomain = std::ranges::range_value_t<R>;
+            std::vector<ChildDomain> vec;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                vec.reserve(std::ranges::size(children));
+            }
+            for (auto&& c : children)
+            {
+                vec.push_back(std::forward<decltype(c)>(c));
+            }
+            return self.template query_parents_batch<ParentDomain>(vec);
         }
 
         template<typename ChildDomain, typename ParentDomain, typename Self>
@@ -825,6 +1266,24 @@ export namespace DAL
             return grouped;
         }
 
+        template<typename ChildDomain, std::ranges::input_range R, typename Self>
+            requires(!std::same_as<std::remove_cvref_t<R>, std::vector<std::ranges::range_value_t<R>>>)
+        [[nodiscard]] std::expected<std::vector<std::pair<std::ranges::range_value_t<R>, std::vector<ChildDomain>>>, Core::DbError>
+        query_children_grouped(this Self&& self, R&& parents)
+        {
+            using ParentDomain = std::ranges::range_value_t<R>;
+            std::vector<ParentDomain> vec;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                vec.reserve(std::ranges::size(parents));
+            }
+            for (auto&& p : parents)
+            {
+                vec.push_back(std::forward<decltype(p)>(p));
+            }
+            return self.template query_children_grouped<ChildDomain>(vec);
+        }
+
         template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
         [[nodiscard]] std::expected<std::vector<TargetDomain>, Core::DbError> query_many_to_many_batch(
             this Self&& self, const std::vector<SourceDomain>& sources)
@@ -860,6 +1319,23 @@ export namespace DAL
                 target_fks.push_back(Schema::extract_fk_value<JunctionDTO, TargetDTO>(j_dto));
             }
             return target_set.where_sql(Schema::col_of<target_m>.in(target_fks)).try_to_vector();
+        }
+
+        template<typename TargetDomain, typename JunctionDomain, std::ranges::input_range R, typename Self>
+            requires(!std::same_as<std::remove_cvref_t<R>, std::vector<std::ranges::range_value_t<R>>>)
+        [[nodiscard]] std::expected<std::vector<TargetDomain>, Core::DbError> query_many_to_many_batch(this Self&& self, R&& sources)
+        {
+            using SourceDomain = std::ranges::range_value_t<R>;
+            std::vector<SourceDomain> vec;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                vec.reserve(std::ranges::size(sources));
+            }
+            for (auto&& s : sources)
+            {
+                vec.push_back(std::forward<decltype(s)>(s));
+            }
+            return self.template query_many_to_many_batch<TargetDomain, JunctionDomain>(vec);
         }
 
         template<typename TargetDomain, typename JunctionDomain, typename SourceDomain, typename Self>
@@ -951,7 +1427,25 @@ export namespace DAL
             return grouped;
         }
 
-        [[nodiscard]] std::expected<void, Core::DbError> begin_transaction()
+        template<typename TargetDomain, typename JunctionDomain, std::ranges::input_range R, typename Self>
+            requires(!std::same_as<std::remove_cvref_t<R>, std::vector<std::ranges::range_value_t<R>>>)
+        [[nodiscard]] std::expected<std::vector<std::pair<std::ranges::range_value_t<R>, std::vector<TargetDomain>>>, Core::DbError>
+        query_many_to_many_grouped(this Self&& self, R&& sources)
+        {
+            using SourceDomain = std::ranges::range_value_t<R>;
+            std::vector<SourceDomain> vec;
+            if constexpr (std::ranges::sized_range<R>)
+            {
+                vec.reserve(std::ranges::size(sources));
+            }
+            for (auto&& s : sources)
+            {
+                vec.push_back(std::forward<decltype(s)>(s));
+            }
+            return self.template query_many_to_many_grouped<TargetDomain, JunctionDomain>(vec);
+        }
+
+        [[nodiscard]] std::expected<void, Core::DbError> begin_transaction(TransactionMode mode = TransactionMode::Deferred)
         {
             if (!is_connected())
             {
@@ -959,7 +1453,18 @@ export namespace DAL
                     "Cannot begin transaction: database connection is closed") };
             }
             auto cp = state_->capture_checkpoint();
-            auto res = conn_->begin_transaction();
+            auto res = [&]()
+            {
+                if constexpr (requires(ConnectionHandle& c, TransactionMode m) { c.begin_transaction(m); })
+                {
+                    return conn_->begin_transaction(mode);
+                }
+                else
+                {
+                    (void)mode;
+                    return conn_->begin_transaction();
+                }
+            }();
             if (res)
             {
                 state_->outer_tx_checkpoint_ = std::move(cp);
@@ -1274,8 +1779,13 @@ export namespace DAL
         }
 
         template<typename Fn>
-        [[nodiscard]] std::expected<void, Core::DbError> transaction(Fn&& fn)
+        [[nodiscard]] auto transaction(TransactionMode mode, Fn&& fn) ->
+            typename detail::TransactionReturn<std::remove_cvref_t<std::invoke_result_t<Fn>>>::expected_type
         {
+            using FnResult = std::invoke_result_t<Fn>;
+            using Traits = detail::TransactionReturn<std::remove_cvref_t<FnResult>>;
+            using ValT = typename Traits::value_type;
+
             if (!is_connected())
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::connection_error(
@@ -1294,7 +1804,7 @@ export namespace DAL
                     if (!sp_res)
                     {
                         --savepoint_depth_;
-                        return sp_res;
+                        return std::unexpected<Core::DbError>{ sp_res.error() };
                     }
 
                     push_pending_base(saved_pending_size);
@@ -1309,12 +1819,12 @@ export namespace DAL
 
                     try
                     {
-                        using FnResult = std::invoke_result_t<Fn>;
+                        std::conditional_t<std::is_void_v<ValT>, int, std::optional<ValT>> result_holder{};
                         if constexpr (std::is_void_v<FnResult>)
                         {
                             std::invoke(std::forward<Fn>(fn));
                         }
-                        else
+                        else if constexpr (Traits::is_expected_result)
                         {
                             auto fn_res = std::invoke(std::forward<Fn>(fn));
                             if (!fn_res)
@@ -1323,8 +1833,16 @@ export namespace DAL
                                 (void)conn_->rollback_to_savepoint(sp_name);
                                 --savepoint_depth_;
                                 state_->restore_baselines(sp_cp);
-                                return fn_res;
+                                return std::unexpected<Core::DbError>{ std::move(fn_res.error()) };
                             }
+                            if constexpr (!std::is_void_v<ValT>)
+                            {
+                                result_holder.emplace(std::move(*fn_res));
+                            }
+                        }
+                        else
+                        {
+                            result_holder.emplace(std::invoke(std::forward<Fn>(fn)));
                         }
 
                         if (state_->pending_ops_.size() > saved_pending_size)
@@ -1335,7 +1853,7 @@ export namespace DAL
                                 (void)conn_->rollback_to_savepoint(sp_name);
                                 --savepoint_depth_;
                                 state_->restore_baselines(sp_cp);
-                                return flush_res;
+                                return std::unexpected<Core::DbError>{ flush_res.error() };
                             }
                         }
 
@@ -1348,7 +1866,7 @@ export namespace DAL
                                 (void)conn_->rollback_to_savepoint(sp_name);
                                 --savepoint_depth_;
                                 state_->restore_baselines(sp_cp);
-                                return flush_res;
+                                return std::unexpected<Core::DbError>{ flush_res.error() };
                             }
                         }
 
@@ -1358,10 +1876,17 @@ export namespace DAL
                             (void)conn_->rollback_to_savepoint(sp_name);
                             --savepoint_depth_;
                             state_->restore_baselines(sp_cp);
-                            return rel_res;
+                            return std::unexpected<Core::DbError>{ rel_res.error() };
                         }
                         --savepoint_depth_;
-                        return {};
+                        if constexpr (std::is_void_v<ValT>)
+                        {
+                            return {};
+                        }
+                        else
+                        {
+                            return std::move(*result_holder);
+                        }
                     } catch (...)
                     {
                         truncate_pending_changes(saved_pending_size);
@@ -1374,20 +1899,20 @@ export namespace DAL
             }
 
             const auto tx_cp = state_->capture_checkpoint();
-            auto tx_res = begin_transaction();
+            auto tx_res = begin_transaction(mode);
             if (!tx_res)
             {
-                return tx_res;
+                return std::unexpected<Core::DbError>{ tx_res.error() };
             }
 
             try
             {
-                using FnResult = std::invoke_result_t<Fn>;
+                std::conditional_t<std::is_void_v<ValT>, int, std::optional<ValT>> result_holder{};
                 if constexpr (std::is_void_v<FnResult>)
                 {
                     std::invoke(std::forward<Fn>(fn));
                 }
-                else
+                else if constexpr (Traits::is_expected_result)
                 {
                     auto fn_res = std::invoke(std::forward<Fn>(fn));
                     if (!fn_res)
@@ -1398,8 +1923,16 @@ export namespace DAL
                         }
                         state_->restore_baselines(tx_cp);
                         truncate_pending_changes(tx_cp.saved_pending_size);
-                        return fn_res;
+                        return std::unexpected<Core::DbError>{ std::move(fn_res.error()) };
                     }
+                    if constexpr (!std::is_void_v<ValT>)
+                    {
+                        result_holder.emplace(std::move(*fn_res));
+                    }
+                }
+                else
+                {
+                    result_holder.emplace(std::invoke(std::forward<Fn>(fn)));
                 }
 
                 auto sc_res = save_changes();
@@ -1411,7 +1944,7 @@ export namespace DAL
                     }
                     state_->restore_baselines(tx_cp);
                     truncate_pending_changes(tx_cp.saved_pending_size);
-                    return sc_res;
+                    return std::unexpected<Core::DbError>{ sc_res.error() };
                 }
 
                 if (in_transaction())
@@ -1425,10 +1958,17 @@ export namespace DAL
                         }
                         state_->restore_baselines(tx_cp);
                         truncate_pending_changes(tx_cp.saved_pending_size);
-                        return commit_res;
+                        return std::unexpected<Core::DbError>{ commit_res.error() };
                     }
                 }
-                return {};
+                if constexpr (std::is_void_v<ValT>)
+                {
+                    return {};
+                }
+                else
+                {
+                    return std::move(*result_holder);
+                }
             } catch (...)
             {
                 if (in_transaction())
@@ -1439,6 +1979,13 @@ export namespace DAL
                 truncate_pending_changes(tx_cp.saved_pending_size);
                 throw;
             }
+        }
+
+        template<typename Fn>
+        [[nodiscard]] auto transaction(Fn&& fn) ->
+            typename detail::TransactionReturn<std::remove_cvref_t<std::invoke_result_t<Fn>>>::expected_type
+        {
+            return transaction(TransactionMode::Deferred, std::forward<Fn>(fn));
         }
 
     protected:
@@ -1453,7 +2000,7 @@ export namespace DAL
     class TransactionScope
     {
     public:
-        explicit TransactionScope(DbContextBase<ConnectionHandle>& ctx)
+        explicit TransactionScope(DbContextBase<ConnectionHandle>& ctx, TransactionMode mode = TransactionMode::Deferred)
             : ctx_(&ctx)
             , saved_pending_size_(ctx.pending_changes_count())
             , scope_checkpoint_(ctx.capture_checkpoint())
@@ -1476,7 +2023,7 @@ export namespace DAL
             }
             else
             {
-                begin_result_ = ctx_->begin_transaction();
+                begin_result_ = ctx_->begin_transaction(mode);
             }
         }
 

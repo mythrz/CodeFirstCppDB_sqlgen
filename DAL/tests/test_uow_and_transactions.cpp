@@ -2397,4 +2397,202 @@ namespace
         EXPECT_FALSE(sqlConn->exists<PocoUser>(2));
     }
 
+    // =========================================================================
+    // Phase U4: Value-Returning Transactions, TransactionMode & Connection Pool
+    // =========================================================================
+
+    struct[[= DAL::Schema::table("U4Notes")]] U4Note
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string text;
+    };
+
+    struct U4NotesContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<U4Note> notes{ this };
+
+        explicit U4NotesContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(PhaseU4TransactionsAndPoolTest, ValueReturningTransactionsAndTransactionModes)
+    {
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value());
+        U4NotesContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // 1. Value-returning expected<T, DbError> transaction with TransactionMode::Immediate
+        auto created = db.transaction(
+            DAL::TransactionMode::Immediate,
+            [&]() -> std::expected<U4Note, Core::DbError>
+            {
+                return db.notes.add_returning(U4Note{ 0, "first" });
+            });
+        ASSERT_TRUE(created.has_value()) << created.error().to_string();
+        EXPECT_EQ(created->id, 1);
+        EXPECT_EQ(created->text, "first");
+
+        // 2. Plain value-returning lambda transaction with TransactionMode::Exclusive
+        auto plainVal = db.transaction(
+            DAL::TransactionMode::Exclusive,
+            [&]() -> std::size_t
+            {
+                (void)db.notes.add(U4Note{ 0, "second" });
+                return db.notes.count();
+            });
+        ASSERT_TRUE(plainVal.has_value()) << plainVal.error().to_string();
+        EXPECT_EQ(*plainVal, 2u);
+
+        // 3. Nested savepoint value-returning transaction (commit & rollback)
+        auto outerRes = db.transaction(
+            [&]() -> std::expected<int, Core::DbError>
+            {
+                auto innerFail = db.transaction(
+                    [&]() -> std::expected<int, Core::DbError>
+                    {
+                        auto r = db.notes.add(U4Note{ 0, "rolled-back-inner" });
+                        if (!r)
+                        {
+                            return std::unexpected<Core::DbError>{ r.error() };
+                        }
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("force inner rollback") };
+                    });
+                EXPECT_FALSE(innerFail.has_value());
+                EXPECT_EQ(db.notes.count(), 2u);
+
+                auto innerOk = db.transaction(
+                    [&]() -> int
+                    {
+                        (void)db.notes.add(U4Note{ 0, "committed-inner" });
+                        return 42;
+                    });
+                if (!innerOk)
+                {
+                    return std::unexpected<Core::DbError>{ innerOk.error() };
+                }
+                return *innerOk;
+            });
+        ASSERT_TRUE(outerRes.has_value()) << outerRes.error().to_string();
+        EXPECT_EQ(*outerRes, 42);
+        EXPECT_EQ(db.notes.count(), 3u);
+
+        // 4. TransactionScope with TransactionMode::Immediate
+        {
+            DAL::TransactionScope scope(db, DAL::TransactionMode::Immediate);
+            ASSERT_TRUE(scope.begin_result().has_value());
+            ASSERT_TRUE(db.notes.add(U4Note{ 0, "scope-rolled-back" }).has_value());
+        }
+        EXPECT_EQ(db.notes.count(), 3u);
+    }
+
+    TEST(PhaseU4TransactionsAndPoolTest, SQLiteConnectionPoolConcurrencyAndLeaseRollback)
+    {
+        const auto tmpPath = std::filesystem::temp_directory_path() /
+            ("codefirst_u4_pool_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+        struct TempCleanup
+        {
+            std::filesystem::path p;
+            ~TempCleanup() noexcept
+            {
+                std::error_code ec;
+                std::filesystem::remove(p, ec);
+                std::filesystem::remove(p.string() + "-wal", ec);
+                std::filesystem::remove(p.string() + "-shm", ec);
+            }
+        } cleanup{ tmpPath };
+
+        DAL::SQLitePoolOptions opts{};
+        opts.min_size = 2;
+        opts.max_size = 4;
+        opts.acquire_timeout = std::chrono::milliseconds{ 3000 };
+
+        auto poolRes = DAL::SQLiteConnectionPool::create(tmpPath, opts);
+        ASSERT_TRUE(poolRes.has_value()) << poolRes.error().to_string();
+        auto pool = *poolRes;
+        EXPECT_EQ(pool->size(), 2u);
+        EXPECT_EQ(pool->available(), 2u);
+
+        // Initialize schema via with_context
+        auto initRes = pool->with_context<U4NotesContext>(
+            [](U4NotesContext& ctx) -> std::expected<void, Core::DbError>
+            {
+                return ctx.ensure_created();
+            });
+        ASSERT_TRUE(initRes.has_value()) << initRes.error().to_string();
+
+        // Uncommitted transaction left open on a leased connection MUST be rolled back on lease release
+        {
+            auto leaseRes = pool->acquire();
+            ASSERT_TRUE(leaseRes.has_value());
+            U4NotesContext ctx(leaseRes->connection());
+            ASSERT_TRUE(ctx.begin_transaction(DAL::TransactionMode::Immediate).has_value());
+            ASSERT_TRUE(ctx.notes.add(U4Note{ 0, "uncommitted-leak" }).has_value());
+        }
+        auto afterLeak = pool->with_context<U4NotesContext>(
+            [](U4NotesContext& ctx)
+            {
+                return ctx.notes.count();
+            });
+        ASSERT_TRUE(afterLeak.has_value());
+        EXPECT_EQ(*afterLeak, 0u);
+
+        // Concurrent multi-threaded inserts through with_context (8 threads > max_size 4)
+        constexpr int kThreads = 8;
+        constexpr int kPerThread = 5;
+        std::atomic<int> failures{ 0 };
+        std::vector<std::thread> workers;
+        workers.reserve(kThreads);
+        for (int t = 0; t < kThreads; ++t)
+        {
+            workers.emplace_back(
+                [&, t]()
+                {
+                    for (int i = 0; i < kPerThread; ++i)
+                    {
+                        auto r = pool->with_context<U4NotesContext>(
+                            [t, i](U4NotesContext& ctx) -> std::expected<std::int32_t, Core::DbError>
+                            {
+                                return ctx.transaction(
+                                    DAL::TransactionMode::Immediate,
+                                    [&]() -> std::expected<std::int32_t, Core::DbError>
+                                    {
+                                        auto added = ctx.notes.add_returning(U4Note{ 0, std::format("t{}_i{}", t, i) });
+                                        if (!added)
+                                        {
+                                            return std::unexpected<Core::DbError>{ added.error() };
+                                        }
+                                        return added->id;
+                                    });
+                            });
+                        if (!r.has_value())
+                        {
+                            failures.fetch_add(1);
+                        }
+                    }
+                });
+        }
+        for (auto& w : workers)
+        {
+            w.join();
+        }
+        EXPECT_EQ(failures.load(), 0);
+        EXPECT_LE(pool->size(), 4u);
+
+        auto totalCount = pool->with_context<U4NotesContext>(
+            [](U4NotesContext& ctx)
+            {
+                return ctx.notes.count();
+            });
+        ASSERT_TRUE(totalCount.has_value());
+        EXPECT_EQ(*totalCount, static_cast<std::size_t>(kThreads * kPerThread));
+
+        // Closing pool rejects subsequent acquire()
+        pool->close();
+        EXPECT_TRUE(pool->is_closed());
+        EXPECT_FALSE(pool->acquire().has_value());
+    }
+
 } // namespace

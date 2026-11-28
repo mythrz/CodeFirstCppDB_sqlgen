@@ -236,22 +236,172 @@ export namespace DAL::Mappers
         template<typename T>
         inline constexpr bool is_optional_v<std::optional<T>> = true;
 
+        template<typename TargetT, typename SrcT>
+        [[nodiscard]] TargetT convert_dto_to_domain_value(const SrcT& src)
+        {
+            using CleanTarget = std::remove_cvref_t<TargetT>;
+            using CleanSrc = std::remove_cvref_t<SrcT>;
+
+            if constexpr (is_optional_v<CleanSrc>)
+            {
+                if constexpr (is_optional_v<CleanTarget>)
+                {
+                    using InnerTarget = typename CleanTarget::value_type;
+                    if (!src.has_value())
+                    {
+                        return CleanTarget{ std::nullopt };
+                    }
+                    return CleanTarget{ convert_dto_to_domain_value<InnerTarget>(*src) };
+                }
+                else
+                {
+                    return static_cast<CleanTarget>(src);
+                }
+            }
+            else if constexpr (requires(const CleanSrc& v) { v.value(); })
+            {
+                return convert_dto_to_domain_value<CleanTarget>(src.value());
+            }
+            else if constexpr (Core::StrongIdType<CleanTarget>)
+            {
+                return CleanTarget{ convert_dto_to_domain_value<typename CleanTarget::value_type>(src) };
+            }
+            else if constexpr (DAL::Schema::detail::is_sys_time_v<CleanTarget> && std::same_as<CleanSrc, std::string>)
+            {
+                auto parsed = DAL::Schema::detail::parse_sys_time_iso8601<CleanTarget>(src);
+                if (!parsed)
+                {
+                    throw std::invalid_argument(parsed.error().message);
+                }
+                return *parsed;
+            }
+            else if constexpr (DAL::Schema::detail::is_ymd_v<CleanTarget> && std::same_as<CleanSrc, std::string>)
+            {
+                auto parsed = DAL::Schema::detail::parse_ymd_iso8601(src);
+                if (!parsed)
+                {
+                    throw std::invalid_argument(parsed.error().message);
+                }
+                return *parsed;
+            }
+            else if constexpr (DAL::Schema::detail::is_fs_path_v<CleanTarget> && std::same_as<CleanSrc, std::string>)
+            {
+                return std::filesystem::path{ src };
+            }
+            else if constexpr (DAL::Schema::detail::is_byte_array_v<CleanTarget> && std::same_as<CleanSrc, std::vector<std::byte>>)
+            {
+                constexpr std::size_t N = DAL::Schema::detail::byte_array_extent_v<CleanTarget>;
+                CleanTarget arr{};
+                if (src.size() != N)
+                {
+                    throw std::invalid_argument("BLOB length does not match fixed std::array<std::byte, N> extent");
+                }
+                std::ranges::copy(src, arr.begin());
+                return arr;
+            }
+            else
+            {
+                return static_cast<CleanTarget>(src);
+            }
+        }
+
+        template<typename TargetT, typename SrcT>
+        [[nodiscard]] TargetT convert_domain_to_dto_value(const SrcT& src)
+        {
+            using CleanTarget = std::remove_cvref_t<TargetT>;
+            using CleanSrc = std::remove_cvref_t<SrcT>;
+
+            if constexpr (is_optional_v<CleanTarget>)
+            {
+                using InnerTarget = typename CleanTarget::value_type;
+                if constexpr (is_optional_v<CleanSrc>)
+                {
+                    if (!src.has_value())
+                    {
+                        return CleanTarget{ std::nullopt };
+                    }
+                    return CleanTarget{ convert_domain_to_dto_value<InnerTarget>(*src) };
+                }
+                else
+                {
+                    return CleanTarget{ convert_domain_to_dto_value<InnerTarget>(src) };
+                }
+            }
+            else if constexpr (
+                DAL::Schema::SqlgenPrimaryKeyField<CleanTarget> || DAL::Schema::SqlgenForeignKeyField<CleanTarget> ||
+                requires { typename CleanTarget::ReflectionType; })
+            {
+                if constexpr (requires { typename CleanTarget::ReflectionType; } && !std::same_as<CleanTarget, CleanSrc>)
+                {
+                    return CleanTarget{ convert_domain_to_dto_value<typename CleanTarget::ReflectionType>(src) };
+                }
+                else
+                {
+                    return static_cast<CleanTarget>(src);
+                }
+            }
+            else if constexpr (Core::StrongIdType<CleanSrc> || Core::SingleKeyType<CleanSrc>)
+            {
+                return convert_domain_to_dto_value<CleanTarget>(src.get());
+            }
+            else if constexpr (DAL::Schema::detail::is_sys_time_v<CleanSrc> && std::same_as<CleanTarget, std::string>)
+            {
+                return DAL::Schema::detail::format_sys_time_iso8601(src);
+            }
+            else if constexpr (DAL::Schema::detail::is_ymd_v<CleanSrc> && std::same_as<CleanTarget, std::string>)
+            {
+                return DAL::Schema::detail::format_ymd_iso8601(src);
+            }
+            else if constexpr (DAL::Schema::detail::is_fs_path_v<CleanSrc> && std::same_as<CleanTarget, std::string>)
+            {
+                return src.string();
+            }
+            else if constexpr (DAL::Schema::detail::is_byte_array_v<CleanSrc> && std::same_as<CleanTarget, std::vector<std::byte>>)
+            {
+                return std::vector<std::byte>(src.begin(), src.end());
+            }
+            else
+            {
+                return static_cast<CleanTarget>(src);
+            }
+        }
+
         template<typename ParamT, typename RawDtoFieldT>
         consteval bool is_hydratable_from()
         {
+            using CleanParamT = std::remove_cvref_t<ParamT>;
             using CleanDtoT = std::remove_cvref_t<RawDtoFieldT>;
             if constexpr (is_optional_v<CleanDtoT>)
             {
-                return std::is_constructible_v<ParamT, CleanDtoT>;
+                if constexpr (is_optional_v<CleanParamT>)
+                {
+                    return is_hydratable_from<typename CleanParamT::value_type, typename CleanDtoT::value_type>();
+                }
+                return std::is_constructible_v<CleanParamT, CleanDtoT>;
             }
             else if constexpr (requires(const CleanDtoT& v) { v.value(); })
             {
                 using UnwrappedT = std::remove_cvref_t<decltype(std::declval<const CleanDtoT&>().value())>;
-                return std::is_constructible_v<ParamT, UnwrappedT>;
+                return is_hydratable_from<CleanParamT, UnwrappedT>();
+            }
+            else if constexpr (Core::StrongIdType<CleanParamT>)
+            {
+                return is_hydratable_from<typename CleanParamT::value_type, CleanDtoT>();
+            }
+            else if constexpr (
+                (DAL::Schema::detail::is_sys_time_v<CleanParamT> || DAL::Schema::detail::is_ymd_v<CleanParamT> ||
+                 DAL::Schema::detail::is_fs_path_v<CleanParamT>) &&
+                std::same_as<CleanDtoT, std::string>)
+            {
+                return true;
+            }
+            else if constexpr (DAL::Schema::detail::is_byte_array_v<CleanParamT> && std::same_as<CleanDtoT, std::vector<std::byte>>)
+            {
+                return true;
             }
             else
             {
-                return std::is_constructible_v<ParamT, CleanDtoT>;
+                return std::is_constructible_v<CleanParamT, CleanDtoT>;
             }
         }
 
@@ -474,31 +624,19 @@ export namespace DAL::Mappers
                 static constexpr auto& dto_members = DAL::Schema::members_v<DTO>;
                 static constexpr auto& domain_members = DAL::Schema::unchecked_members_v<Domain>;
 
-                // Extract the raw value from sqlgen wrapper types (e.g. PrimaryKey, ForeignKey)
-                // that expose a .value() accessor, or pass through plain types unchanged.
-                // std::optional is detected via is_optional_v (partial specialisation) so
-                // that ::value_type is never accessed on non-optional types such as ForeignKey.
-                // Return type is auto (value semantics) to avoid decltype(auto) deduction
-                // conflicts across branches that return different reference categories.
-                auto extract_value = []<typename T>(const T& val) -> auto
-                {
-                    if constexpr (detail::is_optional_v<std::remove_cvref_t<T>>)
-                        return val; // keep std::optional<X> as-is
-                    else if constexpr (requires { val.value(); })
-                        return val.value(); // unwrap sqlgen PrimaryKey / ForeignKey
-                    else
-                        return val;
-                };
-
                 constexpr auto ctor = detail::find_hydrating_constructor<Domain>(dto_members);
                 if constexpr (ctor != std::meta::info{})
                 {
                     static constexpr auto params = std::define_static_array(std::meta::parameters_of(ctor));
+                    auto convert_arg = [&]<std::size_t I>()
+                    {
+                        using ParamT = [:std::meta::remove_cvref(std::meta::type_of(params[I])):];
+                        return detail::convert_dto_to_domain_value<ParamT>(
+                            dto.[:detail::find_matching_dto_member_for_param<Domain>(params[I], dto_members):]);
+                    };
                     return [&]<std::size_t... Is>(std::index_sequence<Is...>)
                     {
-                        return Domain(
-                            static_cast<[:std::meta::remove_cvref(std::meta::type_of(params[Is])):]>(
-                                extract_value(dto.[:detail::find_matching_dto_member_for_param<Domain>(params[Is], dto_members):]))...);
+                        return Domain(convert_arg.template operator()<Is>()...);
                     }(std::make_index_sequence<params.size()>{});
                 }
                 else
@@ -506,14 +644,9 @@ export namespace DAL::Mappers
                     Domain result{};
                     template for (constexpr auto dom_m : domain_members)
                     {
-                        // Locate the DTO member whose name matches this domain member.
-                        // Ill-formed at compile time if no unique match is found.
                         constexpr auto dto_m = detail::find_matching_dto_member(dom_m, dto_members);
-
-                        // Write directly into the private domain member via unchecked splice.
-                        // Cast to the domain member's type so that strong ID types
-                        // (e.g. PersonId) are constructed from their int32_t DTO counterpart.
-                        result.[:dom_m:] = static_cast<[:std::meta::type_of(dom_m):]>(extract_value(dto.[:dto_m:]));
+                        using DomFieldT = [:std::meta::type_of(dom_m):];
+                        result.[:dom_m:] = detail::convert_dto_to_domain_value<DomFieldT>(dto.[:dto_m:]);
                     }
                     return result;
                 }
@@ -536,16 +669,7 @@ export namespace DAL::Mappers
                 {
                     constexpr auto dom_m = detail::find_matching_domain_member(dto_m, domain_members);
                     using TargetT = std::remove_cvref_t<decltype(dto.[:dto_m:])>;
-                    const auto& src = domain.[:dom_m:];
-                    using SrcT = std::remove_cvref_t<decltype(src)>;
-                    if constexpr (Core::StrongIdType<SrcT> || Core::SingleKeyType<SrcT>)
-                    {
-                        dto.[:dto_m:] = static_cast<TargetT>(src.get());
-                    }
-                    else
-                    {
-                        dto.[:dto_m:] = static_cast<TargetT>(src);
-                    }
+                    dto.[:dto_m:] = detail::convert_domain_to_dto_value<TargetT>(domain.[:dom_m:]);
                 }
                 return dto;
             }
@@ -758,6 +882,46 @@ export namespace DAL::Mappers
             return *resolved;
         }
         throw std::invalid_argument("Invalid or ambiguous query column or domain field name");
+    }
+
+    // C++26 P2996 reflection NTTP column resolution (e.g., where_equal<^^Book::title>(...))
+    template<typename Domain, typename DTO, std::meta::info Member>
+    consteval std::optional<std::meta::info> try_resolve_dto_member_ref()
+    {
+        static constexpr auto& dto_members = DAL::Schema::members_v<DTO>;
+        for (auto m : dto_members)
+        {
+            if (m == Member)
+            {
+                return m;
+            }
+        }
+        if constexpr (!std::is_same_v<Domain, DTO>)
+        {
+            static constexpr auto& dom_members = DAL::Schema::unchecked_members_v<Domain>;
+            for (auto dm : dom_members)
+            {
+                if (dm == Member)
+                {
+                    return detail::find_matching_dto_member(dm, dto_members);
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    template<typename Domain, typename DTO, std::meta::info Member>
+    concept ValidQueryMember = try_resolve_dto_member_ref<Domain, DTO, Member>().has_value();
+
+    template<typename Domain, typename DTO, std::meta::info Member>
+        requires ValidQueryMember<Domain, DTO, Member>
+    consteval std::meta::info resolve_dto_member_ref()
+    {
+        if (auto resolved = try_resolve_dto_member_ref<Domain, DTO, Member>())
+        {
+            return *resolved;
+        }
+        throw std::invalid_argument("Reflected member does not belong to Domain or DTO");
     }
 
 } // namespace DAL::Mappers

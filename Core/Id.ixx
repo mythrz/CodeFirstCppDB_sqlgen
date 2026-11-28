@@ -65,3 +65,16 @@ struct std::formatter<Core::Id<Tag, ValueType>> : std::formatter<ValueType>
         return std::formatter<ValueType>::format(id.value, ctx);
     }
 };
+
+// std::hash specialisation — allows Id<Tag, ValueType> in std::unordered_map / std::unordered_set.
+template<typename Tag, typename ValueType>
+    requires requires(const ValueType& v) {
+        { std::hash<ValueType>{}(v) } -> std::convertible_to<std::size_t>;
+    }
+struct std::hash<Core::Id<Tag, ValueType>>
+{
+    [[nodiscard]] std::size_t operator()(const Core::Id<Tag, ValueType>& id) const noexcept(noexcept(std::hash<ValueType>{}(id.value)))
+    {
+        return std::hash<ValueType>{}(id.value);
+    }
+};

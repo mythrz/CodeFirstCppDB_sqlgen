@@ -22,6 +22,7 @@ target_sources(CodeFirstCppDB_DAL
             context/DbQuery.ixx
             context/DbSet.ixx
             context/DbContext.ixx
+            context/SQLiteConnectionPool.ixx
             dal.ixx
     PRIVATE
 )

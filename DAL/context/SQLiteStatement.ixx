@@ -325,6 +325,19 @@ export namespace DAL
             bool negated{ false };
         };
 
+        struct CollateNoCaseEqCond
+        {
+            std::string column_name;
+            std::string value;
+            bool negated{ false };
+        };
+
+        template<typename Inner>
+        struct GroupCond
+        {
+            Inner inner;
+        };
+
         template<typename Left, typename Right>
         struct AndCond
         {
@@ -343,10 +356,312 @@ export namespace DAL
         inline constexpr bool is_custom_where_cond_v = false;
         template<>
         inline constexpr bool is_custom_where_cond_v<EscapedLikeCond> = true;
+        template<>
+        inline constexpr bool is_custom_where_cond_v<CollateNoCaseEqCond> = true;
+        template<typename Inner>
+        inline constexpr bool is_custom_where_cond_v<GroupCond<Inner>> = true;
         template<typename L, typename R>
         inline constexpr bool is_custom_where_cond_v<AndCond<L, R>> = true;
         template<typename L, typename R>
         inline constexpr bool is_custom_where_cond_v<OrCond<L, R>> = true;
+
+        [[nodiscard]] constexpr std::string_view fk_action_to_sql(DAL::Schema::FkAction action) noexcept
+        {
+            switch (action)
+            {
+            case DAL::Schema::FkAction::NoAction:
+                return "";
+            case DAL::Schema::FkAction::Restrict:
+                return "RESTRICT";
+            case DAL::Schema::FkAction::SetNull:
+                return "SET NULL";
+            case DAL::Schema::FkAction::SetDefault:
+                return "SET DEFAULT";
+            case DAL::Schema::FkAction::Cascade:
+                return "CASCADE";
+            }
+            return "";
+        }
+
+        template<typename RawFieldT>
+        [[nodiscard]] consteval std::string_view sqlite_column_type_for()
+        {
+            using CleanT = std::remove_cvref_t<RawFieldT>;
+            if constexpr (DAL::Schema::detail::is_optional_v<CleanT>)
+            {
+                return sqlite_column_type_for<typename CleanT::value_type>();
+            }
+            else if constexpr (
+                DAL::Schema::SqlgenPrimaryKeyField<CleanT> || DAL::Schema::SqlgenForeignKeyField<CleanT> || is_sqlgen_unique_v<CleanT>)
+            {
+                return sqlite_column_type_for<typename CleanT::ReflectionType>();
+            }
+            else if constexpr (Core::StrongIdType<CleanT>)
+            {
+                return sqlite_column_type_for<typename CleanT::value_type>();
+            }
+            else if constexpr (std::is_same_v<CleanT, bool> || std::is_integral_v<CleanT>)
+            {
+                return "INTEGER";
+            }
+            else if constexpr (std::is_floating_point_v<CleanT>)
+            {
+                return "REAL";
+            }
+            else if constexpr (std::is_same_v<CleanT, std::vector<std::byte>> || DAL::Schema::detail::is_byte_array_v<CleanT>)
+            {
+                return "BLOB";
+            }
+            else if constexpr (requires { typename CleanT::ReflectionType; })
+            {
+                return sqlite_column_type_for<typename CleanT::ReflectionType>();
+            }
+            else
+            {
+                return "TEXT";
+            }
+        }
+
+        template<typename DTO>
+        [[nodiscard]] std::expected<std::vector<std::string>, Core::DbError> build_table_ddl_statements()
+        {
+            if (auto id_chk = validate_dto_ddl_identifiers<DTO>(); !id_chk)
+            {
+                return std::unexpected<Core::DbError>{ id_chk.error() };
+            }
+
+            constexpr bool is_composite_pk = DAL::Schema::CompositePrimaryKey<DTO>;
+            constexpr bool has_unique_flags = requires { DTO::unique_field_flags; };
+            constexpr bool has_pk_flags = requires { DTO::pk_field_flags; };
+            constexpr bool has_ddl_meta = requires { DTO::field_ddl_meta; };
+
+            const std::string_view table_name{ DTO::tablename };
+            std::string create_sql = std::format("CREATE TABLE IF NOT EXISTS \"{}\" (", table_name);
+            std::vector<std::string> post_stmts;
+
+            std::size_t col_idx = 0;
+            std::optional<Core::DbError> err;
+            template for (constexpr auto m : DAL::Schema::members_v<DTO>)
+            {
+                if (!err)
+                {
+                    if (col_idx > 0)
+                    {
+                        create_sql += ", ";
+                    }
+                    const std::string_view col_name = std::meta::identifier_of(m);
+                    using RawFieldT = [:std::meta::type_of(m):];
+                    using FieldT = std::remove_cvref_t<RawFieldT>;
+                    constexpr bool is_opt = DAL::Schema::detail::is_optional_v<FieldT>;
+                    constexpr std::string_view col_type = sqlite_column_type_for<FieldT>();
+
+                    bool is_pk = false;
+                    bool is_auto_incr = false;
+                    if constexpr (!is_composite_pk)
+                    {
+                        if constexpr (DAL::Schema::SqlgenPrimaryKeyField<FieldT>)
+                        {
+                            is_pk = true;
+                            is_auto_incr = FieldT::auto_incr;
+                        }
+                        else if constexpr (has_pk_flags)
+                        {
+                            if (col_idx < DTO::pk_field_flags.size() && DTO::pk_field_flags[col_idx])
+                            {
+                                is_pk = true;
+                            }
+                        }
+                    }
+
+                    bool is_uniq = is_sqlgen_unique_v<FieldT>;
+                    if constexpr (has_unique_flags)
+                    {
+                        if (col_idx < DTO::unique_field_flags.size() && DTO::unique_field_flags[col_idx])
+                        {
+                            is_uniq = true;
+                        }
+                    }
+
+                    DAL::Schema::FieldDdlMeta meta{};
+                    if constexpr (has_ddl_meta)
+                    {
+                        if (col_idx < DTO::field_ddl_meta.size())
+                        {
+                            meta = DTO::field_ddl_meta[col_idx];
+                            if (meta.is_unique)
+                            {
+                                is_uniq = true;
+                            }
+                        }
+                    }
+
+                    create_sql += std::format("\"{}\" {}", col_name, col_type);
+                    if (is_pk)
+                    {
+                        create_sql += " PRIMARY KEY";
+                        if (is_auto_incr && col_type == "INTEGER")
+                        {
+                            create_sql += " AUTOINCREMENT";
+                        }
+                    }
+                    if (!is_opt && !(is_pk && is_auto_incr))
+                    {
+                        create_sql += " NOT NULL";
+                    }
+                    if (is_uniq && !is_pk)
+                    {
+                        create_sql += " UNIQUE";
+                    }
+                    if (meta.has_default_sql)
+                    {
+                        create_sql += std::format(" DEFAULT ({})", std::string_view{ meta.default_expr });
+                    }
+                    if (meta.has_check_sql)
+                    {
+                        create_sql += std::format(" CHECK ({})", std::string_view{ meta.check_expr });
+                    }
+
+                    auto append_fk_actions = [&create_sql](DAL::Schema::FkAction on_del, DAL::Schema::FkAction on_upd)
+                    {
+                        if (const auto d = fk_action_to_sql(on_del); !d.empty())
+                        {
+                            create_sql += std::format(" ON DELETE {}", d);
+                        }
+                        if (const auto u = fk_action_to_sql(on_upd); !u.empty())
+                        {
+                            create_sql += std::format(" ON UPDATE {}", u);
+                        }
+                    };
+
+                    if constexpr (DAL::Schema::AnyForeignKeyField<FieldT>)
+                    {
+                        using FkT = DAL::Schema::unwrap_fk_type_t<FieldT>;
+                        const std::string_view ref_table{ FkT::ForeignTableType::tablename };
+                        const std::string_view ref_col = DAL::Schema::detail::ForeignKeyColumnName<typename FkT::ColumnType>::value;
+                        create_sql += std::format(" REFERENCES \"{}\"(\"{}\")", ref_table, ref_col);
+                        append_fk_actions(meta.on_delete, meta.on_update);
+                    }
+                    else if (meta.has_self_fk)
+                    {
+                        const std::string_view ref_col{ meta.self_fk_col };
+                        if (auto chk = validate_ddl_identifier(ref_col); !chk)
+                        {
+                            err = chk.error();
+                        }
+                        else
+                        {
+                            create_sql += std::format(" REFERENCES \"{}\"(\"{}\")", table_name, ref_col);
+                            append_fk_actions(meta.on_delete, meta.on_update);
+                        }
+                    }
+
+                    if (!err && meta.has_index)
+                    {
+                        const std::string idx_name =
+                            meta.has_index_name ? std::string{ meta.index_name } : std::format("idx_{}_{}", table_name, col_name);
+                        if (auto chk = validate_ddl_identifier(idx_name); !chk)
+                        {
+                            err = chk.error();
+                        }
+                        else
+                        {
+                            post_stmts.push_back(
+                                std::format(
+                                    "CREATE {}INDEX IF NOT EXISTS \"{}\" ON \"{}\" (\"{}\");",
+                                    meta.index_unique ? "UNIQUE " : "",
+                                    idx_name,
+                                    table_name,
+                                    col_name));
+                        }
+                    }
+                }
+                ++col_idx;
+            }
+            if (err)
+            {
+                return std::unexpected<Core::DbError>{ std::move(*err) };
+            }
+
+            if constexpr (is_composite_pk)
+            {
+                static constexpr auto key_members = DAL::Schema::key_members_of<DTO>();
+                std::string cols;
+                std::size_t k_idx = 0;
+                template for (constexpr auto km : key_members)
+                {
+                    if (k_idx > 0)
+                    {
+                        cols += ", ";
+                    }
+                    cols += std::format("\"{}\"", std::meta::identifier_of(km));
+                    ++k_idx;
+                }
+                create_sql += std::format(", PRIMARY KEY ({})", cols);
+                post_stmts.push_back(
+                    std::format("CREATE UNIQUE INDEX IF NOT EXISTS \"ux_{}_composite_pk\" ON \"{}\" ({});", table_name, table_name, cols));
+            }
+            create_sql += ");";
+
+            if constexpr (requires { DTO::composite_indexes; })
+            {
+                for (const auto& ci : DTO::composite_indexes)
+                {
+                    const std::string_view idx_name{ ci.name };
+                    if (auto chk = validate_ddl_identifier(idx_name); !chk)
+                    {
+                        return std::unexpected<Core::DbError>{ chk.error() };
+                    }
+                    std::string cols_sql;
+                    std::string_view csv{ ci.columns_csv };
+                    std::size_t pos = 0;
+                    std::size_t col_count = 0;
+                    while (pos <= csv.size())
+                    {
+                        const std::size_t comma = csv.find(',', pos);
+                        std::string_view token = (comma == std::string_view::npos) ? csv.substr(pos) : csv.substr(pos, comma - pos);
+                        while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
+                        {
+                            token.remove_prefix(1);
+                        }
+                        while (!token.empty() && (token.back() == ' ' || token.back() == '\t'))
+                        {
+                            token.remove_suffix(1);
+                        }
+                        if (auto chk = validate_ddl_identifier(token); !chk)
+                        {
+                            return std::unexpected<Core::DbError>{ chk.error() };
+                        }
+                        if (col_count > 0)
+                        {
+                            cols_sql += ", ";
+                        }
+                        cols_sql += std::format("\"{}\"", token);
+                        ++col_count;
+                        if (comma == std::string_view::npos)
+                        {
+                            break;
+                        }
+                        pos = comma + 1;
+                    }
+                    post_stmts.push_back(
+                        std::format(
+                            "CREATE {}INDEX IF NOT EXISTS \"{}\" ON \"{}\" ({});",
+                            ci.unique ? "UNIQUE " : "",
+                            idx_name,
+                            table_name,
+                            cols_sql));
+                }
+            }
+
+            std::vector<std::string> stmts;
+            stmts.reserve(1 + post_stmts.size());
+            stmts.push_back(std::move(create_sql));
+            for (auto& s : post_stmts)
+            {
+                stmts.push_back(std::move(s));
+            }
+            return stmts;
+        }
 
         [[nodiscard]] inline std::string escape_like_literal(std::string_view input)
         {
@@ -1085,6 +1400,33 @@ export namespace DAL
                         pat_sql = "?";
                     }
                     return std::format("\"{}\" {} {} ESCAPE '\\'", cond.column_name, cond.negated ? "NOT LIKE" : "LIKE", pat_sql);
+                }
+                else if constexpr (std::is_same_v<CleanC, CollateNoCaseEqCond>)
+                {
+                    if (auto chk = validate_ddl_identifier(cond.column_name); !chk)
+                    {
+                        return std::unexpected<Core::DbError>{ chk.error() };
+                    }
+                    std::string val_sql;
+                    if (inline_ddl_)
+                    {
+                        val_sql = format_ddl_string_literal(cond.value);
+                    }
+                    else
+                    {
+                        params_.emplace_back(cond.value);
+                        val_sql = "?";
+                    }
+                    return std::format("\"{}\" {} {} COLLATE NOCASE", cond.column_name, cond.negated ? "!=" : "=", val_sql);
+                }
+                else if constexpr (requires { cond.inner; })
+                {
+                    auto sub = compile_where_expr<DTO>(cond.inner);
+                    if (!sub)
+                    {
+                        return std::unexpected<Core::DbError>{ sub.error() };
+                    }
+                    return std::format("({})", *sub);
                 }
                 else if constexpr (requires {
                                        cond.left;
@@ -1828,6 +2170,39 @@ export namespace DAL
                 }
                 return {};
             }
+            else if constexpr (Schema::detail::is_byte_array_v<CleanT>)
+            {
+                const int rc = field.empty() ? sqlite3_bind_zeroblob(stmt, idx, 0)
+                                             : sqlite3_bind_blob(stmt, idx, field.data(), static_cast<int>(field.size()), SQLITE_TRANSIENT);
+                if (rc != SQLITE_OK)
+                {
+                    return std::unexpected<Core::DbError>{ map_sqlite_db_error(db, sqlite3_errmsg(db)) };
+                }
+                return {};
+            }
+            else if constexpr (Schema::detail::is_sys_time_v<CleanT>)
+            {
+                const std::string iso = Schema::detail::format_sys_time_iso8601(field);
+                return bind_typed_field(db, stmt, idx, iso, false);
+            }
+            else if constexpr (Schema::detail::is_ymd_v<CleanT>)
+            {
+                if (!field.ok())
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Calendar date is invalid") };
+                }
+                const std::string iso = Schema::detail::format_ymd_iso8601(field);
+                return bind_typed_field(db, stmt, idx, iso, false);
+            }
+            else if constexpr (Schema::detail::is_fs_path_v<CleanT>)
+            {
+                const std::string utf8 = field.string();
+                return bind_typed_field(db, stmt, idx, utf8, false);
+            }
+            else if constexpr (std::is_enum_v<CleanT>)
+            {
+                return bind_typed_field(db, stmt, idx, std::to_underlying(field), false);
+            }
             else
             {
                 const std::optional<std::string> encoded = sqlgen::parsing::Parser<CleanT>::write(field);
@@ -1851,6 +2226,104 @@ export namespace DAL
                     return std::unexpected<Core::DbError>{ map_sqlite_db_error(db, sqlite3_errmsg(db)) };
                 }
                 return {};
+            }
+        }
+
+        template<typename Val>
+        [[nodiscard]] std::expected<DynamicCell, Core::DbError> to_dynamic_cell(const Val& val)
+        {
+            using CleanT = std::remove_cvref_t<Val>;
+            if constexpr (std::is_same_v<CleanT, DynamicCell>)
+            {
+                return val;
+            }
+            else if constexpr (std::is_same_v<CleanT, std::monostate> || std::is_same_v<CleanT, std::nullptr_t>)
+            {
+                return DynamicCell{ std::monostate{} };
+            }
+            else if constexpr (Schema::detail::is_optional_v<CleanT>)
+            {
+                if (!val.has_value())
+                {
+                    return DynamicCell{ std::monostate{} };
+                }
+                return to_dynamic_cell(*val);
+            }
+            else if constexpr (Core::StrongIdType<CleanT> || Core::SingleKeyType<CleanT>)
+            {
+                return to_dynamic_cell(val.get());
+            }
+            else if constexpr (std::is_same_v<CleanT, bool>)
+            {
+                return DynamicCell{ static_cast<std::int64_t>(val ? 1 : 0) };
+            }
+            else if constexpr (is_strict_int_v<CleanT>)
+            {
+                if constexpr (std::is_unsigned_v<CleanT> && sizeof(CleanT) >= sizeof(std::int64_t))
+                {
+                    if (val > static_cast<CleanT>(std::numeric_limits<std::int64_t>::max()))
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            "Unsigned 64-bit parameter exceeds SQLite signed 64-bit INTEGER range") };
+                    }
+                }
+                return DynamicCell{ static_cast<std::int64_t>(val) };
+            }
+            else if constexpr (std::is_floating_point_v<CleanT>)
+            {
+                return DynamicCell{ static_cast<double>(val) };
+            }
+            else if constexpr (std::is_same_v<CleanT, std::string>)
+            {
+                return DynamicCell{ val };
+            }
+            else if constexpr (std::is_same_v<CleanT, std::string_view>)
+            {
+                return DynamicCell{ std::string{ val } };
+            }
+            else if constexpr (std::is_same_v<CleanT, const char*> || std::is_same_v<CleanT, char*>)
+            {
+                if (val == nullptr)
+                {
+                    return DynamicCell{ std::monostate{} };
+                }
+                return DynamicCell{ std::string{ val } };
+            }
+            else if constexpr (std::is_convertible_v<CleanT, std::string_view>)
+            {
+                return DynamicCell{ std::string{ std::string_view{ val } } };
+            }
+            else if constexpr (std::is_same_v<CleanT, std::vector<std::byte>>)
+            {
+                return DynamicCell{ val };
+            }
+            else if constexpr (Schema::detail::is_byte_array_v<CleanT>)
+            {
+                return DynamicCell{ std::vector<std::byte>(val.begin(), val.end()) };
+            }
+            else if constexpr (Schema::detail::is_sys_time_v<CleanT>)
+            {
+                return DynamicCell{ Schema::detail::format_sys_time_iso8601(val) };
+            }
+            else if constexpr (Schema::detail::is_ymd_v<CleanT>)
+            {
+                if (!val.ok())
+                {
+                    return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation("Calendar date is invalid") };
+                }
+                return DynamicCell{ Schema::detail::format_ymd_iso8601(val) };
+            }
+            else if constexpr (Schema::detail::is_fs_path_v<CleanT>)
+            {
+                return DynamicCell{ val.string() };
+            }
+            else if constexpr (std::is_enum_v<CleanT>)
+            {
+                return to_dynamic_cell(std::to_underlying(val));
+            }
+            else
+            {
+                static_assert(std::is_same_v<CleanT, DynamicCell>, "Unsupported parameter type for DynamicCell conversion");
             }
         }
 
@@ -2094,6 +2567,77 @@ export namespace DAL
                     }
                     return std::vector<std::byte>(blob, blob + len);
                 }
+                else if constexpr (Schema::detail::is_byte_array_v<CleanT>)
+                {
+                    constexpr std::size_t N = Schema::detail::byte_array_extent_v<CleanT>;
+                    if (col_type != SQLITE_BLOB)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Incompatible SQLite storage class {} for fixed BLOB column {}", col_type, col_idx)) };
+                    }
+                    const auto* blob = static_cast<const std::byte*>(sqlite3_column_blob(stmt, col_idx));
+                    const int len = sqlite3_column_bytes(stmt, col_idx);
+                    if (blob == nullptr && sqlite3_errcode(db) == SQLITE_NOMEM)
+                    {
+                        return std::unexpected<Core::DbError>{ map_sqlite_db_error(db, sqlite3_errmsg(db)) };
+                    }
+                    if (len < 0 || static_cast<std::size_t>(len) != N)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Expected {}-byte BLOB in column {}, got {} bytes", N, col_idx, len)) };
+                    }
+                    CleanT out{};
+                    if constexpr (N > 0)
+                    {
+                        if (blob != nullptr)
+                        {
+                            std::memcpy(out.data(), blob, N);
+                        }
+                    }
+                    return out;
+                }
+                else if constexpr (Schema::detail::is_sys_time_v<CleanT>)
+                {
+                    if (col_type != SQLITE_TEXT)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Incompatible SQLite storage class {} for timestamp column {}", col_type, col_idx)) };
+                    }
+                    auto text_res = read_column_text_exact(db, stmt, col_idx);
+                    if (!text_res)
+                    {
+                        return std::unexpected<Core::DbError>{ text_res.error() };
+                    }
+                    return Schema::detail::parse_sys_time_iso8601<CleanT>(*text_res);
+                }
+                else if constexpr (Schema::detail::is_ymd_v<CleanT>)
+                {
+                    if (col_type != SQLITE_TEXT)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Incompatible SQLite storage class {} for date column {}", col_type, col_idx)) };
+                    }
+                    auto text_res = read_column_text_exact(db, stmt, col_idx);
+                    if (!text_res)
+                    {
+                        return std::unexpected<Core::DbError>{ text_res.error() };
+                    }
+                    return Schema::detail::parse_ymd_iso8601(*text_res);
+                }
+                else if constexpr (Schema::detail::is_fs_path_v<CleanT>)
+                {
+                    if (col_type == SQLITE_BLOB)
+                    {
+                        return std::unexpected<Core::DbError>{ Core::DbError::constraint_violation(
+                            std::format("Incompatible SQLite BLOB storage class for path column {}", col_idx)) };
+                    }
+                    auto text_res = read_column_text_exact(db, stmt, col_idx);
+                    if (!text_res)
+                    {
+                        return std::unexpected<Core::DbError>{ text_res.error() };
+                    }
+                    return std::filesystem::path{ std::move(*text_res) };
+                }
                 else if constexpr (std::is_enum_v<CleanT>)
                 {
                     if (col_type == SQLITE_TEXT)
@@ -2151,19 +2695,19 @@ export namespace DAL
         }
 
         template<typename RowT>
-        [[nodiscard]] std::expected<RowT, Core::DbError> decode_row(sqlite3* db, sqlite3_stmt* stmt)
+        [[nodiscard]] std::expected<RowT, Core::DbError> decode_row_at(sqlite3* db, sqlite3_stmt* stmt, int start_col)
         {
             constexpr std::size_t expected_cols = DAL::Schema::members_v<RowT>.size();
             const int col_count = sqlite3_column_count(stmt);
-            if (col_count != static_cast<int>(expected_cols))
+            if (start_col < 0 || (start_col + static_cast<int>(expected_cols)) > col_count)
             {
                 return std::unexpected<Core::DbError>{ Core::DbError::unknown(
-                    std::format("Expected {} columns in query result, got {}", expected_cols, col_count)) };
+                    std::format("Expected at least {} columns starting at {}, got {}", expected_cols, start_col, col_count)) };
             }
 
             RowT row{};
             std::optional<Core::DbError> err;
-            int col_idx = 0;
+            int col_idx = start_col;
             template for (constexpr auto m : DAL::Schema::members_v<RowT>)
             {
                 if (!err)
@@ -2180,6 +2724,136 @@ export namespace DAL
                     }
                 }
                 ++col_idx;
+            }
+            if (err)
+            {
+                return std::unexpected<Core::DbError>{ std::move(*err) };
+            }
+            return row;
+        }
+
+        template<typename RowT>
+        [[nodiscard]] std::expected<RowT, Core::DbError> decode_row(sqlite3* db, sqlite3_stmt* stmt)
+        {
+            constexpr std::size_t expected_cols = DAL::Schema::members_v<RowT>.size();
+            const int col_count = sqlite3_column_count(stmt);
+            if (col_count != static_cast<int>(expected_cols))
+            {
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                    std::format("Expected {} columns in query result, got {}", expected_cols, col_count)) };
+            }
+            return decode_row_at<RowT>(db, stmt, 0);
+        }
+
+        [[nodiscard]] inline bool column_name_matches_member(std::string_view sql_col, std::string_view member_name) noexcept
+        {
+            auto norm = [](std::string_view s) -> std::string
+            {
+                if (s.size() > 2 && (s.starts_with("m_") || s.starts_with("M_")))
+                {
+                    s.remove_prefix(2);
+                }
+                if (s.size() > 1 && s.ends_with('_'))
+                {
+                    s.remove_suffix(1);
+                }
+                std::string out;
+                out.reserve(s.size());
+                for (const char ch : s)
+                {
+                    if (ch == '_')
+                    {
+                        continue;
+                    }
+                    out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+                }
+                return out;
+            };
+            if (sql_col == member_name)
+            {
+                return true;
+            }
+            return norm(sql_col) == norm(member_name);
+        }
+
+        template<typename RowT>
+        [[nodiscard]] std::expected<RowT, Core::DbError> decode_row_by_name(sqlite3* db, sqlite3_stmt* stmt)
+        {
+            static constexpr auto& members = DAL::Schema::members_v<RowT>;
+            constexpr std::size_t member_count = members.size();
+            const int col_count = sqlite3_column_count(stmt);
+            std::vector<std::string_view> col_names;
+            col_names.reserve(static_cast<std::size_t>(col_count));
+            for (int c = 0; c < col_count; ++c)
+            {
+                const char* raw = sqlite3_column_name(stmt, c);
+                col_names.emplace_back(raw != nullptr ? raw : "");
+            }
+
+            // Build column-index map for each reflected member (exact -> normalized match -> positional fallback).
+            std::array<int, member_count> mapped_indices{};
+            mapped_indices.fill(-1);
+            bool all_named_matched = true;
+            std::size_t m_idx = 0;
+            template for (constexpr auto m : members)
+            {
+                const std::string_view m_name = std::meta::identifier_of(m);
+                int hit = -1;
+                for (int c = 0; c < col_count; ++c)
+                {
+                    if (col_names[static_cast<std::size_t>(c)] == m_name)
+                    {
+                        hit = c;
+                        break;
+                    }
+                }
+                if (hit < 0)
+                {
+                    for (int c = 0; c < col_count; ++c)
+                    {
+                        if (column_name_matches_member(col_names[static_cast<std::size_t>(c)], m_name))
+                        {
+                            hit = c;
+                            break;
+                        }
+                    }
+                }
+                if (hit < 0)
+                {
+                    all_named_matched = false;
+                }
+                mapped_indices[m_idx++] = hit;
+            }
+
+            if (!all_named_matched)
+            {
+                if (col_count == static_cast<int>(member_count))
+                {
+                    return decode_row_at<RowT>(db, stmt, 0);
+                }
+                return std::unexpected<Core::DbError>{ Core::DbError::unknown(
+                    std::format("Could not map {} result columns to target struct ({} fields)", col_count, member_count)) };
+            }
+
+            RowT row{};
+            std::optional<Core::DbError> err;
+            std::size_t idx = 0;
+            template for (constexpr auto m : members)
+            {
+                if (!err)
+                {
+                    using RawMemberT = [:std::meta::type_of(m):];
+                    auto val = decode_column<RawMemberT>(db, stmt, mapped_indices[idx]);
+                    if (!val)
+                    {
+                        err = std::move(val.error());
+                    }
+                    else
+                    {
+                        row.[:m:] = std::move(*val);
+                    }
+                }
+                ++idx;
             }
             if (err)
             {

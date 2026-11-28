@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <meta>
 #include <sqlgen.hpp>
 #include <sqlgen/sqlite.hpp>
 
@@ -815,7 +816,7 @@ namespace
         ASSERT_TRUE(connA->begin_immediate_transaction().has_value());
         ASSERT_TRUE(dbA.people.where_equal<"id">(1).template update_where<"lastName">("Active").has_value());
 
-        std::expected<void, Core::DbError> delResB{};
+        std::expected<std::size_t, Core::DbError> delResB{ 0 };
         std::thread threadB(
             [&]()
             {
@@ -831,6 +832,7 @@ namespace
         threadB.join();
 
         ASSERT_TRUE(delResB.has_value()) << delResB.error().to_string();
+        EXPECT_EQ(*delResB, 1u);
         EXPECT_TRUE(dbA.people.contains(1));
         EXPECT_EQ(dbA.people.find(1)->getLastName(), "Active");
         EXPECT_FALSE(dbA.people.contains(2));
@@ -1131,6 +1133,291 @@ namespace
         EXPECT_FALSE(db.people.contains(1)); // "100% legit" deleted
         EXPECT_TRUE(db.people.contains(6)); // "prefix%mid_end\tail" kept due to limit(1)
         EXPECT_TRUE(db.people.contains(2)); // "1000 legit" untouched
+    }
+
+    // =========================================================================
+    // Phase U3: Reflection NTTPs, Groups, Streaming, GROUP BY, query_as, JOINs
+    // =========================================================================
+
+    struct[[= DAL::Schema::table("U3Products")]] U3Product
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string name;
+        std::string category;
+        std::int32_t price = 0;
+        bool in_stock = true;
+    };
+
+    struct[[= DAL::Schema::table("U3Customers")]] U3Customer
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string name;
+    };
+
+    struct[[= DAL::Schema::table("U3Orders")]] U3Order
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string code;
+        [[= DAL::Schema::references<U3Customer>("id", DAL::Schema::FkAction::SetNull)]] std::optional<std::int32_t> customer_id;
+    };
+
+    struct U3CategorySummary
+    {
+        std::string category;
+        std::int64_t item_count = 0;
+        std::int64_t total_price = 0;
+    };
+
+    struct U3ShopContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<U3Product> products{ this };
+        Set<U3Customer> customers{ this };
+        Set<U3Order> orders{ this };
+
+        explicit U3ShopContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(PhaseU3QueryExpressivenessTest, ReflectionMemberNttpQueriesSingleAndBulkRowCounts)
+    {
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value());
+        U3ShopContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.products
+                        .add_range(
+                            std::array<U3Product, 5>{
+                                U3Product{ 0, "C++26 Book", "Books", 50, true },
+                                U3Product{ 0, "Rust Book", "Books", 40, true },
+                                U3Product{ 0, "Chess", "Games", 25, true },
+                                U3Product{ 0, "SoldOut Book", "Books", 30, false },
+                                U3Product{ 0, "Vintage Toy", "Old", 15, false },
+                            })
+                        .has_value());
+
+        // C++26 reflection NTTP queries: where_equal<^^U3Product::...>, order_by<^^...>, try_select<^^...>
+        auto bookNames = db.products.where_equal<^^U3Product::category>("Books")
+                             .where_equal<^^U3Product::in_stock>(true)
+                             .order_by<^^U3Product::price>(true)
+                             .try_select<^^U3Product::name>();
+        ASSERT_TRUE(bookNames.has_value()) << bookNames.error().to_string();
+        ASSERT_EQ(bookNames->size(), 2u);
+        EXPECT_EQ((*bookNames)[0], "C++26 Book");
+        EXPECT_EQ((*bookNames)[1], "Rust Book");
+
+        // try_single / try_single_or_default semantics (0, 1, >1 rows)
+        auto singleChess = db.products.where_equal<^^U3Product::name>("Chess").try_single();
+        ASSERT_TRUE(singleChess.has_value()) << singleChess.error().to_string();
+        EXPECT_EQ(singleChess->price, 25);
+
+        auto singleNone = db.products.where_equal<^^U3Product::name>("Missing").try_single();
+        ASSERT_FALSE(singleNone.has_value());
+        EXPECT_EQ(singleNone.error().code, Core::DbErrorCode::NotFound);
+
+        auto singleOrDefNone = db.products.where_equal<^^U3Product::name>("Missing").try_single_or_default();
+        ASSERT_TRUE(singleOrDefNone.has_value());
+        EXPECT_FALSE(singleOrDefNone->has_value());
+
+        auto singleMultiple = db.products.where_equal<^^U3Product::category>("Books").try_single();
+        ASSERT_FALSE(singleMultiple.has_value());
+        EXPECT_EQ(singleMultiple.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto singleOrDefMultiple = db.products.where_equal<^^U3Product::category>("Books").try_single_or_default();
+        ASSERT_FALSE(singleOrDefMultiple.has_value());
+        EXPECT_EQ(singleOrDefMultiple.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        // Bulk update_where and remove_where return exact affected row counts (Option B)
+        auto updCount = db.products.where_equal<^^U3Product::category>("Books").update_where<^^U3Product::price>(60);
+        ASSERT_TRUE(updCount.has_value()) << updCount.error().to_string();
+        EXPECT_EQ(*updCount, 3u);
+
+        auto updZero = db.products.where_equal<^^U3Product::category>("NonExistent").update_where<^^U3Product::price>(1);
+        ASSERT_TRUE(updZero.has_value());
+        EXPECT_EQ(*updZero, 0u);
+
+        auto delCount = db.products.remove_where_equal<^^U3Product::category>("Old");
+        ASSERT_TRUE(delCount.has_value()) << delCount.error().to_string();
+        EXPECT_EQ(*delCount, 1u);
+
+        auto delZero = db.products.where_equal<^^U3Product::category>("Old").remove_where();
+        ASSERT_TRUE(delZero.has_value());
+        EXPECT_EQ(*delZero, 0u);
+    }
+
+    TEST(PhaseU3QueryExpressivenessTest, ParenthesizedGroupsCaseInsensitiveAndNegatedPatterns)
+    {
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value());
+        U3ShopContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.products
+                        .add_range(
+                            std::array<U3Product, 5>{
+                                U3Product{ 0, "AlphaGuide", "Books", 20, true },
+                                U3Product{ 0, "betaGuide", "Games", 30, true },
+                                U3Product{ 0, "GammaManual", "Games", 40, false },
+                                U3Product{ 0, "DeltaTool", "Tools", 50, true },
+                                U3Product{ 0, "ALPHA_EXTRA", "Books", 60, false },
+                            })
+                        .has_value());
+
+        // Parenthesized boolean group: in_stock == true AND (category == "Books" OR category == "Games")
+        auto grouped =
+            db.products.where_equal<^^U3Product::in_stock>(true)
+                .where_group(
+                    [](auto q)
+                    {
+                        return q.template where_equal<^^U3Product::category>("Books").template or_where_equal<^^U3Product::category>(
+                            "Games");
+                    })
+                .order_by<^^U3Product::id>()
+                .try_select<^^U3Product::name>();
+        ASSERT_TRUE(grouped.has_value()) << grouped.error().to_string();
+        ASSERT_EQ(grouped->size(), 2u);
+        EXPECT_EQ((*grouped)[0], "AlphaGuide");
+        EXPECT_EQ((*grouped)[1], "betaGuide");
+
+        // Case-insensitive equality & contains
+        auto ieq = db.products.where_iequal<^^U3Product::name>("alphaguide").try_to_vector();
+        ASSERT_TRUE(ieq.has_value()) << ieq.error().to_string();
+        ASSERT_EQ(ieq->size(), 1u);
+        EXPECT_EQ((*ieq)[0].name, "AlphaGuide");
+
+        auto icont = db.products.where_icontains<^^U3Product::name>("alpha").order_by<^^U3Product::id>().try_select<^^U3Product::name>();
+        ASSERT_TRUE(icont.has_value()) << icont.error().to_string();
+        ASSERT_EQ(icont->size(), 2u);
+        EXPECT_EQ((*icont)[0], "AlphaGuide");
+        EXPECT_EQ((*icont)[1], "ALPHA_EXTRA");
+
+        // Negated pattern helpers
+        auto notGuide = db.products.where_not_ends_with<^^U3Product::name>("Guide")
+                            .where_not_starts_with<^^U3Product::name>("ALPHA")
+                            .where_not_contains<^^U3Product::name>("Tool")
+                            .try_select<^^U3Product::name>();
+        ASSERT_TRUE(notGuide.has_value()) << notGuide.error().to_string();
+        ASSERT_EQ(notGuide->size(), 1u);
+        EXPECT_EQ((*notGuide)[0], "GammaManual");
+    }
+
+    TEST(PhaseU3QueryExpressivenessTest, GroupByAggregationsTypedQueryAsStreamingAndJoins)
+    {
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value());
+        U3ShopContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        ASSERT_TRUE(db.products
+                        .add_range(
+                            std::array<U3Product, 4>{
+                                U3Product{ 0, "P1", "Books", 20, true },
+                                U3Product{ 0, "P2", "Books", 40, true },
+                                U3Product{ 0, "P3", "Games", 30, true },
+                                U3Product{ 0, "P4", "Tools", 10, false },
+                            })
+                        .has_value());
+
+        // GROUP BY aggregations
+        auto counts = db.products.group_by<^^U3Product::category>().try_count();
+        ASSERT_TRUE(counts.has_value()) << counts.error().to_string();
+        ASSERT_EQ(counts->size(), 3u);
+        EXPECT_EQ((*counts)[0].first, "Books");
+        EXPECT_EQ((*counts)[0].second, 2u);
+        EXPECT_EQ((*counts)[1].first, "Games");
+        EXPECT_EQ((*counts)[1].second, 1u);
+
+        auto sums = db.products.where_equal<^^U3Product::in_stock>(true).group_by<^^U3Product::category>().try_sum<^^U3Product::price>();
+        ASSERT_TRUE(sums.has_value()) << sums.error().to_string();
+        ASSERT_EQ(sums->size(), 2u);
+        EXPECT_EQ((*sums)[0].first, "Books");
+        EXPECT_EQ((*sums)[0].second, 60);
+        EXPECT_EQ((*sums)[1].first, "Games");
+        EXPECT_EQ((*sums)[1].second, 30);
+
+        auto avgs = db.products.group_by<^^U3Product::category>().try_avg<^^U3Product::price>();
+        ASSERT_TRUE(avgs.has_value()) << avgs.error().to_string();
+        ASSERT_TRUE((*avgs)[0].second.has_value());
+        EXPECT_DOUBLE_EQ(*(*avgs)[0].second, 30.0);
+
+        // Typed ad-hoc SQL hydration via query_as<RowT>(sql, args...)
+        auto summaries = db.query_as<U3CategorySummary>(
+            "SELECT category, COUNT(*) AS item_count, SUM(price) AS total_price "
+            "FROM U3Products WHERE price >= ? GROUP BY category ORDER BY category;",
+            20);
+        ASSERT_TRUE(summaries.has_value()) << summaries.error().to_string();
+        ASSERT_EQ(summaries->size(), 2u);
+        EXPECT_EQ((*summaries)[0].category, "Books");
+        EXPECT_EQ((*summaries)[0].item_count, 2);
+        EXPECT_EQ((*summaries)[0].total_price, 60);
+        EXPECT_EQ((*summaries)[1].category, "Games");
+        EXPECT_EQ((*summaries)[1].item_count, 1);
+        EXPECT_EQ((*summaries)[1].total_price, 30);
+
+        // Lazy std::generator streaming (full + early break + views::take)
+        std::vector<std::string> streamedNames;
+        for (auto rowRes : db.products.order_by<^^U3Product::id>().stream())
+        {
+            ASSERT_TRUE(rowRes.has_value()) << rowRes.error().to_string();
+            streamedNames.push_back(rowRes->name);
+            if (streamedNames.size() == 2)
+            {
+                break; // Early break must finalize sqlite3_stmt cleanly
+            }
+        }
+        EXPECT_EQ(streamedNames, (std::vector<std::string>{ "P1", "P2" }));
+
+        std::vector<std::string> streamedSummaries;
+        for (auto rowRes : db.stream_as<U3CategorySummary>("SELECT category, COUNT(*) AS item_count, SUM(price) AS total_price "
+                                                           "FROM U3Products GROUP BY category ORDER BY category;") |
+                 std::views::take(2))
+        {
+            ASSERT_TRUE(rowRes.has_value()) << rowRes.error().to_string();
+            streamedSummaries.push_back(rowRes->category);
+        }
+        EXPECT_EQ(streamedSummaries, (std::vector<std::string>{ "Books", "Games" }));
+
+        // Single-query INNER JOIN and LEFT JOIN (including nullable FK -> std::nullopt)
+        auto c1 = db.customers.add_returning(U3Customer{ 0, "Alice" });
+        ASSERT_TRUE(c1.has_value());
+        ASSERT_TRUE(db.orders.add(U3Order{ 0, "ORD-1", c1->id }).has_value());
+        ASSERT_TRUE(db.orders.add(U3Order{ 0, "ORD-GUEST", std::nullopt }).has_value());
+
+        auto innerJoined = db.join<U3Order, U3Customer>();
+        ASSERT_TRUE(innerJoined.has_value()) << innerJoined.error().to_string();
+        ASSERT_EQ(innerJoined->size(), 1u);
+        EXPECT_EQ((*innerJoined)[0].first.code, "ORD-1");
+        EXPECT_EQ((*innerJoined)[0].second.name, "Alice");
+
+        auto leftJoined = db.left_join<U3Order, U3Customer>();
+        ASSERT_TRUE(leftJoined.has_value()) << leftJoined.error().to_string();
+        ASSERT_EQ(leftJoined->size(), 2u);
+        int matched = 0;
+        int unmatched = 0;
+        for (const auto& [ord, custOpt] : *leftJoined)
+        {
+            if (ord.code == "ORD-1")
+            {
+                ASSERT_TRUE(custOpt.has_value());
+                EXPECT_EQ(custOpt->name, "Alice");
+                ++matched;
+            }
+            else if (ord.code == "ORD-GUEST")
+            {
+                EXPECT_FALSE(custOpt.has_value());
+                ++unmatched;
+            }
+        }
+        EXPECT_EQ(matched, 1);
+        EXPECT_EQ(unmatched, 1);
+
+        // Input range overload on DbContextBase::query_children_batch
+        auto rangeChildren = db.query_children_batch<U3Order>(std::array<U3Customer, 1>{ *c1 });
+        ASSERT_TRUE(rangeChildren.has_value()) << rangeChildren.error().to_string();
+        ASSERT_EQ(rangeChildren->size(), 1u);
+        EXPECT_EQ((*rangeChildren)[0].code, "ORD-1");
     }
 
 } // namespace

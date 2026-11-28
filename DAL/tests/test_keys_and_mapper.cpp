@@ -1020,4 +1020,191 @@ namespace
         }
     }
 
+    // =========================================================================
+    // Phase U2: First-Class Modern C++ STL Types, Hashing, Formatting & Ranges
+    // =========================================================================
+
+    enum class U2Priority : std::int32_t
+    {
+        Low = 1,
+        Medium = 2,
+        High = 3
+    };
+
+    struct[[= DAL::Schema::table("U2Events")]] U2Event
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string title;
+        std::chrono::sys_seconds created_at{};
+        std::chrono::sys_time<std::chrono::milliseconds> updated_at{};
+        std::chrono::year_month_day due_date{};
+        std::filesystem::path attachment_path;
+        std::array<std::byte, 16> uuid{};
+        U2Priority priority = U2Priority::Low;
+        std::optional<std::chrono::year_month_day> completed_date;
+    };
+
+    struct U2EventsContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<U2Event> events{ this };
+
+        explicit U2EventsContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(PhaseU2StlTypesTest, ChronoPathFixedBytesAndEnumRoundTripAndQueryPushdown)
+    {
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value());
+        U2EventsContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        const auto day1 = std::chrono::sys_days{ std::chrono::year{ 2026 } / std::chrono::March / std::chrono::day{ 15 } };
+        const auto day2 = std::chrono::sys_days{ std::chrono::year{ 2026 } / std::chrono::April / std::chrono::day{ 20 } };
+        const auto ts1 =
+            std::chrono::sys_seconds{ day1 + std::chrono::hours{ 9 } + std::chrono::minutes{ 30 } + std::chrono::seconds{ 5 } };
+        const auto ts2 =
+            std::chrono::sys_seconds{ day2 + std::chrono::hours{ 18 } + std::chrono::minutes{ 45 } + std::chrono::seconds{ 59 } };
+        const auto ms1 = std::chrono::sys_time<std::chrono::milliseconds>{ ts1 } + std::chrono::milliseconds{ 123 };
+        const auto ms2 = std::chrono::sys_time<std::chrono::milliseconds>{ ts2 } + std::chrono::milliseconds{ 789 };
+
+        std::array<std::byte, 16> uuid1{};
+        std::array<std::byte, 16> uuid2{};
+        for (std::size_t i = 0; i < 16; ++i)
+        {
+            uuid1[i] = static_cast<std::byte>(i + 1);
+            uuid2[i] = static_cast<std::byte>(0xF0 - i);
+        }
+
+        const U2Event e1{
+            .id = 0,
+            .title = "Launch",
+            .created_at = ts1,
+            .updated_at = ms1,
+            .due_date = std::chrono::year{ 2026 } / std::chrono::March / std::chrono::day{ 15 },
+            .attachment_path = std::filesystem::path{ "reports/q1/summary.pdf" },
+            .uuid = uuid1,
+            .priority = U2Priority::High,
+            .completed_date = std::chrono::year{ 2026 } / std::chrono::March / std::chrono::day{ 16 },
+        };
+        const U2Event e2{
+            .id = 0,
+            .title = "Retro",
+            .created_at = ts2,
+            .updated_at = ms2,
+            .due_date = std::chrono::year{ 2026 } / std::chrono::April / std::chrono::day{ 20 },
+            .attachment_path = std::filesystem::path{ "notes/retro.md" },
+            .uuid = uuid2,
+            .priority = U2Priority::Low,
+            .completed_date = std::nullopt,
+        };
+
+        auto added = db.events.add_range_returning(std::array<U2Event, 2>{ e1, e2 });
+        ASSERT_TRUE(added.has_value()) << added.error().to_string();
+        ASSERT_EQ(added->size(), 2u);
+
+        auto loaded1 = db.events.find((*added)[0].id);
+        ASSERT_TRUE(loaded1.has_value());
+        EXPECT_EQ(loaded1->created_at, ts1);
+        EXPECT_EQ(loaded1->updated_at, ms1);
+        EXPECT_EQ(loaded1->due_date, e1.due_date);
+        EXPECT_EQ(loaded1->attachment_path, e1.attachment_path);
+        EXPECT_EQ(loaded1->uuid, uuid1);
+        EXPECT_EQ(loaded1->priority, U2Priority::High);
+        ASSERT_TRUE(loaded1->completed_date.has_value());
+        EXPECT_EQ(*loaded1->completed_date, *e1.completed_date);
+
+        auto loaded2 = db.events.find((*added)[1].id);
+        ASSERT_TRUE(loaded2.has_value());
+        EXPECT_EQ(loaded2->priority, U2Priority::Low);
+        EXPECT_FALSE(loaded2->completed_date.has_value());
+
+        // Verify ISO-8601 UTC TEXT representation in SQLite directly
+        auto rawRows = db.query_rows("SELECT created_at, updated_at, due_date FROM U2Events WHERE id = 1;");
+        ASSERT_TRUE(rawRows.has_value()) << rawRows.error().to_string();
+        ASSERT_EQ(rawRows->rows.size(), 1u);
+        EXPECT_EQ(std::get<std::string>(rawRows->rows[0].cells[0]), "2026-03-15T09:30:05Z");
+        EXPECT_EQ(std::get<std::string>(rawRows->rows[0].cells[1]), "2026-03-15T09:30:05.123Z");
+        EXPECT_EQ(std::get<std::string>(rawRows->rows[0].cells[2]), "2026-03-15");
+
+        // Verify WHERE filtering on sys_seconds, year_month_day, filesystem::path, and enum class
+        const auto cutoff =
+            std::chrono::sys_seconds{ std::chrono::sys_days{ std::chrono::year{ 2026 } / std::chrono::April / std::chrono::day{ 1 } } };
+        auto afterCutoff = db.events.where_gt<"created_at">(cutoff).try_to_vector();
+        ASSERT_TRUE(afterCutoff.has_value()) << afterCutoff.error().to_string();
+        ASSERT_EQ(afterCutoff->size(), 1u);
+        EXPECT_EQ((*afterCutoff)[0].title, "Retro");
+
+        auto highPriority = db.events.where_equal<"priority">(U2Priority::High).try_to_vector();
+        ASSERT_TRUE(highPriority.has_value()) << highPriority.error().to_string();
+        ASSERT_EQ(highPriority->size(), 1u);
+        EXPECT_EQ((*highPriority)[0].title, "Launch");
+
+        auto byPath = db.events.where_equal<"attachment_path">(std::filesystem::path{ "notes/retro.md" }).try_to_vector();
+        ASSERT_TRUE(byPath.has_value()) << byPath.error().to_string();
+        ASSERT_EQ(byPath->size(), 1u);
+        EXPECT_EQ((*byPath)[0].title, "Retro");
+    }
+
+    TEST(PhaseU2StlTypesTest, HashSupportFormattersAndRangesOverloads)
+    {
+        // 1. std::hash for Core::Id, SingleKey, CompositeKey
+        std::unordered_map<Core::PersonId, std::string> idMap;
+        idMap.emplace(Core::PersonId{ 10 }, "Alice");
+        idMap.emplace(Core::PersonId{ 20 }, "Bob");
+        EXPECT_EQ(idMap.at(Core::PersonId{ 10 }), "Alice");
+        EXPECT_EQ(idMap.at(Core::PersonId{ 20 }), "Bob");
+
+        std::unordered_set<Core::SingleKey<int>> singleKeySet;
+        singleKeySet.insert(Core::SingleKey<int>{ 1 });
+        singleKeySet.insert(Core::SingleKey<int>{ 2 });
+        EXPECT_TRUE(singleKeySet.contains(Core::SingleKey<int>{ 1 }));
+        EXPECT_FALSE(singleKeySet.contains(Core::SingleKey<int>{ 3 }));
+
+        std::unordered_map<Core::CompositeKey<int, std::string>, int> compMap;
+        compMap.emplace(Core::CompositeKey<int, std::string>{ 1, "alpha" }, 100);
+        compMap.emplace(Core::CompositeKey<int, std::string>{ 1, "beta" }, 200);
+        EXPECT_EQ(compMap.at(Core::CompositeKey<int, std::string>{ 1, "alpha" }), 100);
+        EXPECT_EQ(compMap.at(Core::CompositeKey<int, std::string>{ 1, "beta" }), 200);
+
+        // 2. std::formatter for DbErrorCode & DbError
+        const auto err = Core::DbError::concurrency_conflict("version mismatch");
+        EXPECT_EQ(std::format("{}", err.code), "ConcurrencyConflict");
+        const std::string formatted = std::format("{}", err);
+        EXPECT_NE(formatted.find("ConcurrencyConflict"), std::string::npos);
+        EXPECT_NE(formatted.find("version mismatch"), std::string::npos);
+
+        // 3. std::ranges::input_range overloads (std::array & std::views::filter)
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value());
+        DAL::DbSet<Core::Person, DAL::Schema::PersonDTO> people(connRes.value());
+        ASSERT_TRUE(connRes.value()->ensure_table_created<DAL::Schema::PersonDTO>().has_value());
+
+        std::array<Core::Person, 3> seed = {
+            Core::Person(Core::PersonId{ 1 }, "Ada", "Lovelace"),
+            Core::Person(Core::PersonId{ 2 }, "Alan", "Turing"),
+            Core::Person(Core::PersonId{ 3 }, "Grace", "Hopper"),
+        };
+        auto filteredView = seed |
+            std::views::filter(
+                                [](const Core::Person& p)
+                                {
+                                    return p.getId().get() != 2;
+                                });
+        ASSERT_TRUE(people.add_range(filteredView).has_value());
+        EXPECT_EQ(people.count(), 2u);
+
+        ASSERT_TRUE(people.upsert_range(seed).has_value());
+        EXPECT_EQ(people.count(), 3u);
+
+        std::array<int, 2> targetIds = { 1, 3 };
+        auto inRangeRes = people.where_in_range<"id">(targetIds).order_by<"id">().try_to_vector();
+        ASSERT_TRUE(inRangeRes.has_value()) << inRangeRes.error().to_string();
+        ASSERT_EQ(inRangeRes->size(), 2u);
+        EXPECT_EQ((*inRangeRes)[0].getFirstName(), "Ada");
+        EXPECT_EQ((*inRangeRes)[1].getFirstName(), "Grace");
+    }
+
 } // namespace

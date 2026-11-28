@@ -348,3 +348,44 @@ struct std::formatter<Core::CompositeKey<KeyTypes...>> : std::formatter<std::str
         return std::formatter<std::string>::format(str, ctx);
     }
 };
+
+// =========================================================================
+// std::hash Specializations
+// =========================================================================
+template<typename KeyType>
+    requires requires(const KeyType& v) {
+        { std::hash<KeyType>{}(v) } -> std::convertible_to<std::size_t>;
+    }
+struct std::hash<Core::SingleKey<KeyType>>
+{
+    [[nodiscard]] std::size_t operator()(const Core::SingleKey<KeyType>& key) const noexcept(noexcept(std::hash<KeyType>{}(key.value)))
+    {
+        return std::hash<KeyType>{}(key.value);
+    }
+};
+
+template<typename... KeyTypes>
+    requires(requires(const KeyTypes& v) {
+        { std::hash<KeyTypes>{}(v) } -> std::convertible_to<std::size_t>;
+    } && ...)
+struct std::hash<Core::CompositeKey<KeyTypes...>>
+{
+    [[nodiscard]] std::size_t operator()(const Core::CompositeKey<KeyTypes...>& key) const
+        noexcept((noexcept(std::hash<KeyTypes>{}(std::declval<const KeyTypes&>())) && ...))
+    {
+        std::size_t seed = 0;
+        std::apply(
+            [&seed](const auto&... parts)
+            {
+                auto mix = [&seed](const auto& part)
+                {
+                    using P = std::remove_cvref_t<decltype(part)>;
+                    const std::size_t h = std::hash<P>{}(part);
+                    seed ^= h + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+                };
+                (mix(parts), ...);
+            },
+            key.values);
+        return seed;
+    }
+};

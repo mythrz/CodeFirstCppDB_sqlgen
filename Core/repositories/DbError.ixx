@@ -10,7 +10,8 @@ export namespace Core
         NotFound,
         DuplicateKey,
         ConnectionError,
-        ConstraintViolation
+        ConstraintViolation,
+        ConcurrencyConflict
     };
 
     struct DbError
@@ -42,6 +43,8 @@ export namespace Core
                 return "ConnectionError";
             case DbErrorCode::ConstraintViolation:
                 return "ConstraintViolation";
+            case DbErrorCode::ConcurrencyConflict:
+                return "ConcurrencyConflict";
             }
             return "Unknown";
         }
@@ -86,6 +89,11 @@ export namespace Core
             return create(DbErrorCode::ConnectionError, std::move(msg));
         }
 
+        [[nodiscard]] static DbError concurrency_conflict(std::string msg = "Optimistic concurrency conflict")
+        {
+            return create(DbErrorCode::ConcurrencyConflict, std::move(msg));
+        }
+
         [[nodiscard]] static DbError unknown(std::string msg = "Unknown database error")
         {
             return create(DbErrorCode::Unknown, std::move(msg));
@@ -126,3 +134,45 @@ export namespace Core
     };
 
 } // namespace Core
+
+template<>
+struct std::formatter<Core::DbErrorCode> : std::formatter<std::string_view>
+{
+    template<typename FormatContext>
+    auto format(Core::DbErrorCode code, FormatContext& ctx) const
+    {
+        std::string_view name = "Unknown";
+        switch (code)
+        {
+        case Core::DbErrorCode::Unknown:
+            name = "Unknown";
+            break;
+        case Core::DbErrorCode::NotFound:
+            name = "NotFound";
+            break;
+        case Core::DbErrorCode::DuplicateKey:
+            name = "DuplicateKey";
+            break;
+        case Core::DbErrorCode::ConnectionError:
+            name = "ConnectionError";
+            break;
+        case Core::DbErrorCode::ConstraintViolation:
+            name = "ConstraintViolation";
+            break;
+        case Core::DbErrorCode::ConcurrencyConflict:
+            name = "ConcurrencyConflict";
+            break;
+        }
+        return std::formatter<std::string_view>::format(name, ctx);
+    }
+};
+
+template<>
+struct std::formatter<Core::DbError> : std::formatter<std::string>
+{
+    template<typename FormatContext>
+    auto format(const Core::DbError& err, FormatContext& ctx) const
+    {
+        return std::formatter<std::string>::format(err.to_string(), ctx);
+    }
+};

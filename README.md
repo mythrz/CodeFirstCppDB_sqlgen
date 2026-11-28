@@ -10,25 +10,30 @@ A C++26 module-based, reflection-driven Code-First ORM and Unit-of-Work library 
 
 ## Quick Start
 
-Zero-boilerplate annotated C++26 entities using P3394 annotations (`[[=DAL::Schema::table]]`, `[[=DAL::Schema::primary_key]]`, `[[=DAL::Schema::references]]`, `[[=DAL::Schema::unique]]`, `[[=DAL::Schema::column]]`):
+Zero-boilerplate annotated C++26 entities using concise P3394 annotations (no `std::define_static_string` needed) and C++26 `^^Entity::field` reflection queries:
 
 ```cpp
+#include <meta>
+
 import std;
 import codefirst.core;
 import codefirst.dal;
 
-struct [[=DAL::Schema::table{ std::define_static_string("Authors") }]] Author
+struct [[=DAL::Schema::table("Authors")]] Author
 {
     [[=DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
     [[=DAL::Schema::unique{}]] std::string handle;
-    std::string name;
+    [[=DAL::Schema::index{}]] std::string name;
+    [[=DAL::Schema::version{}]] std::int64_t row_version = 1;
+    [[=DAL::Schema::ignore{}]] std::string cached_display;
 };
 
-struct [[=DAL::Schema::table{ std::define_static_string("Books") }]] Book
+struct [[=DAL::Schema::table("Books")]] Book
 {
     [[=DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
-    [[=DAL::Schema::references<Author>{ std::define_static_string("id") }]] std::int32_t author_id = 0;
-    [[=DAL::Schema::column{ std::define_static_string("book_title") }]] std::string title;
+    [[=DAL::Schema::references<Author>("id", DAL::Schema::FkAction::Cascade)]] std::int32_t author_id = 0;
+    [[=DAL::Schema::column("book_title")]] std::string title;
+    std::chrono::year_month_day published_on{};
 };
 
 struct LibraryContext : DAL::DbContextBase<DAL::SQLiteConnection>
@@ -44,49 +49,68 @@ struct LibraryContext : DAL::DbContextBase<DAL::SQLiteConnection>
 
 int main()
 {
-    // Use ":memory:" for ephemeral runs, or a file path with idempotent upsert/reopen.
-    auto conn = DAL::SQLiteConnection::connect(":memory:");
+    auto conn = DAL::SQLiteConnection::open_in_memory();
     if (!conn)
     {
-        std::println("Connection failed: {}", conn.error().to_string());
+        std::println("Connection failed: {}", conn.error());
         return 1;
     }
 
     LibraryContext db(*conn);
     if (auto created = db.ensure_created(); !created)
     {
-        std::println("Schema creation failed: {}", created.error().to_string());
+        std::println("Schema creation failed: {}", created.error());
         return 1;
     }
 
-    auto author = db.authors.add_returning(
-        Author{ .id = 0, .handle = "@ada", .name = "Ada Lovelace" });
-    if (!author)
+    auto created_book = db.transaction(
+        DAL::TransactionMode::Immediate,
+        [&]() -> std::expected<Book, Core::DbError>
+        {
+            auto author = db.authors.add_returning(
+                Author{ .id = 0, .handle = "@ada", .name = "Ada Lovelace" });
+            if (!author)
+            {
+                return std::unexpected{ author.error() };
+            }
+            return db.books.add_returning(Book{
+                .id = 0,
+                .author_id = author->id,
+                .title = "Sketch of the Analytical Engine",
+                .published_on = std::chrono::year{ 1843 } / std::chrono::August / std::chrono::day{ 1 },
+            });
+        });
+
+    if (!created_book)
     {
-        std::println("Insert author failed: {}", author.error().to_string());
+        std::println("Transaction failed: {}", created_book.error());
         return 1;
     }
 
-    auto book = db.books.add_returning(
-        Book{ .id = 0, .author_id = author->id, .title = "Sketch of the Analytical Engine" });
-    if (!book)
+    // Type-safe C++26 reflection queries & lazy std::generator streaming
+    for (auto row : db.books.where_iequal<^^Book::title>("sketch of the analytical engine").stream())
     {
-        std::println("Insert book failed: {}", book.error().to_string());
-        return 1;
+        if (row)
+        {
+            std::println("Loaded book: {}", row->title);
+        }
     }
-
-    auto found = db.books.try_find(book->id);
-    if (!found || !found->has_value())
-    {
-        std::println("Lookup failed: {}", found ? "not found" : found.error().to_string());
-        return 1;
-    }
-    std::println("Loaded book: {}", (*found)->title);
     return 0;
 }
 ```
 
 For encapsulated domain entities with strong IDs, separate DTOs, and repository interfaces/implementations, see the reference domain in [Samples/](Samples/) and [Startup/main.cpp](Startup/main.cpp).
+
+## Usability & C++26 Highlights
+
+- **Concise P3394 Schema Annotations:** `[[=table()]]` (defaults to the C++ class name), `[[=table("...")]]`, `[[=column("...")]]`, `[[=primary_key{ true/false }]]`, `[[=unique{}]]`, `[[=ignore{}]]`, `[[=version{}]]` (optimistic concurrency returning `Core::DbErrorCode::ConcurrencyConflict` on stale updates), `[[=index{}]]`, `[[=composite_index("name", "col1, col2")]]`, `[[=default_sql("...")]]`, `[[=check("...")]]`, nullable `std::optional<T>` + `[[=references<Parent>("id", FkAction::SetNull/Cascade/Restrict)]]`, and self-referencing trees via `[[=references_self("id", FkAction::Cascade)]]`.
+- **First-Class Modern C++ STL Types:** Direct persistence and `WHERE` pushdown for `std::chrono::sys_time<Duration>` (ISO-8601 UTC `TEXT`), `std::chrono::year_month_day` (`YYYY-MM-DD`), `std::filesystem::path`, `std::array<std::byte, N>` (exact-length `BLOB`), `enum class` (stored as `std::underlying_type_t`), and `Core::Id<Tag, V>` directly inside annotated structs. Includes `std::hash` specializations for `Core::Id` / `SingleKey` / `CompositeKey`, `std::formatter` for `Core::DbError` / `Core::DbErrorCode`, and `std::ranges::input_range` overloads for batch operations (`add_range`, `add_range_returning`, `upsert_range`, `where_in_range`, `query_*_batch`).
+- **Expressive Querying, Streaming & Joins:**
+  - C++26 `^^Entity::field` NTTP reflection overloads alongside string-literal column names (`where_equal<^^Book::title>`, `order_by<^^Book::id>`, `try_select<^^Book::title>`, `update_where<^^Book::title>`, `group_by<^^Book::author_id>`).
+  - Parenthesized boolean groups (`where_group` / `or_where_group`), case-insensitive & negated pattern predicates (`where_iequal`, `where_icontains`, `where_not_contains`, `where_not_starts_with`, `where_not_ends_with`), `try_single()` / `try_single_or_default()`, and `GROUP BY` aggregations (`group_by<Col>().try_count()` / `try_sum` / `try_avg` / `try_min` / `try_max`).
+  - Bulk `remove_where()` / `update_where()` (and `remove_where_equal` / `update_where_equal`) return `std::expected<std::size_t, Core::DbError>` with the exact affected row count.
+  - Typed ad-hoc SQL hydration (`db.query_as<SummaryRow>(sql, args...)` and `db.stream_as<SummaryRow>(...)`), lazy C++23/26 `std::generator` row streaming (`query.stream()`), and single-query `db.join<Child, Parent>()` / `db.left_join<Child, Parent>()`.
+- **Migrations, Schema Introspection & Operations:** Declarative `db.migrate(steps)` runner, `db.generate_schema_sql()`, `db.verify_schema()` drift detection (`missing_tables`, `missing_columns`, `extra_columns`, `missing_indexes`), `SQLiteConnection::connect(std::filesystem::path, opts)`, `open_in_memory()`, `backup_to()`, `checkpoint_wal()`, `vacuum()`, `integrity_check()`, and parameterized SQL template tracing via `SQLiteConnectionOptions::on_query` / `set_query_tracer(...)`.
 
 ## Module Names & Legacy Aliases
 
@@ -195,9 +219,22 @@ if (auto res = db.save_changes(); !res)
 - **Derived `DbContext` inheritance:** `ensure_created()`, `ensure_deleted()`, `migrate_to()`, and FK navigation helpers (`query_children`, `query_parent`, `query_*_batch`, `query_many_to_many*`) recursively discover inherited `Set<...>` members across `DbContextBase` inheritance hierarchies and honor the exact parent column declared in `sqlgen::ForeignKey` / `[[=references]]`.
 - **Database-generated vs. assigned keys:** Use `add_returning(entity)` (backed by `INSERT ... RETURNING`) for `AUTOINCREMENT` keys (`sqlgen::PrimaryKey<T, true>` / `[[=primary_key{ true }]]`); assign keys up front for manual or composite keys.
 
-## Thread Safety
+## Thread Safety & Connection Pooling
 
-> **Important:** `DAL::DbContextBase`, `DAL::DbSet`, and `DAL::SQLiteConnection` are **not thread-safe**. Create one `DbContext` / connection per thread or unit of work and do not share them across concurrent threads. For multi-connection concurrency on disk, configure `SQLiteConnectionOptions{ .foreign_keys = true, .busy_timeout = ..., .wal_mode = true }`.
+> **Important:** Individual `DAL::DbContextBase`, `DAL::DbSet`, and `DAL::SQLiteConnection` instances are **not thread-safe**; never share a single `DbContext` or `SQLiteConnection` across concurrent threads.
+
+For multi-threaded applications (HTTP servers, worker pools, background jobs), use the built-in thread-safe **`DAL::SQLiteConnectionPool`**, which enables WAL mode and busy timeouts by default, manages bounded RAII connection leases (`PooledConnection`, automatically rolling back any leaked transaction on return), and exposes `pool->with_context<MyContext>([](MyContext& db) { ... })`:
+
+```cpp
+auto pool = DAL::SQLiteConnectionPool::create("app.db", { .min_size = 2, .max_size = 8 });
+auto count = (*pool)->with_context<LibraryContext>(
+    [](LibraryContext& db) -> std::expected<std::size_t, Core::DbError>
+    {
+        return db.books.try_count();
+    });
+```
+
+For manual multi-connection concurrency on disk, configure `SQLiteConnectionOptions{ .foreign_keys = true, .busy_timeout = std::chrono::milliseconds{ 5000 }, .wal_mode = true }` and use `DAL::TransactionMode::Immediate` for write transactions.
 
 ## Building & Testing
 

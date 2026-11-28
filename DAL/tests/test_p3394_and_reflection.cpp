@@ -543,4 +543,228 @@ namespace
         static_assert(!DAL::Mappers::ValidQueryColumn<AmbiguousQueryColsDTO, AmbiguousQueryColsDTO, "userId">);
         SUCCEED();
     }
+
+    // =========================================================================
+    // Phase U1: Ergonomic P3394 Annotations, Nullable/Self FKs, Indexes, Version
+    // =========================================================================
+
+    struct U1AuthorTag
+    {
+    };
+    using U1AuthorId = Core::Id<U1AuthorTag, std::int32_t>;
+
+    struct[[= DAL::Schema::table()]] U1DefaultNamedEntity
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string label;
+        [[= DAL::Schema::ignore{}]] std::string transient_cache = "ephemeral";
+    };
+
+    struct[[= DAL::Schema::table("U1Authors")]][[= DAL::Schema::composite_index("idx_u1_country_name", "country, display_name")]] U1Author
+    {
+        [[= DAL::Schema::primary_key{ true }]] U1AuthorId id{ 0 };
+        [[= DAL::Schema::column("display_name")]][[= DAL::Schema::index{}]] std::string name;
+        std::string country;
+        [[= DAL::Schema::check("age >= 0")]] std::int32_t age = 0;
+        [[= DAL::Schema::default_sql("'active'")]] std::string status = "active";
+        [[= DAL::Schema::ignore{}]] int runtime_score = 42;
+    };
+
+    struct[[= DAL::Schema::table("U1Books")]] U1Book
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string title;
+        [[= DAL::Schema::references<U1Author>("id", DAL::Schema::FkAction::Cascade)]] U1AuthorId author_id{ 0 };
+    };
+
+    struct[[= DAL::Schema::table("U1Departments")]] U1Department
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string name;
+    };
+
+    struct[[= DAL::Schema::table("U1Employees")]] U1Employee
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string name;
+        [[= DAL::Schema::references<U1Department>("id", DAL::Schema::FkAction::SetNull)]] std::optional<std::int32_t> dept_id;
+    };
+
+    struct[[= DAL::Schema::table("U1Categories")]] U1Category
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string name;
+        [[= DAL::Schema::references_self("id", DAL::Schema::FkAction::Cascade)]] std::optional<std::int32_t> parent_id;
+    };
+
+    struct[[= DAL::Schema::table("U1VersionedDocs")]] U1VersionedDoc
+    {
+        [[= DAL::Schema::primary_key{ true }]] std::int32_t id = 0;
+        std::string body;
+        [[= DAL::Schema::version{}]] std::int64_t row_version = 1;
+    };
+
+    struct U1DbContext : DAL::DbContextBase<DAL::SQLiteConnection>
+    {
+        Set<U1DefaultNamedEntity> defaults{ this };
+        Set<U1Author> authors{ this };
+        Set<U1Book> books{ this };
+        Set<U1Department> departments{ this };
+        Set<U1Employee> employees{ this };
+        Set<U1Category> categories{ this };
+        Set<U1VersionedDoc> docs{ this };
+
+        explicit U1DbContext(std::shared_ptr<DAL::SQLiteConnection> c)
+            : DAL::DbContextBase<DAL::SQLiteConnection>(std::move(c))
+        {
+        }
+    };
+
+    TEST(PhaseU1AnnotationsTest, ConciseAnnotationsDefaultTableNameIgnoreIndexesCheckAndStrongId)
+    {
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value()) << connRes.error().to_string();
+        U1DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        // 1. Default [[=table()]] derives table name from class identifier, and [[=ignore{}]] is excluded from schema.
+        auto defCols = db.table_info("U1DefaultNamedEntity");
+        ASSERT_TRUE(defCols.has_value()) << defCols.error().to_string();
+        EXPECT_EQ(defCols->size(), 2u);
+        for (const auto& c : *defCols)
+        {
+            EXPECT_NE(c.name, "transient_cache");
+        }
+        auto addedDef = db.defaults.add_returning(U1DefaultNamedEntity{ .id = 0, .label = "hello", .transient_cache = "dirty" });
+        ASSERT_TRUE(addedDef.has_value()) << addedDef.error().to_string();
+        EXPECT_EQ(addedDef->id, 1);
+        EXPECT_EQ(addedDef->label, "hello");
+        EXPECT_EQ(addedDef->transient_cache, "ephemeral");
+
+        // 2. Concise [[=table("...")]] / [[=column("...")]] / Core::Id PK+FK / [[=index]] / [[=composite_index]] / [[=check]].
+        auto indexes = connRes.value()->list_indexes("U1Authors");
+        ASSERT_TRUE(indexes.has_value()) << indexes.error().to_string();
+        bool foundSingleIdx = false;
+        bool foundCompositeIdx = false;
+        for (const auto& ix : *indexes)
+        {
+            if (ix.name == "idx_U1Authors_display_name")
+            {
+                foundSingleIdx = true;
+            }
+            if (ix.name == "idx_u1_country_name")
+            {
+                foundCompositeIdx = true;
+            }
+        }
+        EXPECT_TRUE(foundSingleIdx);
+        EXPECT_TRUE(foundCompositeIdx);
+
+        // CHECK constraint rejects negative age
+        auto badAuthor = db.authors.add(U1Author{ .id = U1AuthorId{ 0 }, .name = "Bad", .country = "US", .age = -5 });
+        EXPECT_FALSE(badAuthor.has_value());
+        EXPECT_EQ(badAuthor.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        auto author = db.authors.add_returning(U1Author{ .id = U1AuthorId{ 0 }, .name = "Ada", .country = "UK", .age = 36 });
+        ASSERT_TRUE(author.has_value()) << author.error().to_string();
+        EXPECT_EQ(author->id.get(), 1);
+        EXPECT_EQ(author->name, "Ada");
+
+        // Core::Id FK round-trip + ON DELETE CASCADE
+        auto book = db.books.add_returning(U1Book{ .id = 0, .title = "Notes", .author_id = author->id });
+        ASSERT_TRUE(book.has_value()) << book.error().to_string();
+        EXPECT_EQ(book->author_id, author->id);
+
+        auto parentAuthor = db.query_parent<U1Author>(*book);
+        ASSERT_TRUE(parentAuthor.has_value()) << parentAuthor.error().to_string();
+        ASSERT_TRUE(parentAuthor->has_value());
+        EXPECT_EQ((*parentAuthor)->name, "Ada");
+
+        // Deleting author must cascade-delete U1Book
+        ASSERT_TRUE(db.authors.remove(author->id).has_value());
+        EXPECT_EQ(db.books.count(), 0u);
+    }
+
+    TEST(PhaseU1AnnotationsTest, NullableFkSetNullAndSelfReferencingTree)
+    {
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value());
+        U1DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        auto dept = db.departments.add_returning(U1Department{ .id = 0, .name = "R&D" });
+        ASSERT_TRUE(dept.has_value()) << dept.error().to_string();
+
+        // Nullable FK with value AND with nullopt
+        auto e1 = db.employees.add_returning(U1Employee{ .id = 0, .name = "Assigned", .dept_id = dept->id });
+        auto e2 = db.employees.add_returning(U1Employee{ .id = 0, .name = "Contractor", .dept_id = std::nullopt });
+        ASSERT_TRUE(e1.has_value()) << e1.error().to_string();
+        ASSERT_TRUE(e2.has_value()) << e2.error().to_string();
+
+        auto p1 = db.query_parent<U1Department>(*e1);
+        ASSERT_TRUE(p1.has_value() && p1->has_value());
+        EXPECT_EQ((*p1)->name, "R&D");
+
+        auto p2 = db.query_parent<U1Department>(*e2);
+        ASSERT_TRUE(p2.has_value());
+        EXPECT_FALSE(p2->has_value());
+
+        // Deleting department triggers ON DELETE SET NULL
+        ASSERT_TRUE(db.departments.remove(dept->id).has_value());
+        auto e1After = db.employees.find(e1->id);
+        ASSERT_TRUE(e1After.has_value());
+        EXPECT_FALSE(e1After->dept_id.has_value());
+
+        // Self-referencing tree: root -> child, deleting root cascades to child, invalid parent_id fails FK
+        auto root = db.categories.add_returning(U1Category{ .id = 0, .name = "Root", .parent_id = std::nullopt });
+        ASSERT_TRUE(root.has_value()) << root.error().to_string();
+        auto child = db.categories.add_returning(U1Category{ .id = 0, .name = "Child", .parent_id = root->id });
+        ASSERT_TRUE(child.has_value()) << child.error().to_string();
+        auto orphan = db.categories.add(U1Category{ .id = 0, .name = "Bad", .parent_id = 9999 });
+        EXPECT_FALSE(orphan.has_value());
+        EXPECT_EQ(orphan.error().code, Core::DbErrorCode::ConstraintViolation);
+
+        ASSERT_TRUE(db.categories.remove(root->id).has_value());
+        EXPECT_EQ(db.categories.count(), 0u);
+    }
+
+    TEST(PhaseU1AnnotationsTest, OptimisticConcurrencyVersionColumnDetectsStaleOverwrite)
+    {
+        auto connRes = DAL::SQLiteConnection::open_in_memory();
+        ASSERT_TRUE(connRes.has_value());
+        U1DbContext db(connRes.value());
+        ASSERT_TRUE(db.ensure_created().has_value());
+
+        auto created = db.docs.add_returning(U1VersionedDoc{ .id = 0, .body = "v1", .row_version = 1 });
+        ASSERT_TRUE(created.has_value()) << created.error().to_string();
+
+        U1VersionedDoc copyA = *created;
+        U1VersionedDoc copyB = *created;
+
+        copyA.body = "edited-by-A";
+        ASSERT_TRUE(db.docs.update(copyA).has_value());
+
+        auto fresh = db.docs.find(created->id);
+        ASSERT_TRUE(fresh.has_value());
+        EXPECT_EQ(fresh->body, "edited-by-A");
+        EXPECT_EQ(fresh->row_version, 2);
+
+        // Stale copyB still has row_version == 1 -> must fail with ConcurrencyConflict
+        copyB.body = "stale-overwrite-by-B";
+        auto conflictRes = db.docs.update(copyB);
+        ASSERT_FALSE(conflictRes.has_value());
+        EXPECT_EQ(conflictRes.error().code, Core::DbErrorCode::ConcurrencyConflict);
+
+        // Updating with refreshed version == 2 succeeds -> increments to 3
+        fresh->body = "edited-by-B-after-refresh";
+        ASSERT_TRUE(db.docs.update(*fresh).has_value());
+        auto fresh2 = db.docs.find(created->id);
+        ASSERT_TRUE(fresh2.has_value());
+        EXPECT_EQ(fresh2->row_version, 3);
+
+        // Updating a non-existent row still returns NotFound (not ConcurrencyConflict)
+        auto notFoundRes = db.docs.update(U1VersionedDoc{ .id = 999, .body = "ghost", .row_version = 1 });
+        ASSERT_FALSE(notFoundRes.has_value());
+        EXPECT_EQ(notFoundRes.error().code, Core::DbErrorCode::NotFound);
+    }
 } // namespace
