@@ -179,11 +179,9 @@ target_link_libraries(my_app PRIVATE CodeFirstCppDB::Core CodeFirstCppDB::DAL)
 
 ## Security & Hardening
 
-See [SECURITY.md](SECURITY.md) for the full threat model and vulnerability reporting policy.
-
 - **Hardened `SQLiteConnectionOptions` defaults:** `SQLiteConnection::connect(...)` enables `SQLITE_DBCONFIG_DEFENSIVE` (`defensive = true`), disables `TRUSTED_SCHEMA` (`trusted_schema = false`), disables double-quoted string literals (`allow_dqs = false`), disables extension loading (`allow_load_extension = false`), blocks `ATTACH DATABASE` (`max_attached = 0`), and enables `SQLITE_OPEN_NOFOLLOW` (`no_follow = true`). Least-privilege open options are also available: `read_only = true`, `create_if_missing = false`, and (on POSIX) `owner_only_permissions = true` (`0600`).
 - **Safe substring / prefix / suffix filters:** For untrusted user input, use `where_contains`, `where_starts_with`, and `where_ends_with` (plus `or_where_*` variants), which escape `%`, `_`, and `\` using `ESCAPE '\'`. Reserve `where_like` / `where_not_like` for caller-controlled SQL wildcard patterns.
-- **Raw SQL trust boundary:** `execute_raw(...)` runs multi-statement SQL via `sqlite3_exec` and is intended strictly for trusted migration/DDL scripts. For ad-hoc runtime queries, use `query_rows(sql, params)` or `execute_prepared(sql, params)` with single-statement preparation and bound `DAL::DynamicCell` parameters.
+- **Raw SQL usage:** `execute_raw(...)` runs multi-statement SQL via `sqlite3_exec` and is intended strictly for trusted migration/DDL scripts. For ad-hoc parameterized queries, use `query_as<Row>(sql, args...)`, `query_rows(sql, params)`, or `execute_prepared(sql, params)` with single-statement preparation and bound parameters.
 
 ## Unit of Work, Change Tracking & Handle Lifetimes
 
@@ -214,9 +212,9 @@ if (auto res = db.save_changes(); !res)
 
 ## Supported Model Shapes & Identity Strategies
 
-- **Annotated entities (`[[=DAL::Schema::table]]`):** Zero-boilerplate domain structs synthesized into `AnnotatedDto` at compile time, supporting `[[=primary_key{ true/false }]]`, `[[=references<Parent>{ "col" }]]`, `[[=unique{}]]`, `[[=column{ "name" }]]`, composed `[[=references]]` + `[[=unique]]`, and shared `[[=primary_key{ false }]]` + `[[=references]]`. Column/table identifiers must be valid unquoted SQL identifiers (or use an explicit DTO when custom `sqlgen` types/expressions are needed).
+- **Annotated entities (`[[=DAL::Schema::table]]`):** Zero-boilerplate domain structs synthesized into `AnnotatedDto` at compile time, supporting `[[=table()]]` / `[[=table("...")]]`, `[[=primary_key{ true/false }]]`, `[[=references<Parent>("col", FkAction::...)]]`, `[[=references_self("id", FkAction::...)]]`, `[[=unique{}]]`, `[[=column("name")]]`, `[[=ignore{}]]`, `[[=version{}]]`, `[[=index{}]]`, `[[=composite_index("name", "c1, c2")]]`, `[[=default_sql("...")]]`, `[[=check("...")]]`, nullable `std::optional<T>` FKs, composed `[[=references]]` + `[[=unique]]`, and shared `[[=primary_key{ false }]]` + `[[=references]]`. Column/table identifiers must be valid unquoted SQL identifiers (or use an explicit DTO when custom `sqlgen` types/expressions are needed).
 - **Explicit DTOs & encapsulated domains:** Separate domain classes (with strong IDs `Core::Id<Tag, ValueType>` and private fields hydrated via P3096 constructor reflection) paired with a `sqlgen` DTO via `DAL::Schema::SchemaOf<Domain>`.
-- **Derived `DbContext` inheritance:** `ensure_created()`, `ensure_deleted()`, `migrate_to()`, and FK navigation helpers (`query_children`, `query_parent`, `query_*_batch`, `query_many_to_many*`) recursively discover inherited `Set<...>` members across `DbContextBase` inheritance hierarchies and honor the exact parent column declared in `sqlgen::ForeignKey` / `[[=references]]`.
+- **Derived `DbContext` inheritance:** `ensure_created()`, `ensure_deleted()`, `generate_schema_sql()`, `verify_schema()`, `migrate()`, `migrate_to()`, and FK navigation helpers (`query_children`, `query_parent`, `query_*_batch`, `query_many_to_many*`, `join`, `left_join`) recursively discover inherited `Set<...>` members across `DbContextBase` inheritance hierarchies and honor the exact parent column declared in `sqlgen::ForeignKey` / `[[=references]]`.
 - **Database-generated vs. assigned keys:** Use `add_returning(entity)` (backed by `INSERT ... RETURNING`) for `AUTOINCREMENT` keys (`sqlgen::PrimaryKey<T, true>` / `[[=primary_key{ true }]]`); assign keys up front for manual or composite keys.
 
 ## Thread Safety & Connection Pooling

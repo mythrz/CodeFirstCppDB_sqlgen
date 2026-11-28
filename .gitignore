@@ -84,5 +84,8 @@ cmake-build-*/
 Thumbs.db
 
 # -- // --
+SECURITY.md
+ExternalReview.md
+[rR][eE][aA][dD][mM][eE][0-9]*.md
 
 # -- // --
